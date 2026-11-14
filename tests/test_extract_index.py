@@ -139,6 +139,40 @@ def test_rerank_nan_score_does_not_consume_top_k_slot(monkeypatch):
     assert [c.cross_encoder_score for c in reranked] == [0.9, 0.8]
 
 
+def test_rerank_counts_unavailable(monkeypatch, caplog):
+    """rerank counts NaN-scored candidates as rerank_unavailable and warns once each."""
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan")])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
+        ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c"),
+    ]
+
+    with caplog.at_level("WARNING", logger="asago_policy_mapper.extract.index"):
+        reranked = index.rerank("query", candidates, top_k=3)
+
+    assert [c.risk_id for c in reranked] == ["R-B"]
+    assert index.rerank_unavailable == 2
+    skip_warnings = [r for r in caplog.records if "Skipping candidate" in r.message]
+    assert len(skip_warnings) == 2
+
+
+def test_rerank_unavailable_counter_starts_at_zero():
+    index = RiskIndex([])
+    assert index.rerank_unavailable == 0
+
+
+def test_rerank_unavailable_accumulates_across_calls(monkeypatch):
+    """The counter accumulates across rerank calls, not resets per call."""
+    index = _index_with_predict(monkeypatch, [float("nan")])
+    candidates = [ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a")]
+
+    index.rerank("query one", candidates, top_k=1)
+    index.rerank("query two", candidates, top_k=1)
+
+    assert index.rerank_unavailable == 2
+
+
 @pytest.mark.slow
 def test_risk_count(index):
     assert index.risk_count == 5
