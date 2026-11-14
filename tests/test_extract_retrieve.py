@@ -12,6 +12,7 @@ from asago_policy_mapper.extract.retrieve import (
     classify_by_threshold,
     classify_candidates,
     judge_borderline,
+    retrieve_chunk,
 )
 
 
@@ -294,9 +295,61 @@ def test_retrieve_chunk_no_cross_encoder():
     assert len(cr.borderline_judged) == 0
     assert cr.stats["auto_accepted"] == 2
     assert cr.stats["borderline"] == 0
+    assert cr.stats["rerank_unavailable"] == 0
     mock_index.hybrid_search.assert_called_once()
     call_kwargs = mock_index.hybrid_search.call_args
     assert call_kwargs[1]["rrf_min_score"] == 0.01
+
+
+def test_retrieve_chunk_records_rerank_unavailable():
+    """retrieve_chunk reports the chunk's own unscored count as rerank_unavailable.
+
+    The index counter is cumulative across searches, so the chunk stat is the
+    delta across this chunk's hybrid_search call.
+    """
+
+    class _CountingIndex:
+        rerank_unavailable = 0
+
+        def hybrid_search(self, *args, **kwargs):
+            # Two candidates went unscored during this chunk's search.
+            self.rerank_unavailable += 2
+            return [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9)]
+
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, _CountingIndex())
+
+    assert cr.stats["rerank_unavailable"] == 2
+
+
+def test_retrieve_chunk_rerank_unavailable_is_per_search_delta():
+    """A chunk searched after earlier searches reports only its own unscored count."""
+
+    class _CountingIndex:
+        def __init__(self):
+            self.rerank_unavailable = 5  # unscored in earlier searches
+
+        def hybrid_search(self, *args, **kwargs):
+            return [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9)]
+
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, _CountingIndex())
+
+    assert cr.stats["rerank_unavailable"] == 0
+
+
+def test_retrieve_chunk_rerank_unavailable_defaults_to_zero():
+    """Indexes without a rerank_unavailable attribute report zero."""
+    from types import SimpleNamespace as _NS
+
+    index = _NS(hybrid_search=lambda *a, **k: [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a")])
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, index)
+
+    assert cr.stats["rerank_unavailable"] == 0
 
 
 # --- classify_by_rank / classify_by_threshold direct tests ---

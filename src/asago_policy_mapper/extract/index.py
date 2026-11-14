@@ -625,6 +625,9 @@ class RiskIndex:
         self._is_nli: bool = False
         self._apply_sigmoid: bool = False
         self._score_normalizer = _make_score_normalizer(is_nli=False, apply_sigmoid=False)
+        # Candidates the reranker could not score (no answer). Reset per run
+        # by constructing a fresh index; reported as rerank_unavailable.
+        self.unscored_count: int = 0
 
         if not risks:
             self._bi_encoder = None
@@ -699,6 +702,11 @@ class RiskIndex:
     @property
     def cross_encoder(self):
         return self._cross_encoder or self._remote_cross_encoder
+
+    @property
+    def rerank_unavailable(self) -> int:
+        """Candidates the reranker could not score, in chunk stats form."""
+        return self.unscored_count
 
     @property
     def has_colbert(self) -> bool:
@@ -827,6 +835,7 @@ class RiskIndex:
         finite_scored = [(c, score) for c, score in zip(candidates, scores) if np.isfinite(score)]
         for c, score in zip(candidates, scores):
             if not np.isfinite(score):
+                self.unscored_count += 1
                 logger.warning("Skipping candidate %s with invalid score", c.risk_id)
         scored = sorted(finite_scored, key=lambda x: x[1], reverse=True)
         results = []
