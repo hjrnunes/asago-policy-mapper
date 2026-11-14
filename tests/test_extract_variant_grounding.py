@@ -1,8 +1,10 @@
 """Tests for variant-selective grounding (ground_variants + pipeline integration)."""
 
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from conftest import stage_mock_client
 
 from asago_policy_mapper.extract.attribute import ground_variants
@@ -10,8 +12,10 @@ from asago_policy_mapper.extract.index import RiskIndex
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
     LLMCallRecord,
+    RetrievalConfig,
     RetrievalScores,
     RiskMatch,
+    ScoredCandidate,
     _RiskEvidence,
     _RiskEvidenceList,
 )
@@ -19,7 +23,9 @@ from asago_policy_mapper.extract.pipeline import (
     _ground_variants_one,
     _run_expansion,
     _run_variant_grounding,
+    run_extraction,
 )
+from asago_policy_mapper.extract.retrieve import ChunkResult
 from asago_policy_mapper.prompts import render_prompt
 
 # ---------------------------------------------------------------------------
@@ -481,7 +487,7 @@ class TestRunVariantGrounding:
         non_parent = _make_non_parent_match()
         chunks = _make_chunks(["biometric data was processed without consent."])
 
-        result = _run_variant_grounding(
+        result, removed = _run_variant_grounding(
             [parent, non_parent],
             chunks,
             VARIANT_MAP,
@@ -494,6 +500,7 @@ class TestRunVariantGrounding:
         assert non_parent.risk_id in result_ids
         assert VARIANTS[0]["risk_id"] in result_ids
         assert PARENT_ID not in result_ids
+        assert removed == []
 
     def test_variant_inherits_parent_scores(self):
         """Variant matches inherit the parent's retrieval scores."""
@@ -512,7 +519,7 @@ class TestRunVariantGrounding:
         parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence_source": "cross_encoder"})
         chunks = _make_chunks(["health records were accessed."])
 
-        result = _run_variant_grounding(
+        result, removed = _run_variant_grounding(
             [parent],
             chunks,
             VARIANT_MAP,
@@ -547,8 +554,9 @@ class TestRunVariantGrounding:
             None,
         )
 
-        assert len(result) == 1
-        assert result[0].risk_id == non_parent.risk_id
+        assert len(result[0]) == 1
+        assert result[0][0].risk_id == non_parent.risk_id
+        assert result[1] == []
 
     def test_zero_variants_grounded_drops_parent(self):
         """If LLM grounds zero variants, parent is dropped entirely."""
@@ -577,7 +585,8 @@ class TestRunVariantGrounding:
             None,
         )
 
-        assert len(result) == 0
+        assert len(result[0]) == 0
+        assert len(result[1]) == 1
 
     def test_uses_chunk_contexts_when_provided(self):
         """When chunk_contexts is provided, uses padded text instead of raw chunk."""
@@ -657,7 +666,7 @@ def test_expansion_carries_variant_taxonomy_onto_expanded_variant_risks():
         patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_all),
     ):
         index = RiskIndex(catalog)
-        merged, _ = _run_expansion(
+        merged, _, _ = _run_expansion(
             catalog,
             [found],
             [],
@@ -943,11 +952,11 @@ def test_run_expansion_variant_map_routes_through_variant_grounding():
         patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_all),
         patch(
             "asago_policy_mapper.extract.pipeline._run_variant_grounding",
-            side_effect=lambda matches, *a, **k: matches,
+            side_effect=lambda matches, *a, **k: (matches, []),
         ) as variant_grounding,
     ):
         index = RiskIndex(catalog)
-        merged, stats = _run_expansion(
+        merged, stats, _ = _run_expansion(
             catalog,
             [found],
             [],
@@ -992,7 +1001,7 @@ def test_run_expansion_without_candidates_returns_merged_unchanged():
         patch("asago_policy_mapper.extract.pipeline.ground_risk_group") as ground_group,
     ):
         index = RiskIndex(catalog)
-        merged, stats = _run_expansion(
+        merged, stats, _ = _run_expansion(
             catalog,
             [found],
             [],
@@ -1009,3 +1018,381 @@ def test_run_expansion_without_candidates_returns_merged_unchanged():
     ground_group.assert_not_called()
     assert merged == [found]
     assert stats == {"expanded_candidates": 0, "expanded_grounded": 0, "expansion_groups": 0}
+
+
+# ---------------------------------------------------------------------------
+# Removed variant groups: recording (stage grounding)
+# ---------------------------------------------------------------------------
+
+
+def _client_grounding_nothing():
+    """A client whose variant-grounding verdicts ground no variant."""
+    client = MagicMock()
+    client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[_RiskEvidence(risk_id=v["risk_id"], grounded=False, confidence="low", quotes=[]) for v in VARIANTS]
+    )
+    return client
+
+
+def test_removed_group_recorded_with_reason():
+    """A parent whose variants all fail grounding is recorded, not silently dropped."""
+    parent = _make_parent_match(chunk_index=0)
+    chunks = _make_chunks(["Generic data processing discussion."])
+
+    matches, removed = _run_variant_grounding(
+        [parent],
+        chunks,
+        VARIANT_MAP,
+        _client_grounding_nothing(),
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    assert matches == []
+    assert len(removed) == 1
+    record = removed[0]
+    assert record.parent_id == PARENT_ID
+    assert record.stage == "grounding"
+    assert record.reason == "no_variant_grounded"
+    assert record.attempted_variant_ids == [v["risk_id"] for v in VARIANTS]
+
+
+def test_removed_group_recorded_once_per_parent():
+    """Per-chunk parent matches for one group collapse into a single record."""
+    matches, removed = _run_variant_grounding(
+        [_make_parent_match(chunk_index=0), _make_parent_match(chunk_index=1)],
+        _make_chunks(["chunk zero", "chunk one"]),
+        VARIANT_MAP,
+        _client_grounding_nothing(),
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    assert matches == []
+    assert len(removed) == 1
+    assert removed[0].parent_id == PARENT_ID
+
+
+def test_parent_without_evidence_recorded():
+    """A parent match with no evidence spans is recorded with the no-parent-evidence reason."""
+    parent = _make_parent_match(chunk_index=0)
+    parent.evidence = []
+    chunks = _make_chunks(["Some text."])
+
+    matches, removed = _run_variant_grounding(
+        [parent],
+        chunks,
+        VARIANT_MAP,
+        MagicMock(),
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    assert matches == []
+    assert len(removed) == 1
+    record = removed[0]
+    assert record.parent_id == PARENT_ID
+    assert record.reason == "no_parent_evidence"
+    assert record.stage == "grounding"
+    # no variant was ever sent to ground_variants
+    assert record.attempted_variant_ids == []
+
+
+def _client_grounding_chunk(chunk_text_marker, grounded_delay_s=0.0):
+    """A client whose verdicts ground one variant, but only for one chunk's prompt.
+
+    The grounded chunk's answer can be delayed so the rejected chunk always
+    completes first: the completion order the record logic must survive.
+    """
+
+    def _create(**kwargs):
+        messages = kwargs["messages"]
+        user_text = messages[-1]["content"]
+        if chunk_text_marker not in user_text:
+            return _RiskEvidenceList(
+                items=[
+                    _RiskEvidence(risk_id=v["risk_id"], grounded=False, confidence="low", quotes=[]) for v in VARIANTS
+                ]
+            )
+        if grounded_delay_s:
+            time.sleep(grounded_delay_s)
+        return _RiskEvidenceList(
+            items=[_RiskEvidence(risk_id=VARIANTS[0]["risk_id"], grounded=True, confidence="high", quotes=["quote"])]
+        )
+
+    client = MagicMock()
+    client.for_stage = lambda stage: client
+    client.chat.completions.create.side_effect = _create
+    return client
+
+
+def test_removed_group_not_recorded_when_any_chunk_grounded_a_variant():
+    """A parent grounded in one chunk and rejected in another is not recorded as removed.
+
+    The grounding chunk's answer arrives after the rejection, so the
+    empty-grounded result is folded into the outcome first.
+    """
+    chunks = _make_chunks(["chunk zero text", "chunk one text"])
+
+    matches, removed = _run_variant_grounding(
+        [_make_parent_match(chunk_index=0), _make_parent_match(chunk_index=1)],
+        chunks,
+        VARIANT_MAP,
+        _client_grounding_chunk("chunk one text", grounded_delay_s=0.2),
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    # chunk 1 grounded a variant; the parent survives through it
+    assert [m.risk_id for m in matches] == [VARIANTS[0]["risk_id"]]
+    assert removed == []
+
+
+def test_removed_reason_independent_of_completion_order():
+    """The reason and removal stay the same whichever chunk grounds or finishes first."""
+    results = []
+    # each pass swaps which chunk grounds the variant and reverses the
+    # submission order, so the surviving result comes from a different
+    # chunk and a different completion position each time
+    for marker, reverse in (("chunk one text", False), ("chunk zero text", True)):
+        parents = [_make_parent_match(chunk_index=0), _make_parent_match(chunk_index=1)]
+        if reverse:
+            parents = list(reversed(parents))
+        matches, removed = _run_variant_grounding(
+            parents,
+            _make_chunks(["chunk zero text", "chunk one text"]),
+            VARIANT_MAP,
+            _client_grounding_chunk(marker),
+            SimpleNamespace(model="test-model"),
+            None,
+        )
+        results.append((sorted(m.risk_id for m in matches), [(r.reason, r.attempted_variant_ids) for r in removed]))
+
+    # whichever chunk grounded the variant, the parent survives and no
+    # removal is recorded; whichever chunk was rejected, nothing leaked
+    assert results[0] == results[1]
+    assert results[0][0] == [VARIANTS[0]["risk_id"]]
+    assert results[0][1] == []
+
+
+def test_removed_reason_no_parent_evidence_across_mixed_chunks():
+    """Evidence without an attributed chunk counts as no parent evidence, not a variant attempt."""
+    parent_attributed = _make_parent_match(chunk_index=0)
+    parent_unattributed = _make_parent_match(chunk_index=1)
+    # the group stage could not place these quotes; no chunk can ground against them
+    parent_unattributed.evidence = [
+        EvidenceSpan(text="quote", document="doc.md", chunk_index=None, cross_encoder_score=0.5)
+    ]
+
+    matches, removed = _run_variant_grounding(
+        [parent_attributed, parent_unattributed],
+        _make_chunks(["chunk zero text", "chunk one text"]),
+        VARIANT_MAP,
+        _client_grounding_nothing(),
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    # chunk 0 had attributed evidence, so the variants were attempted
+    assert matches == []
+    assert [(r.reason, r.attempted_variant_ids) for r in removed] == [
+        ("no_variant_grounded", [v["risk_id"] for v in VARIANTS])
+    ]
+
+
+def test_parent_with_only_unattributed_evidence_records_no_attempt():
+    """A parent whose evidence names no chunk records no attempted variants."""
+    parent = _make_parent_match(chunk_index=0)
+    parent.evidence = [EvidenceSpan(text="quote", document="doc.md", chunk_index=None, cross_encoder_score=0.5)]
+    client = MagicMock()
+
+    matches, removed = _run_variant_grounding(
+        [parent],
+        _make_chunks(["chunk text"]),
+        VARIANT_MAP,
+        client,
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    assert matches == []
+    assert len(removed) == 1
+    record = removed[0]
+    assert record.reason == "no_parent_evidence"
+    assert record.attempted_variant_ids == []
+    # no variant was ever sent to the model
+    client.chat.completions.create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Removed variant groups: recording (stage expansion)
+# ---------------------------------------------------------------------------
+
+
+def test_expansion_variant_removal_recorded():
+    """Expansion matches that variant grounding removes are recorded with stage expansion."""
+    client = MagicMock()
+    client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[_RiskEvidence(risk_id=v["risk_id"], grounded=False, confidence="low", quotes=[]) for v in VARIANTS]
+    )
+    chunks = _make_chunks(["chunk about data processing"])
+
+    def _ground_all(**kwargs):
+        evidence = [EvidenceSpan(text="quote", document="doc.md", chunk_index=0)]
+        return {r["risk_id"]: (evidence, "medium") for r in kwargs["risks"]}
+
+    found = RiskMatch(
+        risk_id="R-001",
+        risk_name="Model bias",
+        risk_description="Systematic errors.",
+        confidence=0.9,
+        confidence_source="cross_encoder",
+        grounding_confidence="high",
+        accepted_by="threshold",
+        evidence=[EvidenceSpan(text="quote", document="doc.md", chunk_index=0)],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.03),
+    )
+    # the catalog carries the collapsed parent, so expansion can propose it as
+    # a sibling candidate and route it through variant grounding
+    catalog = [
+        _catalog_risk("R-001", "Model bias", "Systematic errors.", "other-taxonomy", "grp"),
+        _catalog_risk(PARENT_ID, PARENT_NAME, PARENT_DESC, "ai-risk-taxonomy", "grp"),
+    ]
+
+    with (
+        patch(
+            "asago_policy_mapper.extract.expand.build_expansion_graph",
+            return_value={"R-001": {PARENT_ID}},
+        ),
+        patch(
+            "asago_policy_mapper.extract.pipeline.ground_risk_group",
+            side_effect=_ground_all,
+        ),
+    ):
+        merged, stats, removed = _run_expansion(
+            catalog,
+            [found],
+            [],
+            chunks,
+            ["doc.md"],
+            SimpleNamespace(get_taxonomy=lambda rid: f"tax-{rid}"),
+            client,
+            SimpleNamespace(model="test-model"),
+            1,
+            None,
+            variant_map=VARIANT_MAP,
+        )
+
+    # the expanded parent went through variant grounding, which grounded nothing
+    assert not any(m.risk_id == PARENT_ID for m in merged)
+    assert len(removed) == 1
+    record = removed[0]
+    assert record.parent_id == PARENT_ID
+    assert record.stage == "expansion"
+    assert record.reason == "no_variant_grounded"
+    assert record.attempted_variant_ids == [v["risk_id"] for v in VARIANTS]
+
+
+# ---------------------------------------------------------------------------
+# Removed variant groups: reconciliation against the final output
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_run_extraction_removed_record_dropped_when_expansion_reenters_variant(mock_config, tmp_path):
+    """A removed group whose variant expansion re-enters carries no record.
+
+    The grounding stage's variant grounder rejects the parent's variant, so
+    the stage records the group as removed; expansion then proposes that
+    variant as a sibling of a found variant of another parent sharing the
+    group, and the group grounder — a different prompt — accepts it. The
+    final output carries the variant, so a record asserting
+    no_variant_grounded would contradict the same document's risks.
+    """
+    q_var = "q-parent---location-data"
+    p_var = "p-parent---biometric-data"
+    catalog = [
+        _catalog_risk("R-001", "Found plain", "A plain found risk.", "test-tax", ""),
+        _catalog_risk(q_var, "Location data", "Location data variant.", "test-tax", "grp"),
+        _catalog_risk(p_var, "Biometric data", "Biometric data variant.", "test-tax", "grp"),
+    ]
+    doc = tmp_path / "policy.md"
+    doc.write_text(
+        "Policy covering sensitive data combinations: location data processing "
+        "and biometric identifiers across processing activities."
+    )
+
+    def _candidate(rid, rank):
+        return ScoredCandidate(
+            risk_id=rid,
+            risk_name=f"name-{rid}",
+            risk_description=f"desc-{rid}",
+            bm25_rank=rank,
+            rrf_score=0.9 / rank,
+            cross_encoder_score=0.9 / rank,
+            accepted_by="threshold",
+            rerank_source="cross_encoder",
+        )
+
+    def _retrieve(chunks, i, index, **kwargs):
+        return ChunkResult(
+            chunk_index=i,
+            source=chunks[i].source,
+            page=chunks[i].page,
+            section=chunks[i].section,
+            accepted=[_candidate(rid, rank) for rank, rid in enumerate(("R-001", "q-parent", "p-parent"), 1)],
+            borderline=[],
+            borderline_judged=[],
+            stats={
+                "candidates_retrieved": 3,
+                "auto_accepted": 3,
+                "borderline": 0,
+                "discarded": 0,
+                "bm25_rescued": 0,
+            },
+        )
+
+    def _ground_evidence(**kwargs):
+        return {
+            c.risk_id: ([EvidenceSpan(text="quote", document="doc.md", chunk_index=0)], "high")
+            for c in kwargs["candidates"]
+        }
+
+    def _variant_ground(**kwargs):
+        # the variant grounder accepts only q's variant; p's is rejected
+        if kwargs["parent_id"] != "q-parent":
+            return {}
+        return {q_var: ([EvidenceSpan(text="quote", document="doc.md", chunk_index=0)], "high")}
+
+    def _ground_group(**kwargs):
+        # the group grounder accepts the re-entered sibling
+        return {
+            r["risk_id"]: ([EvidenceSpan(text="quote", document="doc.md", chunk_index=0)], "medium")
+            for r in kwargs["risks"]
+        }
+
+    with (
+        patch("asago_policy_mapper.extract.index._load_bi_encoder", return_value=(None, None, None)),
+        patch("asago_policy_mapper.extract.index._load_cross_encoder", return_value=(None, None, False, False)),
+        patch("asago_policy_mapper.extract.pipeline.retrieve_chunk", side_effect=_retrieve),
+        patch("asago_policy_mapper.extract.pipeline.ground_and_extract_evidence", side_effect=_ground_evidence),
+        patch("asago_policy_mapper.extract.pipeline.ground_variants", side_effect=_variant_ground),
+        patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_group),
+    ):
+        result = run_extraction(
+            documents=[doc],
+            client=MagicMock(),
+            config=mock_config,
+            risks=catalog,
+            retrieval=RetrievalConfig(query_gen=False, no_judge=True, expand_siblings=True),
+            ocr=False,
+        )
+
+    output_ids = {r.risk_id for r in result.risks}
+    # the re-entered variant stays in the output
+    assert p_var in output_ids
+    # and no record contradicts it
+    contradictory = [r for r in result.removed_variant_groups if set(r.attempted_variant_ids) & output_ids]
+    assert contradictory == []
+    # the stage outcome is visible through the expansion counters
+    assert result.metadata["expansion_stats"]["expanded_grounded"] >= 1
