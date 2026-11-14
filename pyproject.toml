@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 experiments = ["optuna>=4.8.0", "dspy>=2.0"]
+decision = ["httpx>=0.27"]
 
 [project.scripts]
 asago-policy-mapper = "asago_policy_mapper.cli:app"
