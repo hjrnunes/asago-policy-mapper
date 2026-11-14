@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 
+from asago_policy_mapper.extract.calllog import append_numbered
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
     LLMCallRecord,
@@ -58,10 +59,11 @@ def _record_grounding_call(
     grounded_count: int,
     batch_size: int,
 ) -> None:
-    call_id = f"ground-{len([c for c in call_collector if c.stage == 'grounding']) + 1:03d}"
-    call_collector.append(
-        LLMCallRecord(
-            call_id=call_id,
+    append_numbered(
+        call_collector,
+        counts=lambda record: record.stage == "grounding",
+        build=lambda number: LLMCallRecord(
+            call_id=f"ground-{number:03d}",
             stage="grounding",
             chunk_index=chunk_index,
             risk_ids=risk_ids,
@@ -69,7 +71,7 @@ def _record_grounding_call(
             response=[v.model_dump() for v in verdicts],
             duration_ms=duration_ms,
             result_summary=f"{grounded_count}/{batch_size} grounded",
-        )
+        ),
     )
 
 
@@ -182,10 +184,11 @@ def ground_variants(
     result = _verdicts_to_result(verdicts, variant_ids, document, chunk_index, page, section)
 
     if call_collector is not None:
-        call_id = f"ground-variant-{len([c for c in call_collector if c.stage == 'variant_grounding']) + 1:03d}"
-        call_collector.append(
-            LLMCallRecord(
-                call_id=call_id,
+        append_numbered(
+            call_collector,
+            counts=lambda record: record.stage == "variant_grounding",
+            build=lambda number: LLMCallRecord(
+                call_id=f"ground-variant-{number:03d}",
                 stage="variant_grounding",
                 chunk_index=chunk_index,
                 risk_ids=[v["risk_id"] for v in variants],
@@ -193,7 +196,7 @@ def ground_variants(
                 response=[v.model_dump() for v in verdicts],
                 duration_ms=duration_ms,
                 result_summary=(f"{len(result)}/{len(variants)} variants grounded (parent: {parent_id})"),
-            )
+            ),
         )
 
     return result
@@ -235,10 +238,11 @@ def _record_group_call(
     grounded_count: int,
     risk_count: int,
 ) -> None:
-    call_id = f"ground-expand-{len([c for c in call_collector if 'expand' in c.call_id]) + 1:03d}"
-    call_collector.append(
-        LLMCallRecord(
-            call_id=call_id,
+    append_numbered(
+        call_collector,
+        counts=lambda record: "expand" in record.call_id,
+        build=lambda number: LLMCallRecord(
+            call_id=f"ground-expand-{number:03d}",
             stage="grounding",
             chunk_index=chunk_indices[0] if chunk_indices else -1,
             risk_ids=risk_ids,
@@ -246,7 +250,7 @@ def _record_group_call(
             response=[v.model_dump() for v in verdicts],
             duration_ms=duration_ms,
             result_summary=f"{grounded_count}/{risk_count} grounded (expansion)",
-        )
+        ),
     )
 
 
@@ -407,11 +411,12 @@ def synthesize_causal_chain(
     chain = _downgrade_empty_chain(results[0] if results else None, risk_match.risk_id)
 
     if call_collector is not None:
-        call_id = f"causal-{len([c for c in call_collector if c.stage == 'causal_synthesis']) + 1:03d}"
         first_chunk = risk_match.evidence[0].chunk_index if risk_match.evidence else -1
-        call_collector.append(
-            LLMCallRecord(
-                call_id=call_id,
+        append_numbered(
+            call_collector,
+            counts=lambda record: record.stage == "causal_synthesis",
+            build=lambda number: LLMCallRecord(
+                call_id=f"causal-{number:03d}",
                 stage="causal_synthesis",
                 chunk_index=first_chunk,
                 risk_ids=[risk_match.risk_id],
@@ -419,7 +424,7 @@ def synthesize_causal_chain(
                 response=chain.model_dump() if chain else {},
                 duration_ms=duration_ms,
                 result_summary="synthesized" if chain else "retry_exhausted" if retry_exhausted else "empty",
-            )
+            ),
         )
 
     return chain
