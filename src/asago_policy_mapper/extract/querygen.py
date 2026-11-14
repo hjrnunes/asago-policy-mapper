@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from asago_policy_mapper.extract.models import LLMCallRecord
 from asago_policy_mapper.extract.parse import Chunk
-from asago_policy_mapper.llm import SlimModel
+from asago_policy_mapper.llm import SlimModel, llm_stage
 from asago_policy_mapper.prompts import render_prompt
 
 logger = logging.getLogger(__name__)
@@ -83,11 +83,12 @@ def generate_queries(
 
         t0 = time.time()
         try:
-            response = client.chat.completions.create(
-                model=model,
-                response_model=GeneratedQueries,
-                messages=messages,
-            )
+            with llm_stage("query_gen"):
+                response = client.chat.completions.create(
+                    model=model,
+                    response_model=GeneratedQueries,
+                    messages=messages,
+                )
         except Exception:
             logger.warning(
                 "Query generation failed for group section=%s chunks=%s, falling back",

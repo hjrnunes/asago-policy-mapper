@@ -13,7 +13,7 @@ from asago_policy_mapper.extract.models import (
     _CausalChains,
     _RiskEvidenceList,
 )
-from asago_policy_mapper.llm import _OUTPUT_VALIDATION_ERRORS, ValidationRetryExhausted
+from asago_policy_mapper.llm import _OUTPUT_VALIDATION_ERRORS, ValidationRetryExhausted, llm_stage
 from asago_policy_mapper.prompts import render_prompt
 
 logger = logging.getLogger(__name__)
@@ -115,11 +115,12 @@ def ground_and_extract_evidence(
         )
 
         t0 = time.time()
-        verdicts_resp = client.chat.completions.create(
-            model=model,
-            response_model=_RiskEvidenceList,
-            messages=messages,
-        )
+        with llm_stage("grounding"):
+            verdicts_resp = client.chat.completions.create(
+                model=model,
+                response_model=_RiskEvidenceList,
+                messages=messages,
+            )
         verdicts = verdicts_resp.items
         duration_ms = (time.time() - t0) * 1000
 
@@ -172,11 +173,12 @@ def ground_variants(
     )
 
     t0 = time.time()
-    verdicts_resp = client.chat.completions.create(
-        model=model,
-        response_model=_RiskEvidenceList,
-        messages=messages,
-    )
+    with llm_stage("variant_grounding"):
+        verdicts_resp = client.chat.completions.create(
+            model=model,
+            response_model=_RiskEvidenceList,
+            messages=messages,
+        )
     verdicts = verdicts_resp.items
     duration_ms = (time.time() - t0) * 1000
 
@@ -285,11 +287,12 @@ def ground_risk_group(
     )
 
     t0 = time.time()
-    verdicts_resp = client.chat.completions.create(
-        model=model,
-        response_model=_RiskEvidenceList,
-        messages=messages,
-    )
+    with llm_stage("expansion_grounding"):
+        verdicts_resp = client.chat.completions.create(
+            model=model,
+            response_model=_RiskEvidenceList,
+            messages=messages,
+        )
     verdicts = verdicts_resp.items
     duration_ms = (time.time() - t0) * 1000
 
@@ -361,11 +364,12 @@ def _request_causal_chain(
     t0 = time.time()
     retry_exhausted = False
     try:
-        results_resp = client.chat.completions.create(
-            model=model,
-            response_model=_CausalChains,
-            messages=messages,
-        )
+        with llm_stage("causal_synthesis"):
+            results_resp = client.chat.completions.create(
+                model=model,
+                response_model=_CausalChains,
+                messages=messages,
+            )
         results = results_resp.items
     except ValidationRetryExhausted as exc:
         if not _is_output_validation_exhaustion(exc):
