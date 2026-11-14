@@ -202,3 +202,156 @@ def test_judge_context_tokens_recorded():
     plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset({"--judge-context-tokens"}))
     assert plan.judge_context_tokens == 512
     assert plan.warnings == ()
+
+
+def test_warns_only_on_explicit_flags():
+    # --no-judge is redundant with --no-cross-encoder: the judge is already
+    # unreachable, so nothing changes.
+    both = RetrievalConfig(use_cross_encoder=False, no_judge=True)
+    redundant = resolve_plan(both, prefilter=False, explicit=frozenset({"--no-judge", "--no-cross-encoder"}))
+    assert redundant.judge == "none"
+    assert redundant.warnings == (
+        "--no-judge is redundant with --no-cross-encoder: no borderline candidates exist to judge",
+    )
+
+    # The same options passed implicitly produce no warning.
+    implicit = resolve_plan(both, prefilter=False, explicit=frozenset())
+    assert implicit.warnings == ()
+
+    # --expand-siblings is ignored without grounding.
+    ignored = RetrievalConfig(no_grounding=True, expand_siblings=True)
+    expansion_off = resolve_plan(ignored, prefilter=False, explicit=frozenset({"--expand-siblings"}))
+    assert expansion_off.expansion is False
+    assert expansion_off.warnings == (
+        "--expand-siblings is ignored with --no-grounding: expansion needs grounded matches",
+    )
+    assert resolve_plan(ignored, prefilter=False, explicit=frozenset()).warnings == ()
+
+    # --rrf-min-score is ignored in per-chunk cross-encoder mode: the floor
+    # only applies when the cross-encoder is off.
+    floor = RetrievalConfig(query_gen=False)
+    floor_ignored = resolve_plan(floor, prefilter=False, explicit=frozenset({"--rrf-min-score"}))
+    assert floor_ignored.warnings == (
+        "--rrf-min-score is ignored in per-chunk cross-encoder mode: the floor needs --no-cross-encoder",
+    )
+
+    # ...and with the cross-encoder off the floor is honoured, so no warning.
+    floor_used = resolve_plan(
+        RetrievalConfig(query_gen=False, use_cross_encoder=False),
+        prefilter=False,
+        explicit=frozenset({"--rrf-min-score"}),
+    )
+    assert floor_used.warnings == ()
+
+    # --judge-context-tokens is unused while the judge is not "llm".
+    tokens = RetrievalConfig(use_cross_encoder=False, judge_context_tokens=512)
+    tokens_unused = resolve_plan(tokens, prefilter=False, explicit=frozenset({"--judge-context-tokens"}))
+    assert tokens_unused.judge == "none"
+    assert tokens_unused.warnings == ("--judge-context-tokens is unused: the judge does not run as an LLM stage",)
+
+    # ...and honoured while the judge is "llm".
+    tokens_used = resolve_plan(
+        RetrievalConfig(query_gen=False, judge_context_tokens=512),
+        prefilter=False,
+        explicit=frozenset({"--judge-context-tokens"}),
+    )
+    assert tokens_used.judge == "llm"
+    assert tokens_used.warnings == ()
+
+    # An unrelated explicit flag never warns.
+    unrelated = resolve_plan(RetrievalConfig(query_gen=False), prefilter=False, explicit=frozenset({"--top-n-accept"}))
+    assert unrelated.warnings == ()
+
+    # Overlapping flags warn but never change the resolved modes.
+    assert redundant.judge == implicit.judge
+    assert redundant.llm_stages == implicit.llm_stages
+    assert expansion_off.grounding is False
+    assert floor_ignored.rerank == "cross_encoder"
+
+
+def test_warns_non_positive_rrf_min_score():
+    # Without the cross-encoder the floor branch is the only per-chunk
+    # filter: zero and negative values both drop it, but a negative value
+    # also bypasses the default floor on the query-generation searches.
+    zero = resolve_plan(
+        RetrievalConfig(use_cross_encoder=False, rrf_min_score=0.0),
+        prefilter=False,
+        explicit=frozenset({"--rrf-min-score"}),
+    )
+    assert zero.warnings == (
+        "--rrf-min-score is zero: the per-chunk floor is dropped (the rerank path "
+        "returns no candidates without a cross-encoder), and query-generation "
+        "searches fall back to the default floor",
+    )
+
+    negative = resolve_plan(
+        RetrievalConfig(use_cross_encoder=False, rrf_min_score=-0.5),
+        prefilter=False,
+        explicit=frozenset({"--rrf-min-score"}),
+    )
+    assert negative.warnings == (
+        "--rrf-min-score is negative: the floor is dropped and the rerank path "
+        "returns no candidates without a cross-encoder",
+    )
+
+    # Zero without query generation has no fallback to describe.
+    per_chunk_zero = resolve_plan(
+        RetrievalConfig(query_gen=False, use_cross_encoder=False, rrf_min_score=0.0),
+        prefilter=False,
+        explicit=frozenset({"--rrf-min-score"}),
+    )
+    assert per_chunk_zero.warnings == (
+        "--rrf-min-score is zero: the per-chunk floor is dropped and the rerank path returns no candidates",
+    )
+
+    # Not passed explicitly: no warning, the plan just records the value.
+    implicit = resolve_plan(
+        RetrievalConfig(use_cross_encoder=False, rrf_min_score=0.0), prefilter=False, explicit=frozenset()
+    )
+    assert implicit.warnings == ()
+
+
+def test_warns_non_positive_rrf_min_score_with_cross_encoder():
+    # With the cross-encoder on and query generation on, a non-positive
+    # --rrf-min-score neither sets a floor nor changes the per-chunk path.
+    # Zero falls back to the default floor on the query-generation searches;
+    # a negative value bypasses it and gets those searches reranked.
+    zero = resolve_plan(
+        RetrievalConfig(rrf_min_score=0.0),
+        prefilter=False,
+        explicit=frozenset({"--rrf-min-score"}),
+    )
+    assert zero.warnings == (
+        "--rrf-min-score is zero: it sets no floor, leaves the per-chunk path "
+        "unchanged, and query-generation searches fall back to the default floor",
+    )
+
+    negative = resolve_plan(
+        RetrievalConfig(rrf_min_score=-0.5),
+        prefilter=False,
+        explicit=frozenset({"--rrf-min-score"}),
+    )
+    assert negative.warnings == (
+        "--rrf-min-score is negative: it sets no floor, leaves the per-chunk path "
+        "unchanged, and query-generation searches get reranked instead of floored",
+    )
+
+    # Positive values are honoured on the query-generation searches, so no
+    # warning.
+    positive = resolve_plan(
+        RetrievalConfig(rrf_min_score=0.02),
+        prefilter=False,
+        explicit=frozenset({"--rrf-min-score"}),
+    )
+    assert positive.warnings == ()
+
+
+def test_warns_rrf_min_score_ignored_with_colbert():
+    # ColBERT retrieval ignores the RRF floor in every mode.
+    colbert = resolve_plan(
+        RetrievalConfig(colbert_model="colbert-ir", rrf_min_score=0.02),
+        prefilter=False,
+        explicit=frozenset({"--rrf-min-score"}),
+    )
+    assert colbert.rerank == "colbert"
+    assert colbert.warnings == ("--rrf-min-score is ignored with --colbert-model: ColBERT retrieval has no RRF floor",)

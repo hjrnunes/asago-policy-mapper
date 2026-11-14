@@ -73,7 +73,7 @@ def resolve_plan(retrieval: RetrievalConfig, *, prefilter: bool, explicit: froze
         prefilter=prefilter and grounding,
         judge_context_tokens=retrieval.judge_context_tokens,
         llm_stages=_resolve_llm_stages(retrieval, judge),
-        warnings=(),
+        warnings=_resolve_warnings(retrieval, judge, explicit),
     )
 
 
@@ -113,3 +113,73 @@ def _resolve_llm_stages(retrieval: RetrievalConfig, judge: Literal["llm", "auto_
         if not retrieval.no_causal_synthesis:
             stages.append("causal_synthesis")
     return tuple(stages)
+
+
+def _resolve_warnings(
+    retrieval: RetrievalConfig, judge: Literal["llm", "auto_promote", "none"], explicit: frozenset[str]
+) -> tuple[str, ...]:
+    """Warn about explicitly passed options that are redundant or ignored.
+
+    Only options the user actually passed (``explicit``, in dashed CLI form)
+    can warn, and overlaps never change the resolved modes.
+    """
+    warnings: list[str] = []
+    if "--no-judge" in explicit and judge == "none":
+        warnings.append("--no-judge is redundant with --no-cross-encoder: no borderline candidates exist to judge")
+    if "--expand-siblings" in explicit and retrieval.no_grounding:
+        warnings.append("--expand-siblings is ignored with --no-grounding: expansion needs grounded matches")
+    warnings.extend(_rrf_min_score_warnings(retrieval, explicit))
+    if "--judge-context-tokens" in explicit and judge != "llm":
+        warnings.append("--judge-context-tokens is unused: the judge does not run as an LLM stage")
+    return tuple(warnings)
+
+
+def _rrf_min_score_warnings(retrieval: RetrievalConfig, explicit: frozenset[str]) -> list[str]:
+    """Warn when an explicit --rrf-min-score does not behave as a floor.
+
+    On per-chunk retrieval the floor applies only when the cross-encoder is
+    off; every query-generation search applies it while the value is
+    positive. ColBERT retrieval ignores the value entirely.
+    """
+    if "--rrf-min-score" not in explicit:
+        return []
+    if retrieval.colbert_model:
+        return ["--rrf-min-score is ignored with --colbert-model: ColBERT retrieval has no RRF floor"]
+    if not retrieval.use_cross_encoder:
+        return _no_cross_encoder_floor_warnings(retrieval)
+    if not retrieval.query_gen:
+        return ["--rrf-min-score is ignored in per-chunk cross-encoder mode: the floor needs --no-cross-encoder"]
+    if retrieval.rrf_min_score < 0:
+        return [
+            "--rrf-min-score is negative: it sets no floor, leaves the per-chunk path "
+            "unchanged, and query-generation searches get reranked instead of floored"
+        ]
+    if retrieval.rrf_min_score == 0:
+        return [
+            "--rrf-min-score is zero: it sets no floor, leaves the per-chunk path "
+            "unchanged, and query-generation searches fall back to the default floor"
+        ]
+    return []
+
+
+def _no_cross_encoder_floor_warnings(retrieval: RetrievalConfig) -> list[str]:
+    """Warn when an explicit --rrf-min-score drops the per-chunk floor.
+
+    Without the cross-encoder the floor branch is the only per-chunk
+    filter, so a non-positive value sends retrieval down the rerank path,
+    which returns no candidates without a cross-encoder.
+    """
+    if retrieval.rrf_min_score > 0:
+        return []
+    if retrieval.rrf_min_score < 0:
+        return [
+            "--rrf-min-score is negative: the floor is dropped and the rerank path "
+            "returns no candidates without a cross-encoder"
+        ]
+    if retrieval.query_gen:
+        return [
+            "--rrf-min-score is zero: the per-chunk floor is dropped (the rerank path "
+            "returns no candidates without a cross-encoder), and query-generation "
+            "searches fall back to the default floor"
+        ]
+    return ["--rrf-min-score is zero: the per-chunk floor is dropped and the rerank path returns no candidates"]
