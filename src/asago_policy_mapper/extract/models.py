@@ -275,6 +275,15 @@ class DecisionCallRecord(BaseModel):
     decision: DecisionLog | None = None
 
 
+class RemovedVariantGroup(BaseModel):
+    """A collapsed variant group that variant grounding removed from the output."""
+
+    parent_id: str
+    stage: Literal["grounding", "expansion"]
+    reason: Literal["no_variant_grounded", "no_parent_evidence"]
+    attempted_variant_ids: list[str]
+
+
 class ExtractionResult(BaseModel):
     version: str = "0.4"
     risks: list[RiskMatch]
@@ -286,18 +295,22 @@ class ExtractionResult(BaseModel):
     llm_calls: list[LLMCallRecord] = []
     grounding_filtered_candidates: list[FilteredCandidate] = []
     decision_calls: list[DecisionCallRecord] = []
+    removed_variant_groups: list[RemovedVariantGroup] = []
     eval: dict | None = None
 
     @model_serializer(mode="wrap")
-    def _omit_decision_calls_when_off(self, handler) -> dict[str, Any]:
-        """Leave ``decision_calls`` out unless the prefilter recorded any.
+    def _omit_empty_records(self, handler) -> dict[str, Any]:
+        """Leave optional record lists out unless they carry a record.
 
-        With the filter off the list stays empty, and the serialized result
-        must stay byte-identical to the pre-filter output.
+        With a stage off its list stays empty, and the serialized result must
+        stay byte-identical to the pre-change output, so a field only appears
+        when it carries a record.
         """
         data: dict[str, Any] = handler(self)
         if not data.get("decision_calls"):
             data.pop("decision_calls", None)
+        if not data.get("removed_variant_groups"):
+            data.pop("removed_variant_groups", None)
         return data
 
 
