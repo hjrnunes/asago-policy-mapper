@@ -29,6 +29,7 @@ from asago_policy_mapper.extract.models import (
     ExtractionResult,
     FilteredCandidate,
     LLMCallRecord,
+    RemovedVariantGroup,
     RetrievalConfig,
     RetrievalScores,
     RetrievalStats,
@@ -515,7 +516,16 @@ def _run_variant_grounding(
     chunk_contexts=None,
     chunk_context_indices=None,
     max_workers=4,
-):
+    stage="grounding",
+) -> tuple[list[RiskMatch], list[RemovedVariantGroup]]:
+    """Replace parent-level matches with their grounded variants.
+
+    Returns (matches, removed): the surviving matches (non-parent matches
+    plus one match per grounded variant) and one RemovedVariantGroup record
+    per distinct parent group that produced no variant match. Per-chunk
+    matches for the same parent collapse into one record before the merge
+    stage would deduplicate them.
+    """
     parent_matches = []
     non_parent_matches = []
     for m in grounded_matches:
@@ -525,7 +535,7 @@ def _run_variant_grounding(
             non_parent_matches.append(m)
 
     if not parent_matches:
-        return grounded_matches
+        return grounded_matches, []
 
     logger.info(
         "Variant grounding: %d parent matches (%d non-parent matches kept as-is)",
@@ -534,6 +544,7 @@ def _run_variant_grounding(
     )
 
     variant_matches: list[RiskMatch] = []
+    removed: list[RemovedVariantGroup] = []
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(
@@ -572,8 +583,35 @@ def _run_variant_grounding(
                         use_cross_encoder=parent_match.confidence_source != "rrf",
                     ).model_copy(update={"scores_inherited_from": parent_match.risk_id})
                 )
+            if not grounded:
+                _record_removed_group(parent_match, variant_map[parent_match.risk_id], stage, removed)
 
-    return non_parent_matches + variant_matches
+    return non_parent_matches + variant_matches, removed
+
+
+def _record_removed_group(parent_match, variants, stage, removed) -> None:
+    """Append one removal record unless this parent group already has one.
+
+    A parent without evidence never reaches ground_variants, so its record
+    lists no attempted variant ids.
+    """
+    parent_id = parent_match.risk_id
+    if any(r.parent_id == parent_id for r in removed):
+        return
+    if not parent_match.evidence:
+        reason = "no_parent_evidence"
+        attempted: list[str] = []
+    else:
+        reason = "no_variant_grounded"
+        attempted = [v["risk_id"] for v in variants]
+    removed.append(
+        RemovedVariantGroup(
+            parent_id=parent_id,
+            stage=stage,
+            reason=reason,
+            attempted_variant_ids=attempted,
+        )
+    )
 
 
 def _run_judge(
@@ -852,7 +890,13 @@ def _run_expansion(
     chunk_contexts=None,
     prefilter_drops: list[FilteredCandidate] | None = None,
     chunk_context_indices=None,
-) -> tuple[list[RiskMatch], dict]:
+) -> tuple[list[RiskMatch], dict, list[RemovedVariantGroup]]:
+    """Expand to sibling risks, ground them, and record removed variant groups.
+
+    Returns (merged, stats, removed): the possibly expanded merged list, the
+    expansion stats, and the removal records for variant groups the expansion
+    path's variant grounding dropped.
+    """
     stats = {"expanded_candidates": 0, "expanded_grounded": 0, "expansion_groups": 0}
     dropped_ids, parent_members = (
         _prefilter_dropped_catalog(prefilter_drops, variant_map)
@@ -872,7 +916,7 @@ def _run_expansion(
     if not expanded:
         if dropped_ids:
             stats["prefilter_reentered_grounded"] = 0
-        return merged, stats
+        return merged, stats, []
 
     logger.info(
         "Expansion: %d sibling candidates in %d groups (%d passes)",
@@ -887,8 +931,9 @@ def _run_expansion(
     if dropped_ids:
         stats["prefilter_reentered_grounded"] = len({m.risk_id for m in expansion_matches} & dropped_ids)
 
+    removed: list[RemovedVariantGroup] = []
     if expansion_matches and variant_map:
-        expansion_matches = _run_variant_grounding(
+        expansion_matches, removed = _run_variant_grounding(
             expansion_matches,
             chunks,
             variant_map,
@@ -898,12 +943,13 @@ def _run_expansion(
             chunk_contexts=chunk_contexts,
             chunk_context_indices=chunk_context_indices,
             max_workers=max_workers,
+            stage="expansion",
         )
 
     if expansion_matches:
         merged = merge_matches(merged + expansion_matches)
 
-    return merged, stats
+    return merged, stats, removed
 
 
 def _run_causal_synthesis(merged, chunks, client, config, max_workers, call_collector):
@@ -1500,8 +1546,11 @@ def _run_variant_grounding_stage(
     chunk_context_indices,
     max_workers,
     timing,
-):
-    """Variant-ground grounded matches when variants and a client are present."""
+) -> tuple[list[RiskMatch], list[RemovedVariantGroup]]:
+    """Variant-ground grounded matches when variants and a client are present.
+
+    Returns the (possibly variant-grounded) matches and the removal records.
+    """
     if index.variant_map and plan.grounding and client is not None:
         with timed(timing, "variant_grounding_ms"):
             return _run_variant_grounding(
@@ -1515,7 +1564,7 @@ def _run_variant_grounding_stage(
                 chunk_context_indices=chunk_context_indices,
                 max_workers=max_workers,
             )
-    return all_matches
+    return all_matches, []
 
 
 def _run_expansion_stage(
@@ -1535,17 +1584,19 @@ def _run_expansion_stage(
     max_workers,
     timing,
     prefilter_drops=None,
-) -> tuple[list, dict]:
+) -> tuple[list, dict, list[RemovedVariantGroup]]:
     """Expand to sibling risks and ground them; grounded runs only.
 
-    Returns the (possibly expanded) merged list and the expansion stats; the
-    counters stay at zero when the stage is skipped. ``prefilter_drops``
-    carries the prefilter's drop records, whose ids the expansion counts
-    when it proposes them again.
+    Returns the (possibly expanded) merged list, the expansion stats and the
+    removed-variant-group records; the counters stay at zero and the records
+    empty when the stage is skipped. ``prefilter_drops`` carries the
+    prefilter's drop records, whose ids the expansion counts when it proposes
+    them again.
+    """
     """
     if plan.expansion and client is not None:
         with timed(timing, "expansion_ms"):
-            merged, expansion_stats = _run_expansion(
+            merged, expansion_stats, removed = _run_expansion(
                 risks,
                 merged,
                 chunk_results,
@@ -1562,8 +1613,8 @@ def _run_expansion_stage(
                 prefilter_drops=prefilter_drops,
                 chunk_context_indices=chunk_context_indices,
             )
-            return merged, expansion_stats
-    return merged, _EMPTY_EXPANSION_STATS.copy()
+            return merged, expansion_stats, removed
+    return merged, _EMPTY_EXPANSION_STATS.copy(), []
 
 
 def _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing):
@@ -1725,7 +1776,7 @@ def run_extraction(
     )
     all_filtered = prefilter_drops + all_filtered
 
-    all_matches = _run_variant_grounding_stage(
+    all_matches, removed_variant_groups = _run_variant_grounding_stage(
         all_matches,
         chunks,
         index,
@@ -1747,7 +1798,7 @@ def run_extraction(
     with timed(timing, "merge_ms"):
         merged = merge_matches(all_matches)
 
-    merged, expansion_stats = _run_expansion_stage(
+    merged, expansion_stats, expansion_removed = _run_expansion_stage(
         merged,
         risks,
         chunk_results,
@@ -1765,6 +1816,7 @@ def run_extraction(
         timing,
         prefilter_drops=prefilter_drops or None,
     )
+    removed_variant_groups.extend(expansion_removed)
 
     merged = _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing)
 
@@ -1788,6 +1840,7 @@ def run_extraction(
         llm_calls=call_collector,
         grounding_filtered_candidates=all_filtered,
         decision_calls=decision_calls,
+        removed_variant_groups=removed_variant_groups,
     )
 
 
