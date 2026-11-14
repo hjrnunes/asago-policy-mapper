@@ -114,6 +114,31 @@ def test_empty_risks():
     assert index.hybrid_search("anything", top_k=5) == []
 
 
+def _index_with_predict(monkeypatch, score_sequence):
+    """Build an empty index whose remote reranker returns a fixed score vector."""
+    index = RiskIndex([])
+    # The generative remote reranker uses the default clip normalizer, which
+    # preserves NaN; rerank's handling is what this pin exercises.
+    remote = SimpleNamespace(predict=lambda pairs: np.array(score_sequence[: len(pairs)], dtype=np.float64))
+    monkeypatch.setattr(index, "_remote_cross_encoder", remote)
+    return index
+
+
+def test_rerank_nan_score_does_not_consume_top_k_slot(monkeypatch):
+    """A NaN (no-answer) candidate must not displace a valid candidate from top_k."""
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, 0.8])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a", cross_encoder_score=0.5),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b", cross_encoder_score=0.5),
+        ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c", cross_encoder_score=0.5),
+    ]
+
+    reranked = index.rerank("query", candidates, top_k=2)
+
+    assert [c.risk_id for c in reranked] == ["R-B", "R-C"]
+    assert [c.cross_encoder_score for c in reranked] == [0.9, 0.8]
+
+
 @pytest.mark.slow
 def test_risk_count(index):
     assert index.risk_count == 5
