@@ -10,7 +10,25 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCRIPT = Path(__file__).parent.parent / "scripts" / "eval_prefilter.py"
+import pytest
+
+# The mutmut sandbox and the sandbox-isolation canary copy tests/ without
+# scripts/. Fall back to the enclosing checkout's scripts/ so ordinary
+# mutmut runs keep collecting this module, which covers mutated src/ code
+# through the replay assessor. Skip only when scripts/ exists nowhere, as
+# in the canary's scratch copy. Appending (not inserting) keeps any path
+# mutmut itself puts ahead, such as mutants/src, in charge of imports.
+for _scripts_dir in (
+    Path(__file__).resolve().parent.parent / "scripts",
+    Path(__file__).resolve().parent.parent.parent / "scripts",
+):
+    if (_scripts_dir / "eval_prefilter.py").is_file():
+        if str(_scripts_dir.parent) not in sys.path:
+            sys.path.append(str(_scripts_dir.parent))
+        SCRIPT = _scripts_dir / "eval_prefilter.py"
+        break
+else:
+    pytest.skip("scripts/ is not present in this checkout", allow_module_level=True)
 
 TUNING_POLICIES = {"tune-a", "tune-b"}
 HELD_OUT_POLICIES = {"hold-a", "hold-b"}
