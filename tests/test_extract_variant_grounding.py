@@ -3,21 +3,29 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from asago_policy_mapper.extract.attribute import ground_variants
 from asago_policy_mapper.extract.index import RiskIndex
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
     LLMCallRecord,
+    RetrievalConfig,
     RetrievalScores,
     RiskMatch,
+    ScoredCandidate,
     _RiskEvidence,
     _RiskEvidenceList,
 )
 from asago_policy_mapper.extract.pipeline import (
+    PipelineInvariantError,
+    _assert_no_synthetic_parents,
     _ground_variants_one,
     _run_expansion,
     _run_variant_grounding,
+    run_extraction,
 )
+from asago_policy_mapper.extract.retrieve import ChunkResult
 from asago_policy_mapper.prompts import render_prompt
 
 # ---------------------------------------------------------------------------
@@ -1155,3 +1163,105 @@ def test_expansion_variant_removal_recorded():
     assert record.stage == "expansion"
     assert record.reason == "no_variant_grounded"
     assert record.attempted_variant_ids == [v["risk_id"] for v in VARIANTS]
+
+
+# ---------------------------------------------------------------------------
+# Removed variant groups: the output invariant
+# ---------------------------------------------------------------------------
+
+
+def test_invariant_raises_on_leaked_parent():
+    """A variant-map key reaching the output raises PipelineInvariantError."""
+    merged = [_make_parent_match(chunk_index=0)]
+
+    with pytest.raises(PipelineInvariantError, match=PARENT_ID):
+        _assert_no_synthetic_parents(merged, VARIANT_MAP)
+
+
+def test_invariant_skipped_without_variants():
+    """With an empty variant map the invariant does not fire, even for parent-like ids."""
+    merged = [_make_parent_match(chunk_index=0)]
+
+    # No exception: the empty map means the run never collapsed variants.
+    _assert_no_synthetic_parents(merged, {})
+
+
+def test_invariant_skipped_without_grounding():
+    """Ungrounded runs expand parents to variants, so the invariant is off."""
+    merged = [_make_parent_match(chunk_index=0)]
+
+    # No exception: no_grounding runs emit expanded variants, not parents.
+    _assert_no_synthetic_parents(merged, VARIANT_MAP, grounding=False)
+
+
+@pytest.mark.slow
+def test_run_extraction_invariant_fires_on_leaked_parent(mock_config, tmp_path):
+    """A parent that survives variant grounding fails the run at the invariant."""
+    catalog = [
+        _catalog_risk("R-001", "Model bias", "Systematic errors.", "other-taxonomy", ""),
+        *[_catalog_risk(v["risk_id"], v["name"], v["description"], v["taxonomy"], "grp") for v in VARIANTS],
+    ]
+    doc = tmp_path / "policy.md"
+    doc.write_text(
+        "Policy covering unauthorized processing of biometric and location data "
+        "across all processing activities the organization undertakes."
+    )
+    parent_candidate = ScoredCandidate(
+        risk_id=PARENT_ID,
+        risk_name=PARENT_NAME,
+        risk_description=PARENT_DESC,
+        bm25_rank=1,
+        rrf_score=0.9,
+        cross_encoder_score=0.9,
+    )
+
+    def _retrieve_parent(chunks, i, index, **kwargs):
+        return ChunkResult(
+            chunk_index=i,
+            source=chunks[i].source,
+            page=chunks[i].page,
+            section=chunks[i].section,
+            accepted=[parent_candidate],
+            borderline=[],
+            borderline_judged=[],
+            stats={
+                "candidates_retrieved": 1,
+                "auto_accepted": 1,
+                "borderline": 0,
+                "discarded": 0,
+                "bm25_rescued": 0,
+            },
+        )
+
+    def _ground_nothing(**kwargs):
+        return {}
+
+    with (
+        patch("asago_policy_mapper.extract.index._load_bi_encoder", return_value=(None, None, None)),
+        patch("asago_policy_mapper.extract.index._load_cross_encoder", return_value=(None, None, False, False)),
+        # retrieval surfaces the collapsed parent; grounding accepts it; a
+        # broken variant stage passes it through untouched — exactly the leak
+        # the invariant exists to catch
+        patch("asago_policy_mapper.extract.pipeline.retrieve_chunk", side_effect=_retrieve_parent),
+        patch(
+            "asago_policy_mapper.extract.pipeline.ground_and_extract_evidence",
+            side_effect=lambda **kwargs: {
+                c.risk_id: ([EvidenceSpan(text="quote", document="doc.md", chunk_index=0)], "high")
+                for c in kwargs["candidates"]
+            },
+        ),
+        patch(
+            "asago_policy_mapper.extract.pipeline._run_variant_grounding",
+            side_effect=lambda matches, *a, **k: (matches, []),
+        ),
+        patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_nothing),
+    ):
+        with pytest.raises(PipelineInvariantError, match="unauthorized-processing"):
+            run_extraction(
+                documents=[doc],
+                client=MagicMock(),
+                config=mock_config,
+                risks=catalog,
+                retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+                ocr=False,
+            )

@@ -109,6 +109,27 @@ def timed(timing, key):
         timing[key] = (time.time() - t0) * 1000
 
 
+class PipelineInvariantError(RuntimeError):
+    """A pipeline output invariant failed: the result would be wrong."""
+
+
+def _assert_no_synthetic_parents(merged, variant_map, *, grounding: bool = True) -> None:
+    """Raise when a synthetic parent risk id would reach the output.
+
+    The check uses the variant map's keys — the collapsed parent ids — rather
+    than guessing from the ``---`` delimiter, so it only fires on ids the run
+    actually collapsed. It runs only when variants were collapsed and
+    grounding is on: ungrounded runs emit the expanded variants directly, and
+    a run without collapsed variants has nothing to check.
+    """
+    if not variant_map or not grounding:
+        return
+    parent_ids = set(variant_map)
+    leaked = [m.risk_id for m in merged if m.risk_id in parent_ids]
+    if leaked:
+        raise PipelineInvariantError(f"Synthetic parent risk ids reached the output: {sorted(set(leaked))}")
+
+
 _AGENTIC_PHRASES = {
     "agentic",
     "ai agent",
@@ -1819,6 +1840,8 @@ def run_extraction(
     removed_variant_groups.extend(expansion_removed)
 
     merged = _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing)
+
+    _assert_no_synthetic_parents(merged, index.variant_map, grounding=not retrieval.no_grounding)
 
     total_stats = _build_retrieval_stats(
         chunk_results,
