@@ -533,11 +533,42 @@ class TestRunVariantGrounding:
         assert variant.risk_name == VARIANTS[1]["name"]
         assert variant.taxonomy == "ai-risk-taxonomy"
         assert variant.scores.bm25_rank == parent.scores.bm25_rank
+        assert variant.scores.embedding_distance == parent.scores.embedding_distance
         assert variant.scores.cross_encoder_score == parent.scores.cross_encoder_score
         assert variant.scores.rrf_score == parent.scores.rrf_score
         assert variant.accepted_by == parent.accepted_by
         assert variant.grounding_confidence == "medium"
         assert variant.scores_inherited_from == parent.risk_id
+
+    def test_variant_without_taxonomy_entry_gets_empty_taxonomy(self):
+        """A variant entry lacking a taxonomy key yields an empty-string taxonomy."""
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+            items=[
+                _RiskEvidence(
+                    risk_id=VARIANTS[0]["risk_id"],
+                    grounded=True,
+                    confidence="high",
+                    quotes=["biometric data"],
+                ),
+            ]
+        )
+        bare_variants = [{k: v for k, v in VARIANTS[0].items() if k != "taxonomy"}]
+        parent = _make_parent_match(chunk_index=0)
+        chunks = _make_chunks(["biometric data processing."])
+
+        result, removed = _run_variant_grounding(
+            [parent],
+            chunks,
+            {PARENT_ID: bare_variants},
+            mock_client,
+            self._make_config(),
+            None,
+        )
+
+        assert len(result) == 1
+        assert result[0].risk_id == VARIANTS[0]["risk_id"]
+        assert result[0].taxonomy == ""
 
     def test_no_parents_returns_unchanged(self):
         """When no parent matches exist, returns input unchanged."""
@@ -1153,9 +1184,11 @@ def test_expansion_variant_removal_recorded():
             1,
             None,
             variant_map=VARIANT_MAP,
+            chunk_contexts=["expanded context text"],
         )
 
-    # the expanded parent went through variant grounding, which grounded nothing
+    # the expanded parent went through the real variant grounding, which
+    # grounded nothing, so the parent is gone and the removal is recorded
     assert not any(m.risk_id == PARENT_ID for m in merged)
     assert len(removed) == 1
     record = removed[0]
@@ -1163,6 +1196,66 @@ def test_expansion_variant_removal_recorded():
     assert record.stage == "expansion"
     assert record.reason == "no_variant_grounded"
     assert record.attempted_variant_ids == [v["risk_id"] for v in VARIANTS]
+
+
+def test_expansion_forwards_run_context_to_variant_grounding():
+    """The expansion call passes the run's chunks, client, workers and contexts on."""
+    client = MagicMock()
+    chunks = _make_chunks(["chunk about data processing"])
+    found = RiskMatch(
+        risk_id="R-001",
+        risk_name="Model bias",
+        risk_description="Systematic errors.",
+        confidence=0.9,
+        grounding_confidence="high",
+        accepted_by="threshold",
+        evidence=[EvidenceSpan(text="quote", document="doc.md", chunk_index=0)],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.03),
+    )
+    catalog = [
+        _catalog_risk("R-001", "Model bias", "Systematic errors.", "other-taxonomy", "grp"),
+        _catalog_risk("unrelated-parent", "Unrelated", "A collapsible parent.", "other-taxonomy", "grp"),
+    ]
+    variant_map = {"unrelated-parent": [{"risk_id": "unrelated-parent---a", "name": "", "description": ""}]}
+
+    def _ground_all(**kwargs):
+        evidence = [EvidenceSpan(text="quote", document="doc.md", chunk_index=0)]
+        return {r["risk_id"]: (evidence, "medium") for r in kwargs["risks"]}
+
+    with (
+        patch(
+            "asago_policy_mapper.extract.expand.build_expansion_graph",
+            return_value={"R-001": {"unrelated-parent"}},
+        ),
+        patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_all),
+        patch(
+            "asago_policy_mapper.extract.pipeline._run_variant_grounding",
+            return_value=([], []),
+        ) as variant_grounding,
+    ):
+        _run_expansion(
+            catalog,
+            [found],
+            [],
+            chunks,
+            ["doc.md"],
+            SimpleNamespace(get_taxonomy=lambda rid: f"tax-{rid}"),
+            client,
+            SimpleNamespace(model="test-model"),
+            3,
+            None,
+            variant_map=variant_map,
+            chunk_contexts=["expanded context text"],
+        )
+
+    call = variant_grounding.call_args
+    assert call.args[1] is chunks
+    assert call.args[2] is variant_map
+    assert call.args[3] is client
+    assert call.args[4].model == "test-model"
+    assert call.kwargs["max_workers"] == 3
+    assert call.kwargs["chunk_contexts"] == ["expanded context text"]
+    assert call.kwargs["stage"] == "expansion"
 
 
 # ---------------------------------------------------------------------------

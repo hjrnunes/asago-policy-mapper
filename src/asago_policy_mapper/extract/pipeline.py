@@ -584,10 +584,7 @@ def _run_variant_grounding(
         for future in as_completed(futures):
             parent_match, grounded = future.result()
             for vid, (evidence, confidence) in grounded.items():
-                vinfo = next(
-                    (v for v in variant_map[parent_match.risk_id] if v["risk_id"] == vid),
-                    None,
-                )
+                vinfo = _variant_info(variant_map[parent_match.risk_id], vid)
                 if not vinfo:
                     continue
                 stub = _variant_stub(vid, vinfo, parent_match)
@@ -608,6 +605,14 @@ def _run_variant_grounding(
                 _record_removed_group(parent_match, variant_map[parent_match.risk_id], stage, removed)
 
     return non_parent_matches + variant_matches, removed
+
+
+def _variant_info(variants, variant_id):
+    """Look up one variant's metadata by risk id; None when absent."""
+    for v in variants:
+        if v["risk_id"] == variant_id:
+            return v
+    return None
 
 
 def _record_removed_group(parent_match, variants, stage, removed) -> None:
@@ -1613,7 +1618,6 @@ def _run_expansion_stage(
     empty when the stage is skipped. ``prefilter_drops`` carries the
     prefilter's drop records, whose ids the expansion counts when it proposes
     them again.
-    """
     """
     if plan.expansion and client is not None:
         with timed(timing, "expansion_ms"):
