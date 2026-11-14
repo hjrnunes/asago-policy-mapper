@@ -138,11 +138,11 @@ class TestShorteningRecord:
                 return httpx.Response(200, json=_length_truncated_body())
             return httpx.Response(200, json=_completion_body('{"items": []}'))
 
-        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch(
             "asago_policy_mapper.llm.OpenAI",
-            lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+            lambda **kw: openai.OpenAI(http_client=http_client, **kw),
         ):
             client = create_client(config)
 
@@ -179,11 +179,11 @@ class TestShorteningRecord:
                 return httpx.Response(200, json=_length_truncated_body())
             return httpx.Response(200, json=_completion_body('{"answer": "ok"}'))
 
-        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch(
             "asago_policy_mapper.llm.OpenAI",
-            lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+            lambda **kw: openai.OpenAI(http_client=http_client, **kw),
         ):
             client = create_client(config)
 
@@ -218,11 +218,11 @@ class TestShorteningRecord:
                 return httpx.Response(200, json=_length_truncated_body())
             return httpx.Response(200, json=_completion_body('{"answer": "ok"}'))
 
-        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch(
             "asago_policy_mapper.llm.OpenAI",
-            lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+            lambda **kw: openai.OpenAI(http_client=http_client, **kw),
         ):
             client = create_client(config)
 
@@ -258,11 +258,11 @@ class TestShorteningRecord:
             requests.append(json.loads(request.read()))
             return httpx.Response(200, json=_length_truncated_body())
 
-        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch(
             "asago_policy_mapper.llm.OpenAI",
-            lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+            lambda **kw: openai.OpenAI(http_client=http_client, **kw),
         ):
             client = create_client(config)
 
@@ -300,9 +300,11 @@ class TestShorteningRecord:
             http_client = httpx.Client(transport=httpx.MockTransport(handler))
             with patch(
                 "asago_policy_mapper.llm.OpenAI",
-                lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+                lambda **kw: openai.OpenAI(http_client=http_client, **kw),
             ):
-                clients[name] = create_client(LLMConfig(base_url="http://localhost:8000/v1", model="test-model"))
+                clients[name] = create_client(
+                    LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
+                )
 
         def worker(name: str, content: str) -> None:
             clients[name].chat.completions.create(
@@ -344,9 +346,11 @@ class TestRecordHelpersCopyShortenings:
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch(
             "asago_policy_mapper.llm.OpenAI",
-            lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+            lambda **kw: openai.OpenAI(http_client=http_client, **kw),
         ):
-            real_client = create_client(LLMConfig(base_url="http://localhost:8000/v1", model="test-model"))
+            real_client = create_client(
+                LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
+            )
         client.chat.completions.create = real_client.chat.completions.create
 
         candidates = [
@@ -430,9 +434,11 @@ class TestRecordHelpersCopyShortenings:
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch(
             "asago_policy_mapper.llm.OpenAI",
-            lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+            lambda **kw: openai.OpenAI(http_client=http_client, **kw),
         ):
-            client = create_client(LLMConfig(base_url="http://localhost:8000/v1", model="test-model"))
+            client = create_client(
+                LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
+            )
 
         collector: list[LLMCallRecord] = []
         chain = synthesize_causal_chain(
@@ -461,11 +467,11 @@ class TestIncidentsCarryCharCounts:
             return httpx.Response(200, json=_length_truncated_body())
 
         tracker = TokenTracker()
-        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch(
             "asago_policy_mapper.llm.OpenAI",
-            lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+            lambda **kw: openai.OpenAI(http_client=http_client, **kw),
         ):
             client = create_client(config, tracker=tracker)
 
@@ -518,11 +524,11 @@ class TestIncidentsCarryCharCounts:
             return httpx.Response(200, json=_length_truncated_body())
 
         tracker = TokenTracker()
-        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch(
             "asago_policy_mapper.llm.OpenAI",
-            lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+            lambda **kw: openai.OpenAI(http_client=http_client, **kw),
         ):
             client = create_client(config, tracker=tracker)
 
@@ -553,7 +559,7 @@ class TestIncidentsCarryCharCounts:
         single incident must carry its character count, not just prose.
         """
         tracker = TokenTracker()
-        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+        config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model", sdk_max_retries=0)
 
         def handler(request):
             return httpx.Response(200, json=_length_truncated_body())
@@ -561,7 +567,7 @@ class TestIncidentsCarryCharCounts:
         http_client = httpx.Client(transport=httpx.MockTransport(handler))
         with patch(
             "asago_policy_mapper.llm.OpenAI",
-            lambda **kw: openai.OpenAI(http_client=http_client, max_retries=0, **kw),
+            lambda **kw: openai.OpenAI(http_client=http_client, **kw),
         ):
             client = create_client(config, tracker=tracker)
 
