@@ -224,6 +224,11 @@ class _RemoteGenerativeReranker:
             response.raise_for_status()
             data = response.json()
             top = data["choices"][0].get("logprobs", {}).get("top_logprobs", [{}])[0]
+            if "yes" not in top and "no" not in top:
+                # Neither answer token in the top logprobs: the reranker gave
+                # no answer for this pair. NaN marks the pair unscored.
+                scores.append(math.nan)
+                continue
             true_logprob = top.get("yes", -10.0)
             false_logprob = top.get("no", -10.0)
             true_score = math.exp(true_logprob)
@@ -816,9 +821,18 @@ class RiskIndex:
             raw_scores = self._cross_encoder.predict(pairs)
         raw_scores = np.array(raw_scores)
         scores = self._score_normalizer(raw_scores)
-        scored = _scored_candidates(candidates, scores, top_k)
-        stamped = [c.model_copy(update={"rerank_source": "cross_encoder"}) for c in scored]
-        return stamped, _measured_scores(candidates, scores)
+        # Nonfinite scores (NaN = reranker gave no answer) must not consume a
+        # top_k slot: partition them out before sorting, or the NaN would
+        # displace a valid low-ranked candidate from the selection.
+        finite_scored = [(c, score) for c, score in zip(candidates, scores) if np.isfinite(score)]
+        for c, score in zip(candidates, scores):
+            if not np.isfinite(score):
+                logger.warning("Skipping candidate %s with invalid score", c.risk_id)
+        scored = sorted(finite_scored, key=lambda x: x[1], reverse=True)
+        results = []
+        for c, score in scored[:top_k]:
+            results.append(c.model_copy(update={"cross_encoder_score": float(score), "rerank_source": "cross_encoder"}))
+        return results, _measured_scores(candidates, scores)
 
     def hybrid_search(
         self,
