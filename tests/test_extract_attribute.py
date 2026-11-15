@@ -783,6 +783,42 @@ def test_ground_risk_group_skips_empty_quotes():
     assert "R-001" not in result
 
 
+def test_group_unmatched_quote_pinned_to_first_today():
+    """Characterization: today an unmatched group quote is pinned to chunk_indices[0].
+
+    This pins current behavior before evidence verification lands (bead
+    #152 part 1 flips it: the span will carry chunk_index=None instead).
+    """
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["This quote appears in no chunk."],
+            ),
+        ]
+    )
+
+    chunks = _make_chunks(["First chunk text.", "Second chunk text."])
+    risks = [
+        {"risk_id": "R-001", "risk_name": "Bias", "risk_description": "Model bias risk."},
+    ]
+
+    result = ground_risk_group(
+        chunks=chunks,
+        chunk_indices=[1],
+        risks=risks,
+        client=mock_client,
+        model="test-model",
+        document="policy.pdf",
+    )
+
+    evidence, _ = result["R-001"]
+    assert evidence[0].chunk_index == 1  # pinned to chunk_indices[0], not found anywhere
+
+
 def test_ground_risk_group_captures_call(mock_client):
     chunks = _make_chunks(["Chunk zero.", "Chunk one with bias evidence."])
     risks = [
