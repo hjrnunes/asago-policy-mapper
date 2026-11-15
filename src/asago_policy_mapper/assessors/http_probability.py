@@ -42,8 +42,6 @@ from asago_policy_mapper.extract.screening import (
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 """Hosts that count as on this machine for the ``sends_offsite`` flag."""
 
-_PATH = "/assess"
-
 _NoAnswerReason = Literal["missing", "invalid", "timeout", "error"]
 
 _REDACTED = "[redacted]"
@@ -110,6 +108,9 @@ class HttpProbabilityAssessor:
     # assessors that can answer with NoAnswer would wrongly reject this one.
     answer_types = frozenset({ProbabilityAnswer, NoAnswer})
 
+    _PATH = "/assess"
+    """The path requests go to; provider mappings override this."""
+
     def __init__(self, endpoint: ProbabilityEndpoint, transport=None):
         import httpx
 
@@ -153,7 +154,9 @@ class HttpProbabilityAssessor:
             for batch in self._batches(cases):
                 t0 = time.perf_counter()
                 try:
-                    exchange, batch_answers, batch_unmatched = self._assess_batch(context, batch, client, secret)
+                    exchange, batch_answers, batch_unmatched = self._assess_batch(
+                        question, context, batch, client, secret
+                    )
                 except (KeyboardInterrupt, SystemExit):
                     # Control-flow exceptions keep their exact form: callers
                     # rely on them, and they carry no endpoint-derived text.
@@ -203,16 +206,26 @@ class HttpProbabilityAssessor:
             headers["Authorization"] = f"Bearer {secret}"
         return headers
 
-    def _assess_batch(
-        self, context: str, cases: Sequence[DecisionCase], client, secret: str
-    ) -> tuple[dict, dict[str, Answer], list[str]]:
-        request_body = {
+    def _request_body(self, question: Question, context: str, cases: Sequence[DecisionCase]) -> dict:
+        """Build the request body for one batch; provider mappings override this hook.
+
+        The generic shape is ``{"context": str, "items": [{"id", "text"}]}``.
+        The ``question`` rides along for mappings whose wire carries the
+        question being asked; the generic endpoint is configured with the
+        question it scores, so it ignores the parameter.
+        """
+        return {
             "context": context,
             "items": [{"id": c.risk_id, "text": f"{c.name}: {c.description}"} for c in cases],
         }
+
+    def _assess_batch(
+        self, question: Question, context: str, cases: Sequence[DecisionCase], client, secret: str
+    ) -> tuple[dict, dict[str, Answer], list[str]]:
+        request_body = self._request_body(question, context, cases)
         httpx = self._httpx
         try:
-            response = client.post(_PATH, headers=self._headers(secret), json=request_body)
+            response = client.post(self._PATH, headers=self._headers(secret), json=request_body)
         except httpx.TimeoutException:
             return self._exchange(request_body, None, secret), self._mark_all(cases, "timeout"), []
         except (httpx.HTTPError, OSError) as error:
