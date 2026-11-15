@@ -162,7 +162,7 @@ def test_prefilter_refuses_no_grounding(mock_config, tmp_path):
     """prefilter + retrieval.no_grounding raises ValueError."""
     doc = tmp_path / "p.md"
     doc.write_text(DOC)
-    with pytest.raises(ValueError, match="prefilter requires grounding"):
+    with pytest.raises(ValueError, match="^prefilter requires grounding; it filters what grounding sees"):
         _run(
             DOC,
             MOCK_RISKS,
@@ -375,6 +375,8 @@ def test_prefilter_drops_at_0_10_keeps_above(mock_config, tmp_path, monkeypatch)
     assert "R-001" not in grounded_ids
     assert "R-003" not in grounded_ids
     assert "R-002" in grounded_ids
+    # The filter stage is timed under its own key.
+    assert "prefilter_ms" in result.retrieval_stats.timing_ms
     # The drops are recorded with provenance.
     dropped = {fc.risk_id: fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"}
     assert set(dropped) == {"R-001", "R-003"}
@@ -800,3 +802,1251 @@ def test_metadata_records_offsite_and_fields(mock_config, tmp_path, monkeypatch)
         "sends_offsite": True,
         "fields_sent": ["chunk_context", "risk_name", "risk_description"],
     }
+
+
+def test_prefilter_metadata_defaults_for_local_assessors(mock_config, tmp_path, monkeypatch):
+    """A bare local assessor records empty ids, a None host and offsite False.
+
+    ``getattr`` defaults exist for assessors without ``rule_id``-style
+    attributes; this pins what the block shows for them: an empty
+    assessor/rule id, ``None`` threshold and host, and a local run.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    # The threshold must survive: the default rule pins 0.10 in DropThreshold;
+    # a rule with a different threshold must show it, not None.
+    rule = SimpleNamespace(
+        rule_id="custom/9",
+        threshold=0.25,
+        decide=lambda cases, batch: [
+            __import__("asago_policy_mapper.extract.screening", fromlist=["Decision"]).Decision(c.risk_id, True, "keep")
+            for c in cases
+        ],
+    )
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=ScriptedAssessor({}), rule=rule),
+        ocr=False,
+    )
+
+    assert result.metadata["prefilter"] == {
+        "assessor_id": "scripted:test",
+        "rule_id": "custom/9",
+        "threshold": 0.25,
+        "endpoint_host": None,
+        "sends_offsite": False,
+        "fields_sent": ["chunk_context", "risk_name", "risk_description"],
+    }
+
+
+def test_prefilter_cases_carry_name_and_description(mock_config, tmp_path, monkeypatch):
+    """The assessor sees each candidate's name and description verbatim.
+
+    The fields_sent metadata promises ``risk_name`` and
+    ``risk_description`` leave the machine; the cases must carry exactly
+    what the index produced.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    assessor = ScriptedAssessor({})
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    _, _, cases = assessor.calls[0]
+    by_id = {c.risk_id: c for c in cases}
+    assert by_id["R-001"].name == "Model Bias"
+    assert by_id["R-001"].description == "Systematic errors in AI outputs favoring certain groups"
+
+
+def test_prefilter_assessor_sees_the_probability_task(mock_config, tmp_path, monkeypatch):
+    """The assessor is asked the grounding-probability task, not the judge's."""
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    assessor = ScriptedAssessor({})
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    task, _, _ = assessor.calls[0]
+    assert task is pipeline.PREFILTER_TASK
+    assert task.question_id == "grounding-probability"
+    assert task.version == "1"
+
+
+def test_prefilter_sends_the_chunk_context_the_grounder_sees(mock_config, tmp_path, monkeypatch):
+    """The prefilter's context is exactly the chunk's grounding context.
+
+    ``_run_prefilter_stage`` must hand ``chunk_contexts[i]`` to the
+    assessor, unchanged; a None or empty context would silently change
+    what the filter scores on. The grounder's context is captured
+    independently, so the assessor and the grounder are shown to receive
+    the same string rather than the same wrong string.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    grounding_contexts = []
+
+    def fake_ground(chunk_text, candidates, client, model, document, chunk_index, **kwargs):
+        grounding_contexts.append((chunk_index, chunk_text))
+        return {}
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", fake_ground)
+
+    seen_contexts = []
+    original_one_chunk = pipeline._prefilter_one_chunk
+
+    def spy_one_chunk(cr, context, prefilter, index, retrieval):
+        seen_contexts.append((cr.chunk_index, context))
+        return original_one_chunk(cr, context, prefilter, index, retrieval)
+
+    monkeypatch.setattr(pipeline, "_prefilter_one_chunk", spy_one_chunk)
+
+    assessor = ScriptedAssessor({})
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    # Every chunk with accepted candidates was asked with its own
+    # grounding context, non-empty and one per chunk index.
+    assert seen_contexts
+    contexts = {i: c for i, c in seen_contexts}
+    for i, c in seen_contexts:
+        assert c and c == contexts[i]
+    # The assessor saw exactly the strings the stage handed down, and
+    # those strings are the same ones the grounder received for the same
+    # chunk, captured independently of the stage.
+    assessor_contexts = [ctx for _, ctx, _ in assessor.calls]
+    assert [c for _, c in seen_contexts] == assessor_contexts
+    assert grounding_contexts, "grounding must have run for the kept candidates"
+    grounded_by_chunk = dict(grounding_contexts)
+    for i, c in seen_contexts:
+        assert c == grounded_by_chunk[i]
+    first_context = assessor_contexts[0]
+    assert DOC.split(".")[0].split()[0] in first_context
+
+
+def test_prefilter_assesses_every_chunk_until_the_end(mock_config, tmp_path, monkeypatch):
+    """A chunk with no accepted candidates does not stop later chunks.
+
+    The stage skips empty chunks with ``continue``; mutating that to
+    ``break`` would silently leave every later chunk unfiltered, so the
+    empty chunk comes first and the chunk with candidates after it.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _TwoChunkIndex:
+        variant_map = {}
+        risks = []
+
+        def __init__(self):
+            self.calls = 0
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            self.calls += 1
+            # Chunk 0 is empty; chunk 1 gets candidates.
+            if self.calls == 1:
+                return []
+            return [
+                ScoredCandidate(risk_id="R-001", risk_name="Model Bias", risk_description="d", cross_encoder_score=0.9)
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    index = _TwoChunkIndex()
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: index)
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    # A multi-chunk document: two sections produce at least two chunks.
+    doc = tmp_path / "p.md"
+    doc.write_text(
+        "First section about data governance and risk management. " * 20
+        + "\n\n## Second\n\n"
+        + "Second section on bias detection and mitigation strategies. " * 20
+    )
+    assessor = ScriptedAssessor({"R-001": ProbabilityAnswer(0.01)})
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    # The chunk with candidates comes after the empty one: a break at the
+    # empty chunk would leave decision_calls empty while accepted
+    # candidates exist.
+    assert result.decision_calls, "the stage must process every chunk with candidates"
+
+
+def test_prefilter_drop_records_carry_full_provenance(mock_config, tmp_path, monkeypatch):
+    """A drop record keeps taxonomy, rrf score, bm25 rank and accepted_by.
+
+    The record documents why the candidate was retrievable at all before
+    the prefilter dropped it; losing any field loses the audit trail.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(
+                    risk_id="R-001",
+                    risk_name="Model Bias",
+                    risk_description="Systematic errors in AI outputs",
+                    cross_encoder_score=0.9,
+                    rrf_score=0.0123,
+                    bm25_rank=7,
+                )
+            ]
+
+        def get_taxonomy(self, rid):
+            return f"taxonomy-{rid}"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=_prefilter({"R-001": ProbabilityAnswer(0.05)}),
+        ocr=False,
+    )
+
+    dropped = [fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"]
+    assert len(dropped) == 1
+    fc = dropped[0]
+    assert fc.taxonomy == "taxonomy-R-001"
+    assert fc.rrf_score == 0.0123
+    assert fc.bm25_rank == 7
+    assert fc.accepted_by == "threshold"
+    assert fc.score == 0.05
+    assert fc.reason == "p=0.05"
+
+
+def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, monkeypatch):
+    """A wire-less assessor's record carries the body it would have sent.
+
+    The keys and per-item fields pin the fallback shape: ``context`` and
+    ``items`` with ``id``/``text`` per case, exactly as the probability
+    task's request format defines them.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=_prefilter({}),
+        ocr=False,
+    )
+
+    call = result.decision_calls[0]
+    assert call.stage == "prefilter"
+    assert call.chunk_index == 0
+    assert isinstance(call.request, dict)
+    assert set(call.request) == {"context", "items"}
+    assert [i["id"] for i in call.request["items"]] == [r.id for r in MOCK_RISKS]
+    assert call.request["items"][0]["text"] == f"{MOCK_RISKS[0].name}: {MOCK_RISKS[0].description}"
+    # The decision log identifies the task, prompt, assessor and rule.
+    log = call.decision
+    assert log.question_id == "grounding-probability"
+    assert log.question_version == "1"
+    assert log.prompt_name == "prefilter"
+    assert log.prompt_sha256 == ""
+    assert log.assessor_id == "scripted:test"
+    assert log.rule_id == "drop-threshold/1"
+    assert log.latency_ms == 0.5
+    assert log.unmatched_ids == []
+    # Each item carries the raw answers the rule saw.
+    r1 = next(i for i in log.items if i.risk_id == "R-001")
+    assert r1.answers == [{"kind": "no_answer", "reason": "missing", "detail": ""}]
+    assert r1.keep is True
+
+
+def test_prefilter_copy_preserves_chunk_identity_fields(mock_config, tmp_path, monkeypatch):
+    """The filtered copy keeps the chunk's source, page, section and stats.
+
+    Grounding reads the copy; losing any identity field would misattribute
+    the kept candidates' evidence.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(
+                    risk_id=r.id,
+                    risk_name=r.name,
+                    risk_description=r.description,
+                    cross_encoder_score=0.9,
+                )
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(
+        pipeline,
+        "ground_and_extract_evidence",
+        lambda **kwargs: {c.risk_id: ([], "medium") for c in kwargs["candidates"]},
+    )
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=_prefilter({"R-001": ProbabilityAnswer(0.05)}),
+        ocr=False,
+    )
+
+    # The grounded match for the kept candidate carries the chunk's
+    # identity: R-002 survived the filter and grounded with evidence.
+    kept = {m.risk_id: m for m in result.risks}
+    assert "R-002" in kept
+    assert "R-001" not in kept
+
+
+def test_prefilter_copy_carries_chunk_metadata_to_grounding(mock_config, tmp_path, monkeypatch):
+    """Grounding sees the copy's page, section and borderline list intact.
+
+    ``_ground_one`` reads page/section from the ChunkResult it is given;
+    the filtered copy must carry them, and the borderline list must stay
+    the original object so judged provenance survives.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    grounding_calls = []
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    def fake_ground(
+        chunk_text,
+        candidates,
+        client,
+        model,
+        document,
+        chunk_index,
+        page=None,
+        section=None,
+        call_collector=None,
+        max_batch_size=0,
+    ):
+        grounding_calls.append({"page": page, "section": section, "document": document})
+        return {c.risk_id: ([], "medium") for c in candidates}
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", fake_ground)
+
+    originals = {}
+    real_one_chunk = pipeline._prefilter_one_chunk
+
+    def spy_one_chunk(cr, context, prefilter, index, retrieval):
+        copy, drops, call = real_one_chunk(cr, context, prefilter, index, retrieval)
+        originals[cr.chunk_index] = (cr, copy)
+        return copy, drops, call
+
+    monkeypatch.setattr(pipeline, "_prefilter_one_chunk", spy_one_chunk)
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=_prefilter({"R-001": ProbabilityAnswer(0.05)}),
+        ocr=False,
+    )
+
+    for _, (original, copy) in originals.items():
+        assert copy.source == original.source
+        assert copy.page == original.page
+        assert copy.section == original.section
+        assert copy.borderline is original.borderline
+        assert copy.borderline_judged is original.borderline_judged
+    assert grounding_calls
+    for call in grounding_calls:
+        assert call["document"] == str(doc)
+
+
+def test_prefilter_drop_keeps_auto_promoted_provenance(mock_config, tmp_path, monkeypatch):
+    """A dropped borderline candidate keeps its auto_promoted provenance.
+
+    With ``no_judge``, borderline candidates move into accepted and are
+    recorded in ``borderline_judged``; their drop records must show
+    ``auto_promoted`` (or ``llm_judge`` when judged), proving the drop
+    record recomputes provenance from the original candidate, not a
+    blanket guess.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    # top_n_accept=1: R-002 and R-003 land in borderline; no_judge moves
+    # them into accepted with borderline_judged provenance.
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True, top_n_accept=1, top_n_judge=5),
+        prefilter=_prefilter({"R-002": ProbabilityAnswer(0.05), "R-003": ProbabilityAnswer(0.05)}),
+        ocr=False,
+    )
+
+    dropped = {fc.risk_id: fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"}
+    assert set(dropped) == {"R-002", "R-003"}
+    assert all(fc.accepted_by == "auto_promoted" for fc in dropped.values())
+
+
+def test_prefilter_copy_stats_are_independent(mock_config, tmp_path, monkeypatch):
+    """The copy's stats dict is a fresh dict, not the original's mapping.
+
+    Grounding mutates nothing in the copy's stats today, but sharing the
+    dict would let any later in-place change leak back into the original
+    ChunkResult.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    originals = {}
+    real_one_chunk = pipeline._prefilter_one_chunk
+
+    def spy_one_chunk(cr, context, prefilter, index, retrieval):
+        copy, drops, call = real_one_chunk(cr, context, prefilter, index, retrieval)
+        originals[cr.chunk_index] = (cr, copy)
+        return copy, drops, call
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+    monkeypatch.setattr(pipeline, "_prefilter_one_chunk", spy_one_chunk)
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=_prefilter({"R-001": ProbabilityAnswer(0.05)}),
+        ocr=False,
+    )
+
+    assert originals
+    for _, (original, copy) in originals.items():
+        assert copy.stats is not original.stats
+        assert copy.stats == original.stats
+
+
+def test_prefilter_accepted_by_flows_through_filter(mock_config, tmp_path, monkeypatch):
+    """A kept candidate keeps the accepted_by its retrieval mode earns.
+
+    With ``no_judge`` and cross-encoder ranking, auto-accepted candidates
+    keep ``threshold`` provenance through the filter.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(
+                    risk_id=r.id,
+                    risk_name=r.name,
+                    risk_description=r.description,
+                    cross_encoder_score=0.75,
+                )
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(
+        pipeline,
+        "ground_and_extract_evidence",
+        lambda **kwargs: {c.risk_id: ([], "medium") for c in kwargs["candidates"]},
+    )
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=_prefilter({"R-001": ProbabilityAnswer(0.05)}),
+        ocr=False,
+    )
+
+    kept = {m.risk_id: m for m in result.risks}
+    assert "R-002" in kept
+    # Auto-accepted by cross-encoder threshold: the provenance survived
+    # the filtered copy.
+    assert kept["R-002"].accepted_by == "threshold"
+
+
+def test_prefilter_unmatched_ids_and_latency_recorded(mock_config, tmp_path, monkeypatch):
+    """The decision log carries the assessor's unmatched ids and latency."""
+    from asago_policy_mapper.extract import pipeline
+
+    class UnmatchedAssessor(ScriptedAssessor):
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            return AnswerBatch(
+                answers={c.risk_id: (ProbabilityAnswer(0.5),) for c in cases},
+                unmatched_ids=("R-009",),
+                latency_ms=12.5,
+                exchange=None,
+            )
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=UnmatchedAssessor({}), rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    log = result.decision_calls[0].decision
+    assert log.unmatched_ids == ["R-009"]
+    assert log.latency_ms == 12.5
+
+
+def test_prefilter_drop_with_no_outcomes_records_empty_payload(mock_config, tmp_path, monkeypatch):
+    """A rule that drops a case the assessment never answered records no outcomes.
+
+    The drop record and the decision item both fall back to an empty
+    outcome list; ``answer_payloads(())`` is ``[]``, and the record's
+    score is None because no probability exists.
+    """
+    from asago_policy_mapper.extract import pipeline
+    from asago_policy_mapper.extract.screening import Decision
+
+    class EmptyAssessor(ScriptedAssessor):
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            return AnswerBatch(answers={}, unmatched_ids=(), latency_ms=0.5, exchange=None)
+
+    class DropEverythingRule:
+        rule_id = "drop-all/1"
+
+        def decide(self, cases, batch):
+            return [Decision(c.risk_id, False, "no-answer") for c in cases]
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=EmptyAssessor({}), rule=DropEverythingRule()),
+        ocr=False,
+    )
+
+    call = result.decision_calls[0]
+    item = call.decision.items[0]
+    assert item.answers == []
+    assert item.keep is False
+    assert item.reason == "no-answer"
+    dropped = {fc.risk_id: fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"}
+    assert set(dropped) == {"R-001", "R-002", "R-003"}
+    assert all(fc.score is None for fc in dropped.values())
+    assert all(fc.reason == "no-answer" for fc in dropped.values())
+
+
+def test_prefilter_dropped_score_takes_max_probability(mock_config, tmp_path, monkeypatch):
+    """A drop with several probabilities records the maximum.
+
+    DropThreshold drops only when every probability is at or below the
+    threshold; the recorded score is the strongest probability seen.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class MultiAnswerAssessor(ScriptedAssessor):
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            outcomes = {
+                "R-001": (ProbabilityAnswer(0.02), ProbabilityAnswer(0.08)),
+                "R-002": (ProbabilityAnswer(0.5),),
+                "R-003": (ProbabilityAnswer(0.9),),
+            }
+            return AnswerBatch(answers=outcomes, unmatched_ids=(), latency_ms=0.5, exchange=None)
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=MultiAnswerAssessor({}), rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    dropped = {fc.risk_id: fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"}
+    assert dropped["R-001"].score == 0.08
+    assert "R-002" not in dropped
+
+
+def test_prefilter_offsite_without_endpoint_is_none_host(mock_config, tmp_path, monkeypatch):
+    """An assessor with no endpoint records a None host, not a crash."""
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    # Neither an endpoint nor a base_url: the host must fall back to None.
+    assessor = ScriptedAssessor({})
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    assert result.metadata["prefilter"]["endpoint_host"] is None
+
+
+def test_prefilter_endpoint_host_ignores_non_string_base_url(mock_config, tmp_path, monkeypatch):
+    """A non-string base_url yields a None host, not a traceback.
+
+    The host derivation must not hand ``urlsplit`` a number or other
+    non-string; the isinstance guard is the only protection.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    assessor = ScriptedAssessor({})
+    assessor.endpoint = SimpleNamespace(base_url=12345)
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    assert result.metadata["prefilter"]["endpoint_host"] is None
+
+
+def test_prefilter_rule_without_rule_id_records_empty(mock_config, tmp_path, monkeypatch):
+    """A rule with no rule_id records an empty string, not None or a filler.
+
+    The log's ``rule_id`` and the metadata block both default the
+    attribute to ``""``; a missing attribute must not crash or invent a
+    value.
+    """
+    from asago_policy_mapper.extract import pipeline
+    from asago_policy_mapper.extract.screening import Decision
+
+    class NoIdRule:
+        """Keeps everything; carries no rule_id attribute at all."""
+
+        def decide(self, cases, batch):
+            return [Decision(c.risk_id, True, "keep") for c in cases]
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=ScriptedAssessor({}), rule=NoIdRule()),
+        ocr=False,
+    )
+
+    assert result.decision_calls[0].decision.rule_id == ""
+    assert result.metadata["prefilter"]["rule_id"] == ""
+
+
+def test_prefilter_assessor_without_optional_attributes_records_defaults(mock_config, tmp_path, monkeypatch):
+    """An assessor with no assessor_id/offsite records empty id and False.
+
+    The metadata block's getattr defaults exist for minimal assessors;
+    with no candidates the stage never reads the id directly, so the
+    defaults are the only values recorded.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _EmptyIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return []
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _EmptyIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    # No assessor_id, no offsite, no endpoint: the metadata defaults apply.
+    bare = SimpleNamespace(assess=lambda task, context, cases: None, emits=frozenset())
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=bare, rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    block = result.metadata["prefilter"]
+    assert block["assessor_id"] == ""
+    assert block["sends_offsite"] is False
+    assert block["endpoint_host"] is None
+    assert result.decision_calls == []
+
+
+def test_prefilter_nonparent_drop_reentry_counted(mock_config, tmp_path, monkeypatch):
+    """A dropped plain risk that expansion re-proposes counts as re-entered.
+
+    The dropped-id catalog adds non-parent drops under their own ids;
+    losing that (for example recording None) would silently zero the
+    re-entry count.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    sibling_risks = [
+        _make_risk("R-001", "Model Bias", "Systematic errors in AI outputs", parent="sibling-group"),
+        _make_risk("R-002", "Data Poisoning", "Malicious manipulation of training data", parent="sibling-group"),
+    ]
+
+    class _SiblingIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in sibling_risks
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _SiblingIndex())
+    monkeypatch.setattr(
+        pipeline,
+        "ground_and_extract_evidence",
+        lambda **kwargs: {c.risk_id: ([], "medium") for c in kwargs["candidates"] if c.risk_id == "R-002"},
+    )
+
+    def ground_group(chunks, chunk_indices, risks, client, model, document, call_collector=None):
+        return {r["risk_id"]: ([], "medium") for r in risks if r["risk_id"] == "R-001"}
+
+    monkeypatch.setattr(pipeline, "ground_risk_group", ground_group)
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=sibling_risks,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=_prefilter({"R-001": ProbabilityAnswer(0.01)}),
+        ocr=False,
+    )
+
+    stats = result.metadata["expansion_stats"]
+    # R-002 grounded; expansion proposed its sibling R-001 (dropped): one
+    # re-entry, which then grounded.
+    assert stats["prefilter_reentered"] == 1
+    assert stats["prefilter_reentered_grounded"] == 1
+    assert "prefilter_reentered_parents" not in stats
+    # No blacklist: the re-entered risk is in the final output.
+    assert "R-001" in {m.risk_id for m in result.risks}
+
+
+def test_prefilter_one_chunk_copy_keeps_page_and_section():
+    """The filtered copy carries the chunk's page and section verbatim.
+
+    A direct unit call pins the copy's identity fields without depending
+    on a document format that produces non-None metadata.
+    """
+    from asago_policy_mapper.extract.retrieve import ChunkResult
+
+    cr = ChunkResult(
+        chunk_index=4,
+        source="doc.pdf",
+        page=7,
+        section="Data Governance",
+        accepted=[
+            ScoredCandidate(risk_id="R-001", risk_name="Model Bias", risk_description="d", cross_encoder_score=0.9),
+            ScoredCandidate(risk_id="R-002", risk_name="Data Poisoning", risk_description="d", cross_encoder_score=0.8),
+        ],
+        borderline=[],
+        borderline_judged=[],
+        stats={"candidates_retrieved": 2, "auto_accepted": 2, "borderline": 0, "discarded": 0, "bm25_rescued": 0},
+    )
+
+    class _Index:
+        variant_map = {}
+
+        def get_taxonomy(self, rid):
+            return "t"
+
+    from types import SimpleNamespace as _NS
+
+    import asago_policy_mapper.extract.pipeline as pl
+
+    prefilter = Prefilter(assessor=ScriptedAssessor({"R-001": ProbabilityAnswer(0.01)}), rule=ThresholdRule())
+    copy, drops, call = pl._prefilter_one_chunk(
+        cr, "ctx", prefilter, _Index(), _NS(no_judge=True, use_cross_encoder=True)
+    )
+
+    assert copy.page == 7
+    assert copy.section == "Data Governance"
+    assert copy.source == "doc.pdf"
+    assert copy.chunk_index == 4
+    assert [c.risk_id for c in copy.accepted] == ["R-002"]
+    assert [fc.risk_id for fc in drops] == ["R-001"]
+    assert drops[0].chunk_index == 4
+    assert call.chunk_index == 4
+    assert call.request["context"] == "ctx"
+
+
+def test_prefilter_stage_context_fallback_for_mismatched_lengths():
+    """A chunk beyond the contexts list gets an empty context, not a crash.
+
+    ``_run_prefilter_stage`` guards the index because nothing guarantees
+    the caller passed one context per chunk; the unit test pins the
+    fallback ("" and not the wrong chunk's context) directly.
+    """
+    from asago_policy_mapper.extract.retrieve import ChunkResult
+
+    cr = ChunkResult(
+        chunk_index=3,
+        source="p.md",
+        page=1,
+        section=None,
+        accepted=[
+            ScoredCandidate(risk_id="R-001", risk_name="Model Bias", risk_description="d", cross_encoder_score=0.9)
+        ],
+        borderline=[],
+        borderline_judged=[],
+        stats={"candidates_retrieved": 1, "auto_accepted": 1, "borderline": 0, "discarded": 0, "bm25_rescued": 0},
+    )
+
+    seen = []
+
+    import asago_policy_mapper.extract.pipeline as pl
+
+    real_one_chunk = pl._prefilter_one_chunk
+
+    def spy(cr, context, prefilter, index, retrieval):
+        seen.append(context)
+        return real_one_chunk(cr, context, prefilter, index, retrieval)
+
+    class _Index:
+        variant_map = {}
+
+        def get_taxonomy(self, rid):
+            return "t"
+
+    from types import SimpleNamespace as _NS
+
+    prefilter = _NS(
+        assessor=ScriptedAssessor({}),
+        rule=ThresholdRule(),
+    )
+    import unittest.mock as _mock
+
+    with _mock.patch.object(pl, "_prefilter_one_chunk", spy):
+        pl._run_prefilter_stage(
+            [None, cr], ["only-one-context"], prefilter, _Index(), _NS(no_judge=True, use_cross_encoder=True)
+        )
+
+    # Position 1 is one past the single context (len == 1): the stage
+    # falls back to "" rather than raising or borrowing another chunk's
+    # context.
+    assert seen == [""]
+
+
+def test_prefilter_stage_empty_contexts_list():
+    """An empty contexts list means every chunk falls back to an empty context."""
+    from asago_policy_mapper.extract.retrieve import ChunkResult
+
+    cr = ChunkResult(
+        chunk_index=0,
+        source="p.md",
+        page=None,
+        section=None,
+        accepted=[
+            ScoredCandidate(risk_id="R-001", risk_name="Model Bias", risk_description="d", cross_encoder_score=0.9)
+        ],
+        borderline=[],
+        borderline_judged=[],
+        stats={"candidates_retrieved": 1, "auto_accepted": 1, "borderline": 0, "discarded": 0, "bm25_rescued": 0},
+    )
+
+    seen = []
+    import asago_policy_mapper.extract.pipeline as pl
+
+    real_one_chunk = pl._prefilter_one_chunk
+
+    def spy(cr, context, prefilter, index, retrieval):
+        seen.append(context)
+        return real_one_chunk(cr, context, prefilter, index, retrieval)
+
+    class _Index:
+        variant_map = {}
+
+        def get_taxonomy(self, rid):
+            return "t"
+
+    from types import SimpleNamespace as _NS
+
+    prefilter = _NS(assessor=ScriptedAssessor({}), rule=ThresholdRule())
+    import unittest.mock as _mock
+
+    with _mock.patch.object(pl, "_prefilter_one_chunk", spy):
+        pl._run_prefilter_stage([cr], [], prefilter, _Index(), _NS(no_judge=True, use_cross_encoder=True))
+
+    assert seen == [""]
+
+
+def test_prefilter_stage_matching_context_is_passed_verbatim():
+    """A chunk with a matching context gets exactly that context string."""
+    from asago_policy_mapper.extract.retrieve import ChunkResult
+
+    cr = ChunkResult(
+        chunk_index=1,
+        source="p.md",
+        page=None,
+        section=None,
+        accepted=[
+            ScoredCandidate(risk_id="R-001", risk_name="Model Bias", risk_description="d", cross_encoder_score=0.9)
+        ],
+        borderline=[],
+        borderline_judged=[],
+        stats={"candidates_retrieved": 1, "auto_accepted": 1, "borderline": 0, "discarded": 0, "bm25_rescued": 0},
+    )
+
+    seen = []
+    import asago_policy_mapper.extract.pipeline as pl
+
+    real_one_chunk = pl._prefilter_one_chunk
+
+    def spy(cr, context, prefilter, index, retrieval):
+        seen.append(context)
+        return real_one_chunk(cr, context, prefilter, index, retrieval)
+
+    class _Index:
+        variant_map = {}
+
+        def get_taxonomy(self, rid):
+            return "t"
+
+    from types import SimpleNamespace as _NS
+
+    prefilter = _NS(assessor=ScriptedAssessor({}), rule=ThresholdRule())
+    import unittest.mock as _mock
+
+    with _mock.patch.object(pl, "_prefilter_one_chunk", spy):
+        pl._run_prefilter_stage(
+            [None, cr],
+            ["chunk-zero-context", "chunk-one-context"],
+            prefilter,
+            _Index(),
+            _NS(no_judge=True, use_cross_encoder=True),
+        )
+
+    # The None chunk is skipped (no context asked), and position 1 gets
+    # its own context verbatim.
+    assert seen == ["chunk-one-context"]
