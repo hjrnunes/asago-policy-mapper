@@ -143,11 +143,38 @@ def test_rerank_nan_score_does_not_consume_top_k_slot(monkeypatch):
     assert math.isnan(reranked[2].cross_encoder_score)
 
 
-def test_rerank_counts_unavailable(monkeypatch, caplog):
-    """rerank counts NaN-scored candidates as rerank_unavailable and warns once each.
+def test_rerank_equal_scores_keep_input_order(monkeypatch):
+    """Equal measured scores keep the input order, which is RRF rank descending.
+
+    The sort behind the top-k selection is stable, and hybrid_search
+    constructs the rerank window in RRF-rank order, so ties resolve to
+    RRF rank: a fused candidate that outranks another on RRF stays ahead
+    when the reranker scores them equally. The pin holds the whole chain
+    — construction order plus sort stability — which no other test
+    exercises (all others use distinct scores).
+    """
+    index = _index_with_predict(monkeypatch, [0.8, 0.8, 0.8])
+    # RRF-descending order, as hybrid_search would construct the window:
+    # R-A outranks R-B on RRF, R-B outranks R-C.
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a", rrf_score=0.032),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b", rrf_score=0.030),
+        ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c", rrf_score=0.028),
+    ]
+
+    reranked = index.rerank("query", candidates, top_k=3)
+
+    # Equal scores, unchanged order: the tie fell back to RRF rank.
+    assert [c.risk_id for c in reranked] == ["R-A", "R-B", "R-C"]
+    assert [c.cross_encoder_score for c in reranked] == [0.8, 0.8, 0.8]
+
+
+def test_rerank_counts_unscored(monkeypatch, caplog):
+    """Unscored candidates ride at the tail carrying the NaN marker, and warn once each.
 
     Unscored candidates stay in the returned list, after every scored one,
-    so the selection path can route them to the judge (D3 option b).
+    so the selection path can route them to the judge instead of dropping
+    them.
     """
     index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan"), 0.8])
     candidates = [
