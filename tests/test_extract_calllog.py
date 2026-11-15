@@ -400,7 +400,9 @@ def test_run_variant_grounding_numbers_records_in_task_order(monkeypatch):
     task_count = 8
     gate = _ReverseGate(task_count)
 
-    def fake_ground_variants_one(pm, chunks, variant_map, client, model, records, chunk_contexts):
+    def fake_ground_variants_one(
+        pm, chunks, variant_map, client, model, records, chunk_contexts, chunk_context_indices=None
+    ):
         index = int(pm.risk_id.split("-")[1])
         gate.enter(index)
         records.append(_record("ground-variant-001", stage="variant_grounding", chunk_index=index))

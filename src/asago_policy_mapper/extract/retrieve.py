@@ -113,6 +113,32 @@ def _join_context(chunks: list[Chunk], ordered: list[int]) -> str:
     return "\n\n".join(parts)
 
 
+def build_chunk_context_indices(
+    chunks: list[Chunk],
+    max_context_tokens: int = 1024,
+    only: set[int] | None = None,
+) -> list[list[int]]:
+    """List, per chunk, the indices whose texts make up its context.
+
+    Mirrors build_chunk_contexts exactly: for chunk i the entry is the
+    ordered index list (before neighbours, i, after neighbours) that
+    _expand_neighbor_indices admits — same source document only. The
+    section headings build_chunk_contexts inserts are synthetic, so they
+    have no index and never appear here. ``only`` mirrors it too: indexes
+    outside the set get an empty list, so their contexts build empty;
+    neighbors still resolve against the full chunk list.
+    """
+    indices: list[list[int]] = []
+    for i, chunk in enumerate(chunks):
+        if only is not None and i not in only:
+            indices.append([])
+            continue
+        budget = max_context_tokens - len(chunk.text.split())
+        before_indices, after_indices, _ = _expand_neighbor_indices(chunks, i, budget)
+        indices.append(before_indices + [i] + after_indices)
+    return indices
+
+
 def build_chunk_contexts(
     chunks: list[Chunk],
     max_context_tokens: int = 1024,
@@ -129,19 +155,7 @@ def build_chunk_contexts(
     empty strings); neighbors still resolve against the full chunk list,
     so a subset's contexts match the full build's for the same indexes.
     """
-    contexts: list[str] = []
-    for i, chunk in enumerate(chunks):
-        if only is not None and i not in only:
-            contexts.append("")
-            continue
-        core_tokens = len(chunk.text.split())
-        budget = max_context_tokens - core_tokens
-
-        before_indices, after_indices, _ = _expand_neighbor_indices(chunks, i, budget)
-        ordered = before_indices + [i] + after_indices
-        contexts.append(_join_context(chunks, ordered))
-
-    return contexts
+    return [_join_context(chunks, ordered) for ordered in build_chunk_context_indices(chunks, max_context_tokens, only)]
 
 
 def build_padded_text(
