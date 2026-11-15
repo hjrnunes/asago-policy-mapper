@@ -7,6 +7,7 @@ tests here pin the model-level contract (step 1) and the setter behaviour
 (steps 2-4 build on it).
 """
 
+import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -438,7 +439,7 @@ def test_bm25_rescued_invalid_measurement_is_null(monkeypatch):
     by_id = {c.risk_id: c for c in results}
     # invalid measurement: no score to keep, no source to stamp
     assert by_id["R-003"].rerank_source is None
-    assert by_id["R-003"].cross_encoder_score == 0.0
+    assert math.isnan(by_id["R-003"].cross_encoder_score)
     assert by_id["R-003"].bm25_rank == 3
     # a valid measurement after an invalid one still registers: R-004 is
     # measured despite the NaN ahead of it in the window

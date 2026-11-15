@@ -172,6 +172,8 @@ If the model name differs from what can be derived from the endpoint URL (e.g. t
 
 `--cross-encoder-type` selects the remote reranker API: `score` (default, POSTs `{text_1, text_2}` to `/v1/score`), `rerank` (POSTs `{model, query, documents}` to `/v1/rerank`, as served by vLLM for Qwen3-Reranker), or `generative` (logprob scoring through `/v1/completions`). The `rerank` type raises on HTTP errors and on responses that omit a document, so a failing reranker never produces silent zero scores. Extraction metadata records `cross_encoder_type` and `cross_encoder_model_name`.
 
+When the `generative` reranker returns neither a "yes" nor a "no" probability for a candidate, that candidate counts as unscored rather than receiving a made-up 0.5 score. Unscored candidates join the chunk's borderline list—capped at `--top-n-judge` per chunk, like other borderline candidates—and go to the judge; with `--no-judge` they are auto-promoted like other borderline candidates, carrying a cross-encoder score of 0.0 ("not calculated"). Each chunk's summary reports how many candidates were unscored as `rerank_unavailable`. A rerank call that leaves a majority of its candidates unscored raises a `RuntimeError`: that means the reranker is broken, not chatty.
+
 Reusable, secret-free environment templates are provided for the recommended GPU configuration and the OpenAI cloud configuration:
 
 - [`examples/env/best-quality.env.example`](examples/env/best-quality.env.example)

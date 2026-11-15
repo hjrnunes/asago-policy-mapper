@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -194,17 +195,52 @@ def build_padded_text(
     return " ".join(parts)
 
 
+def _split_unscored(
+    candidates: list[ScoredCandidate],
+) -> tuple[list[ScoredCandidate], list[ScoredCandidate]]:
+    """Split candidates into (scored, unscored) by NaN cross-encoder score.
+
+    Unscored candidates (the reranker gave no answer) must not enter the
+    rank or threshold comparison: NaN breaks ordering. They rejoin as
+    borderline, where the judge decides them.
+    """
+    scored = []
+    unscored = []
+    for c in candidates:
+        if math.isnan(c.cross_encoder_score):
+            unscored.append(c)
+        else:
+            scored.append(c)
+    return scored, unscored
+
+
+def _cap_unscored(
+    unscored: list[ScoredCandidate], top_n_judge: int
+) -> tuple[list[ScoredCandidate], list[ScoredCandidate]]:
+    """Split unscored candidates into (riders, over-cap) at the judge budget.
+
+    No more than top_n_judge unscored candidates may ride along to the
+    borderline list per chunk; the rest are discarded.
+    """
+    if len(unscored) <= top_n_judge:
+        return unscored, []
+    return unscored[:top_n_judge], unscored[top_n_judge:]
+
+
 def classify_by_threshold(
     candidates: list[ScoredCandidate],
     *,
     threshold_high: float,
     threshold_low: float = 0.15,
     bm25_rescue_rank: int = 0,
+    top_n_judge: int = 5,
 ) -> tuple[list[ScoredCandidate], list[ScoredCandidate], list[ScoredCandidate]]:
+    scored, unscored = _split_unscored(candidates)
+    riders, over_cap = _cap_unscored(unscored, top_n_judge)
     accepted = []
     borderline = []
-    discarded = []
-    for c in candidates:
+    discarded = list(over_cap)
+    for c in scored:
         if c.cross_encoder_score >= threshold_high:
             accepted.append(c)
         elif c.cross_encoder_score >= threshold_low:
@@ -213,6 +249,7 @@ def classify_by_threshold(
             borderline.append(c)
         else:
             discarded.append(c)
+    borderline.extend(riders)
     return accepted, borderline, discarded
 
 
@@ -224,10 +261,12 @@ def classify_by_rank(
     min_score_floor: float = 0.0,
     bm25_rescue_rank: int = 0,
 ) -> tuple[list[ScoredCandidate], list[ScoredCandidate], list[ScoredCandidate]]:
-    ranked = sorted(candidates, key=lambda c: c.cross_encoder_score, reverse=True)
+    scored, unscored = _split_unscored(candidates)
+    riders, over_cap = _cap_unscored(unscored, top_n_judge)
+    ranked = sorted(scored, key=lambda c: c.cross_encoder_score, reverse=True)
     accepted = []
     borderline = []
-    discarded = []
+    discarded = list(over_cap)
     for i, c in enumerate(ranked):
         if min_score_floor > 0 and c.cross_encoder_score < min_score_floor:
             if bm25_rescue_rank > 0 and c.bm25_rank > 0 and c.bm25_rank <= bm25_rescue_rank:
@@ -242,6 +281,7 @@ def classify_by_rank(
             borderline.append(c)
         else:
             discarded.append(c)
+    borderline.extend(riders)
     return accepted, borderline, discarded
 
 
@@ -261,6 +301,7 @@ def classify_candidates(
             threshold_high=threshold_high,
             threshold_low=threshold_low if threshold_low is not None else 0.15,
             bm25_rescue_rank=bm25_rescue_rank,
+            top_n_judge=top_n_judge,
         )
     return classify_by_rank(
         candidates,
@@ -462,6 +503,17 @@ def _count_unavailable(index) -> int:
     return count if isinstance(count, int) else 0
 
 
+def _serialize_score(c: ScoredCandidate) -> ScoredCandidate:
+    """Copy a candidate with its cross-encoder score ready for the output.
+
+    The unscored marker (NaN) reads as 0.0, matching query-gen candidates
+    the cross-encoder never scored.
+    """
+    if math.isnan(c.cross_encoder_score):
+        return c.model_copy(update={"cross_encoder_score": 0.0})
+    return c
+
+
 def retrieve_chunk(
     chunks: list[Chunk],
     chunk_index: int,
@@ -518,11 +570,19 @@ def retrieve_chunk(
         threshold_high=threshold_high,
         threshold_low=threshold_low,
     )
+    # Count rescues before the marker conversion: NaN never compares below
+    # the floor, so unscored candidates cannot count as BM25-rescued.
     floor = threshold_low if threshold_low is not None else min_score_floor
     bm25_rescued = sum(
         1 for c in borderline if c.cross_encoder_score < floor and c.bm25_rank > 0 and c.bm25_rank <= bm25_rescue_rank
     )
     accepted_by = "threshold" if threshold_high is not None else "rank"
+    # Unscored candidates reach the judge as borderline carrying the internal
+    # NaN marker. At the chunk boundary the marker becomes the 0.0 default
+    # with rerank_source unset — the "not calculated" state 150b reads as
+    # null confidence — so NaN never serializes.
+    accepted = [_serialize_score(c) for c in accepted]
+    borderline = [_serialize_score(c) for c in borderline]
     return ChunkResult(
         chunk_index=chunk_index,
         source=chunk.source,

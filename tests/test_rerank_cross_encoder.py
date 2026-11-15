@@ -197,6 +197,29 @@ def test_generative_reranker_both_missing_is_nan(mock_httpx_client_cls):
 
 
 @patch("httpx.Client")
+def test_generative_reranker_mixed_no_answer_and_scored_pairs(mock_httpx_client_cls):
+    mock_client = MagicMock()
+    mock_httpx_client_cls.return_value = mock_client
+    no_answer = MagicMock()
+    no_answer.json.return_value = _generative_response({"maybe": -0.5})
+    scored = MagicMock()
+    scored.json.return_value = _generative_response({"yes": -0.5, "no": -1.5})
+    mock_client.post.side_effect = [no_answer, scored, no_answer]
+    reranker = _RemoteGenerativeReranker(RERANK_URL)
+
+    scores = reranker.predict([("risk A", "the chunk"), ("risk B", "the chunk"), ("risk C", "the chunk")])
+
+    # The no-answer marker must not stop scoring later pairs, and the array
+    # dtype must stay float64 (np.isnan raises TypeError on object arrays).
+    assert scores.dtype == np.float64
+    assert len(scores) == 3
+    assert np.isnan(scores[0])
+    expected = math.exp(-0.5) / (math.exp(-0.5) + math.exp(-1.5))
+    np.testing.assert_allclose(scores[1], expected)
+    assert np.isnan(scores[2])
+
+
+@patch("httpx.Client")
 def test_one_missing_keeps_low_score(mock_httpx_client_cls):
     mock_client = MagicMock()
     mock_httpx_client_cls.return_value = mock_client

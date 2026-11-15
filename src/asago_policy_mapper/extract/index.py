@@ -831,16 +831,36 @@ class RiskIndex:
         scores = self._score_normalizer(raw_scores)
         # Nonfinite scores (NaN = reranker gave no answer) must not consume a
         # top_k slot: partition them out before sorting, or the NaN would
-        # displace a valid low-ranked candidate from the selection.
-        finite_scored = [(c, score) for c, score in zip(candidates, scores) if np.isfinite(score)]
+        # displace a valid low-ranked candidate from the selection. Unscored
+        # candidates stay in the returned list, after every scored one, so the
+        # selection path can route them to the judge instead of dropping them.
+        finite_scored = []
+        unscored = []
         for c, score in zip(candidates, scores):
-            if not np.isfinite(score):
+            if np.isfinite(score):
+                finite_scored.append((c, score))
+            else:
                 self.unscored_count += 1
-                logger.warning("Skipping candidate %s with invalid score", c.risk_id)
+                logger.warning("Candidate %s unscored by reranker", c.risk_id)
+                unscored.append(c)
+        if len(unscored) > len(candidates) // 2:
+            # A majority-unscored call means the reranker is broken, not
+            # chatty: refuse to rank on the few scores that remain.
+            raise RuntimeError(
+                f"Reranker left {len(unscored)} of {len(candidates)} candidates unscored; "
+                "check the reranker endpoint and model"
+            )
         scored = sorted(finite_scored, key=lambda x: x[1], reverse=True)
         results = []
         for c, score in scored[:top_k]:
             results.append(c.model_copy(update={"cross_encoder_score": float(score), "rerank_source": "cross_encoder"}))
+        # Unscored candidates ride along after the scored ones, outside the
+        # top_k cap: the cap bounds the scored selection, while unscored
+        # candidates are judge-bound and capped by the borderline rules.
+        # Their score becomes the NaN marker (no rerank_source: "not
+        # calculated" for the null-confidence boundary) so the selection
+        # path can recognize them.
+        results.extend(c.model_copy(update={"cross_encoder_score": float("nan")}) for c in unscored)
         return results, _measured_scores(candidates, scores)
 
     def hybrid_search(
