@@ -441,12 +441,16 @@ def _echo_extraction_banner(policy_files, all_risks, custom_risk_count) -> None:
         typer.echo(f"Extracting risks from {len(policy_files)} document(s) ({len(all_risks)} Nexus risks loaded)...")
 
 
-def _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter=None):
+def _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter=None, plan=None):
     """Run the extraction pipeline over the loaded risk catalog.
 
     The caller resolves run_extraction so its import happens at the same
     point as before the refactor, before the extraction banner echoes.
+    A resolved plan is forwarded so the pipeline records the plan the CLI
+    validated and warned about instead of re-resolving one without the
+    explicit options (which would leave the metadata warnings empty).
     """
+    kwargs = {} if plan is None else {"plan": plan}
     return run_extraction(
         documents=policy_files,
         client=client,
@@ -455,6 +459,7 @@ def _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_e
         retrieval=retrieval,
         ocr=ocr,
         prefilter=prefilter,
+        **kwargs,
     )
 
 
@@ -805,7 +810,9 @@ def extract(
 
     _echo_extraction_banner(policy_files, all_risks, custom_risk_count)
 
-    result = _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter)
+    result = _run_pipeline(
+        policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter, plan=plan
+    )
 
     result.token_usage = tracker.to_dict()
 

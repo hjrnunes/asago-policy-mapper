@@ -235,6 +235,78 @@ def test_existing_command_lines_accepted(tmp_path, monkeypatch):
     assert captured["retrieval"].no_judge is True
 
 
+def test_cli_forwards_the_resolved_plan(tmp_path, monkeypatch):
+    """The pipeline runs with the plan the CLI resolved, not a fresh one.
+
+    The CLI resolves the plan once (from the explicit flags) and forwards
+    it: the pipeline's metadata then records the plan whose warnings the
+    CLI echoed, instead of re-resolving one without the explicit set and
+    silently dropping them.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    captured = {}
+
+    def fake_run_extraction(**kwargs):
+        captured["plan"] = kwargs.get("plan")
+        return pipeline._empty_result(kwargs["documents"])
+
+    class _Risk:
+        id = "r1"
+        name = "r1"
+        description = "A risk."
+        isDefinedByTaxonomy = "test"
+        isPartOf = ""
+
+    class FakeNexus:
+        def __init__(self, base_dir=None):
+            pass
+
+        def get_all_risks(self):
+            return [_Risk()]
+
+    import asago_policy_mapper.cli as cli
+
+    monkeypatch.setattr(pipeline, "run_extraction", fake_run_extraction)
+    monkeypatch.setattr(cli, "_attach_mitigations", lambda result, nexus_base_dir: None)
+    monkeypatch.setattr("ai_atlas_nexus.AIAtlasNexus", FakeNexus)
+
+    policy = _policy(tmp_path)
+    out = tmp_path / "out"
+    # --no-judge is redundant with --no-cross-encoder, so the forwarded
+    # plan must carry that warning: a re-resolved plan (explicit empty)
+    # would carry none.
+    result = runner.invoke(
+        app,
+        [
+            "extract",
+            str(policy),
+            "-o",
+            str(out),
+            "--no-judge",
+            "--no-cross-encoder",
+            "--no-grounding",
+            "--no-query-gen",
+            "--no-expand-siblings",
+        ],
+        env={"POLICY_MAPPER_BASE_URL": "http://localhost:8000/v1", "POLICY_MAPPER_MODEL": "test-model"},
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+
+    forwarded = captured["plan"]
+    assert forwarded is not None, "the CLI must forward the resolved plan"
+    retrieval = RetrievalConfig(
+        query_gen=False,
+        use_cross_encoder=False,
+        no_judge=True,
+        no_grounding=True,
+        expand_siblings=False,
+    )
+    expected = resolve_plan(retrieval, prefilter=False, explicit=frozenset({"--no-judge", "--no-cross-encoder"}))
+    assert asdict(forwarded) == asdict(expected)
+    assert any(warning.startswith("--no-judge is redundant with --no-cross-encoder") for warning in forwarded.warnings)
+
+
 # --- the metadata (step 2) ---
 
 
