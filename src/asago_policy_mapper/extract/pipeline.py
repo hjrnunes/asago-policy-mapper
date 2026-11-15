@@ -5,7 +5,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ from asago_policy_mapper.extract.models import (
     _CausalChain,
 )
 from asago_policy_mapper.extract.parse import chunk_documents, parse_document
+from asago_policy_mapper.extract.plan import RunPlan, resolve_plan
 from asago_policy_mapper.extract.querygen import generate_queries, group_chunks
 from asago_policy_mapper.extract.retrieve import (
     ChunkResult,
@@ -1271,10 +1272,10 @@ def _prefilter_metadata(prefilter: GroundingPrefilter) -> dict:
 
 
 def _run_matches_stage(
-    chunk_results, chunks, client, config, retrieval, index, call_collector, chunk_contexts, timing
+    chunk_results, chunks, client, config, retrieval, plan, index, call_collector, chunk_contexts, timing
 ) -> tuple[list[RiskMatch], list[FilteredCandidate], int]:
     """Ground accepted candidates, or collect them ungrounded when grounding is disabled."""
-    if retrieval.no_grounding:
+    if not plan.grounding:
         all_matches = _collect_ungrounded(chunk_results, index, retrieval)
         all_filtered: list[FilteredCandidate] = []
         timing["grounding_ms"] = 0.0
@@ -1322,13 +1323,21 @@ def _build_retrieval_stats(
 
 
 def _build_result_metadata(
-    config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client=None, prefilter=None
+    config,
+    retrieval,
+    expansion_stats,
+    query_results,
+    fallback_chunk_indices,
+    client=None,
+    prefilter=None,
+    plan=None,
 ) -> dict:
     """Assemble the run metadata recorded alongside the extraction result."""
     metadata = {
         "model": config.model,
         **({"service_tier": config.service_tier} if config.service_tier is not None else {}),
         **retrieval.to_metadata(),
+        "run_plan": _run_plan_metadata(retrieval, plan, prefilter),
         "expansion_stats": expansion_stats,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -1345,14 +1354,45 @@ def _build_result_metadata(
     return metadata
 
 
+def _run_plan_metadata(retrieval, plan, prefilter) -> dict:
+    """Record the requested settings next to the effective plan.
+
+    Planned is not executed: the execution counters live elsewhere in the
+    result, and a stage the plan includes may still be skipped at runtime
+    (no client, a catalog without variants). ``effective`` is the plan the
+    pipeline ran with; when no plan was resolved, one is derived here so
+    the metadata always carries it.
+    """
+    if plan is None:
+        plan = resolve_plan(retrieval, prefilter=prefilter is not None, explicit=frozenset())
+    return {
+        "requested": retrieval.to_metadata(),
+        "effective": asdict(plan),
+        "warnings": list(plan.warnings),
+    }
+
+
+def _empty_result_metadata(retrieval, prefilter, plan) -> dict:
+    """The metadata a short-circuited run records: the run plan, nothing else.
+
+    Empty-document and no-risk runs exit before any stage runs, so the
+    execution counters the full metadata carries do not exist yet; the
+    plan still describes what the run would have done. The base recorded
+    no metadata at all here, so only the run_plan block is new.
+    """
+    return {
+        "run_plan": _run_plan_metadata(retrieval, plan, prefilter),
+    }
+
+
 _EMPTY_EXPANSION_STATS = {"expanded_candidates": 0, "expanded_grounded": 0, "expansion_groups": 0}
 
 
 def _run_variant_grounding_stage(
-    all_matches, chunks, index, client, config, retrieval, call_collector, chunk_contexts, max_workers, timing
+    all_matches, chunks, index, client, config, plan, call_collector, chunk_contexts, max_workers, timing
 ):
     """Variant-ground grounded matches when variants and a client are present."""
-    if index.variant_map and not retrieval.no_grounding and client is not None:
+    if index.variant_map and plan.grounding and client is not None:
         with timed(timing, "variant_grounding_ms"):
             return _run_variant_grounding(
                 all_matches,
@@ -1377,6 +1417,7 @@ def _run_expansion_stage(
     client,
     config,
     retrieval,
+    plan,
     call_collector,
     chunk_contexts,
     max_workers,
@@ -1390,7 +1431,7 @@ def _run_expansion_stage(
     carries the prefilter's drop records, whose ids the expansion counts
     when it proposes them again.
     """
-    if retrieval.expand_siblings and not retrieval.no_grounding and client is not None:
+    if plan.expansion and client is not None:
         with timed(timing, "expansion_ms"):
             merged, expansion_stats = _run_expansion(
                 risks,
@@ -1412,9 +1453,9 @@ def _run_expansion_stage(
     return merged, _EMPTY_EXPANSION_STATS.copy()
 
 
-def _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, call_collector, max_workers, timing):
+def _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing):
     """Synthesize causal chains for each merged risk when a client is present."""
-    if not retrieval.no_causal_synthesis and client is not None:
+    if plan.causal_synthesis and client is not None:
         with timed(timing, "causal_synthesis_ms"):
             return _run_causal_synthesis(
                 merged,
@@ -1469,16 +1510,19 @@ def run_extraction(
     *,
     ocr: bool = False,
     prefilter: GroundingPrefilter | None = None,
+    plan: RunPlan | None = None,
 ) -> ExtractionResult:
     retrieval = retrieval or RetrievalConfig()
     if prefilter is not None and retrieval.no_grounding:
         raise ValueError("prefilter requires grounding; it filters what grounding sees, so --no-grounding refuses it")
+    if plan is None:
+        plan = resolve_plan(retrieval, prefilter=prefilter is not None, explicit=frozenset())
     timing: dict[str, float] = {}
     max_workers = config.max_concurrent
 
     prepared = _parse_and_chunk(documents, ocr, retrieval, timing)
     if prepared is None:
-        return _empty_result(documents)
+        return _empty_result(documents, _empty_result_metadata(retrieval, prefilter, plan))
     parsed, chunks, chunk_contexts = prepared
 
     risks = _filter_agentic_risks(risks, parsed)
@@ -1486,14 +1530,14 @@ def run_extraction(
     with timed(timing, "index_ms"):
         if not risks:
             logger.error("No risks loaded from Nexus")
-            return _empty_result(documents)
+            return _empty_result(documents, _empty_result_metadata(retrieval, prefilter, plan))
         index = _build_risk_index(risks, retrieval)
 
     call_collector: list[LLMCallRecord] = []
     fallback_chunk_indices: set[int] = set()
     query_results: list = []
 
-    if retrieval.query_gen:
+    if plan.acquisition == "query_gen":
         query_results, fallback_chunk_indices = _run_query_gen(
             chunks, client, config, call_collector, max_workers, timing
         )
@@ -1523,7 +1567,7 @@ def run_extraction(
 
     prefilter_drops: list[FilteredCandidate] = []
     decision_calls: list[DecisionCallRecord] = []
-    if prefilter is not None:
+    if plan.prefilter and prefilter is not None:
         with timed(timing, "prefilter_ms"):
             grounding_inputs, prefilter_drops, decision_calls = _run_prefilter_stage(
                 chunk_results, chunk_contexts, prefilter, index, retrieval, chunks
@@ -1532,12 +1576,12 @@ def run_extraction(
         grounding_inputs = chunk_results
 
     all_matches, all_filtered, grounding_filtered = _run_matches_stage(
-        grounding_inputs, chunks, client, config, retrieval, index, call_collector, chunk_contexts, timing
+        grounding_inputs, chunks, client, config, retrieval, plan, index, call_collector, chunk_contexts, timing
     )
     all_filtered = prefilter_drops + all_filtered
 
     all_matches = _run_variant_grounding_stage(
-        all_matches, chunks, index, client, config, retrieval, call_collector, chunk_contexts, max_workers, timing
+        all_matches, chunks, index, client, config, plan, call_collector, chunk_contexts, max_workers, timing
     )
 
     chunk_risk_ids = _build_chunk_risk_map(chunk_results, all_matches, retrieval.no_grounding)
@@ -1557,6 +1601,7 @@ def run_extraction(
         client,
         config,
         retrieval,
+        plan,
         call_collector,
         chunk_contexts,
         max_workers,
@@ -1564,7 +1609,7 @@ def run_extraction(
         prefilter_drops=prefilter_drops or None,
     )
 
-    merged = _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, call_collector, max_workers, timing)
+    merged = _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing)
 
     total_stats = _build_retrieval_stats(
         chunk_results,
@@ -1580,7 +1625,7 @@ def run_extraction(
         source_documents=[str(d) for d in documents],
         retrieval_stats=total_stats,
         metadata=_build_result_metadata(
-            config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client, prefilter
+            config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client, prefilter, plan
         ),
         chunks=chunk_summaries,
         llm_calls=call_collector,
@@ -1590,7 +1635,7 @@ def run_extraction(
     )
 
 
-def _empty_result(documents: list[Path]) -> ExtractionResult:
+def _empty_result(documents: list[Path], metadata: dict | None = None) -> ExtractionResult:
     return ExtractionResult(
         risks=[],
         source_documents=[str(d) for d in documents],
@@ -1601,4 +1646,5 @@ def _empty_result(documents: list[Path]) -> ExtractionResult:
             llm_judged=0,
             grounding_filtered=0,
         ),
+        metadata=metadata or {},
     )
