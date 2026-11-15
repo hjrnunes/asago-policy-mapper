@@ -83,6 +83,8 @@ class EvidenceSpan(BaseModel):
     chunk_index: int
     sentence_index: int = 0
     cross_encoder_score: float = 0.0
+    verification: Literal["verified", "normalized", "not_found"] | None = None
+    found_chunk_index: int | None = None
 
     _reject_nan_score = field_validator("cross_encoder_score")(_reject_nan)
 

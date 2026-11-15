@@ -33,8 +33,8 @@ def normalize(text: str) -> str:
     Applies NFKC compatibility normalization, joins words hyphenated
     across a line break ("exam-\\nple" becomes "example"; soft hyphens
     and U+2010/U+2011 wrap the same way; em/en dashes do not join),
-    deletes stray soft hyphens, straightens curly quotes, guillemets and
-    dashes, collapses all whitespace runs to single spaces and lowercases.
+    deletes stray soft hyphens, straightens curly quotes and dashes,
+    collapses all whitespace runs to single spaces and lowercases.
     """
     text = unicodedata.normalize("NFKC", text)
     # A soft hyphen directly before a line break is a wrap: delete it with
@@ -54,26 +54,66 @@ def normalize(text: str) -> str:
     return text.lower().strip()
 
 
+def _earliest_match(
+    needle: str,
+    windows: Sequence[tuple[int, str]],
+    exact: bool,
+) -> int | None:
+    """The lowest chunk index whose window contains the needle, or None.
+
+    ``exact`` compares the raw needle; otherwise both sides go through
+    normalize(). Ties across windows resolve on the chunk index (element
+    value), never on the order the windows were given, so the contract
+    holds for any caller ordering. An empty needle is a substring of any
+    text (Python semantics), so it matches the lowest index present —
+    callers guard the normalized tier's empty case themselves.
+    """
+    best: int | None = None
+    for index, text in windows:
+        haystack = text if exact else normalize(text)
+        if needle in haystack and (best is None or index < best):
+            best = index
+    return best
+
+
 def locate_quote(
     quote: str,
     windows: Sequence[tuple[int, str]],
+    preferred_index: int | None = None,
 ) -> tuple[VerificationStatus, int | None]:
     """Locate a quote within (chunk_index, text) windows.
 
-    Tries an exact substring match first, scanning windows in the order
-    given; the first window containing the quote wins. If no exact match
-    exists, retries with normalize() applied to both sides. Returns
-    ("not_found", None) when the quote appears in no window.
+    Tries an exact substring match first across all windows, then a
+    normalized one, so an exact match always beats a merely normalized
+    one. Within each tier, when ``preferred_index`` (the chunk whose
+    context the model read) contains the quote it wins; otherwise the
+    earliest other window by chunk index wins — the lowest index among
+    matching windows, independent of the order the windows were given.
+    Returns ("not_found", None) when the quote appears in no window.
     """
-    for index, text in windows:
-        if quote in text:
-            return "verified", index
+
+    def _preferred_contains(needle: str, exact: bool) -> bool:
+        for index, text in windows:
+            if index != preferred_index:
+                continue
+            haystack = text if exact else normalize(text)
+            if needle in haystack:
+                return True
+        return False
+
+    exact_hit = _earliest_match(quote, windows, exact=True)
+    if exact_hit is not None:
+        if preferred_index is not None and _preferred_contains(quote, exact=True):
+            return "verified", preferred_index
+        return "verified", exact_hit
 
     normalized_quote = normalize(quote)
     if not normalized_quote:
         return "not_found", None
-    for index, text in windows:
-        if normalized_quote in normalize(text):
-            return "normalized", index
+    normalized_hit = _earliest_match(normalized_quote, windows, exact=False)
+    if normalized_hit is not None:
+        if preferred_index is not None and _preferred_contains(normalized_quote, exact=False):
+            return "normalized", preferred_index
+        return "normalized", normalized_hit
 
     return "not_found", None

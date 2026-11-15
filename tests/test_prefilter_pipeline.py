@@ -208,6 +208,7 @@ def test_prefilter_off_is_noop(mock_config, tmp_path, monkeypatch):
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         return {c.risk_id: ([], "medium") for c in candidates if c.risk_id != "R-003"}
 
@@ -389,6 +390,7 @@ def test_prefilter_drops_at_0_10_keeps_above(mock_config, tmp_path, monkeypatch)
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates}
@@ -453,6 +455,7 @@ def test_prefilter_bypass_keeps_and_records(mock_config, tmp_path, monkeypatch):
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {}
@@ -558,6 +561,7 @@ def test_prefilter_drops_variant_group_together(mock_config, tmp_path, monkeypat
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates if not c.risk_id.startswith("unauthorized-processing")}
@@ -645,6 +649,7 @@ def test_prefilter_preserves_expansion_context(mock_config, tmp_path, monkeypatc
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         return {c.risk_id: ([], "medium") for c in candidates}
 
@@ -717,6 +722,7 @@ def test_dropped_candidates_distinguishable(mock_config, tmp_path, monkeypatch):
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         # R-002 reaches grounding but is rejected by it.
         return {}
@@ -1446,6 +1452,7 @@ def test_prefilter_copy_carries_chunk_metadata_to_grounding(mock_config, tmp_pat
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounding_calls.append({"page": page, "section": section, "document": document})
         return {c.risk_id: ([], "medium") for c in candidates}
@@ -2415,6 +2422,7 @@ def test_prefilter_assessor_exception_keeps_everything(mock_config, tmp_path, mo
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates}
@@ -2553,6 +2561,7 @@ def test_prefilter_rule_returning_no_decisions_keeps_everything(mock_config, tmp
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates}
@@ -2659,6 +2668,7 @@ def test_prefilter_real_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates}
@@ -2770,6 +2780,7 @@ def test_prefilter_real_jev_assessor_end_to_end(mock_config, tmp_path, monkeypat
         section=None,
         records=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates}

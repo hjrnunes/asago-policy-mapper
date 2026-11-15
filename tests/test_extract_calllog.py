@@ -250,7 +250,9 @@ def _run_grounding_with_reverse_completion(monkeypatch, task_count):
     pipeline = _pipeline()
     gate = _ReverseGate(task_count)
 
-    def fake_ground_one(cr, chunks, client, model, records, passes, max_batch_size, context_text):
+    def fake_ground_one(
+        cr, chunks, client, model, records, passes, max_batch_size, context_text, context_source_windows=None
+    ):
         index = cr.chunk_index
         gate.enter(index)
         _record_grounding_call(
@@ -302,7 +304,9 @@ def test_run_grounding_without_collector_records_nothing(monkeypatch):
     task_count = 2
     pipeline = _pipeline()
 
-    def fake_ground_one(cr, chunks, client, model, records, passes, max_batch_size, context_text):
+    def fake_ground_one(
+        cr, chunks, client, model, records, passes, max_batch_size, context_text, context_source_windows=None
+    ):
         _record_grounding_call(
             records,
             chunk_index=cr.chunk_index,

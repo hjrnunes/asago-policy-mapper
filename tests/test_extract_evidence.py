@@ -88,11 +88,23 @@ def test_exact_match_wins_over_normalized():
 
 
 def test_first_window_wins_on_multiple_exact_matches():
-    """Ties between windows resolve to the earliest window in the sequence."""
+    """Ties between windows resolve to the earliest chunk index.
+
+    The windows are deliberately in non-ascending order, so this pins the
+    value-based contract (lowest index wins), not the given sequence.
+    """
     windows = [(3, "duplicated text."), (1, "duplicated text."), (2, "duplicated text.")]
     status, found_index = locate_quote("duplicated text.", windows)
     assert status == "verified"
-    assert found_index == 3
+    assert found_index == 1
+
+
+def test_normalized_tie_resolves_to_earliest_index():
+    """Normalized-tier ties also resolve to the lowest chunk index."""
+    windows = [(5, "The  normalized   TEXT."), (2, "the  normalized text.")]
+    status, found_index = locate_quote("the normalized text.", windows)
+    assert status == "normalized"
+    assert found_index == 2
 
 
 def test_empty_windows_report_not_found():
@@ -158,4 +170,43 @@ def test_locate_quote_matches_through_a_line_break_hyphen():
         [(0, "raised produc-\ntivity targets.")],
     )
     assert status == "normalized"
+
+
+def test_preferred_window_wins_over_earlier_window():
+    """A quote in several windows reports the context's own chunk first.
+
+    Non-ascending windows: without the preference the lowest index (0)
+    would win, so only the preferred_index mechanism can return 2.
+    """
+    windows = [(4, "shared text."), (0, "shared text."), (2, "shared text.")]
+    status, found_index = locate_quote("shared text.", windows, preferred_index=2)
+    assert status == "verified"
+    assert found_index == 2
+
+
+def test_preferred_window_wins_in_normalized_tier():
+    """The preference also applies when only the normalized tier matches.
+
+    Non-ascending windows, so the preference — not the given order —
+    decides.
+    """
+    windows = [(3, "Shared  text."), (1, "Shared  text.")]
+    status, found_index = locate_quote("shared text.", windows, preferred_index=3)
+    assert status == "normalized"
+    assert found_index == 3
+
+
+def test_preferred_index_absent_from_windows_keeps_scan_order():
+    """A preferred index that names no window changes nothing."""
+    windows = [(3, "duplicated text."), (1, "duplicated text.")]
+    status, found_index = locate_quote("duplicated text.", windows, preferred_index=9)
+    assert status == "verified"
+    assert found_index == 1
+
+
+def test_preferred_window_without_the_quote_does_not_win():
+    """The preference only applies when that window contains the quote."""
+    windows = [(0, "the quote lives here."), (1, "unrelated text.")]
+    status, found_index = locate_quote("the quote lives here.", windows, preferred_index=1)
+    assert status == "verified"
     assert found_index == 0

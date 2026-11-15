@@ -19,6 +19,7 @@ from llm_errors import (
 from asago_policy_mapper.extract.attribute import (
     ground_and_extract_evidence,
     ground_risk_group,
+    ground_variants,
     synthesize_causal_chain,
 )
 from asago_policy_mapper.extract.models import (
@@ -613,6 +614,214 @@ def test_ground_and_extract_evidence_records_sane_duration(mock_client):
         )
 
     assert collector[0].duration_ms == 250.0
+
+
+# ---------------------------------------------------------------------------
+# Tests for evidence verification in grounding
+# ---------------------------------------------------------------------------
+
+
+def _verification_candidates():
+    return [
+        ScoredCandidate(
+            risk_id="R-001",
+            risk_name="Bias",
+            risk_description="Model bias risk",
+            cross_encoder_score=0.9,
+        ),
+    ]
+
+
+def test_quote_from_neighbour_chunk_records_found_index():
+    """A quote found in a neighbour chunk verifies with that neighbour's index."""
+    mock_client = MagicMock()
+    mock_client.for_stage = lambda stage: mock_client
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["Encryption at rest is mandatory."],
+            )
+        ]
+    )
+
+    result = ground_and_extract_evidence(
+        chunk_text="Core text.\n\nEncryption at rest is mandatory.\n\nTail text.",
+        candidates=_verification_candidates(),
+        client=mock_client,
+        model="test-model",
+        document="doc.pdf",
+        chunk_index=1,
+        source_windows=[(0, "Retention is 30 days."), (1, "Core text."), (2, "Encryption at rest is mandatory.")],
+    )
+
+    evidence, _ = result["R-001"]
+    # chunk_index stays the chunk whose context was used; found_chunk_index
+    # records where the quote really is.
+    assert evidence[0].chunk_index == 1
+    assert evidence[0].found_chunk_index == 2
+    assert evidence[0].verification == "verified"
+
+
+def test_cross_document_match_is_forbidden():
+    """A quote that only exists in another document's chunk is not_found.
+
+    The windows for a chunk never include another document's chunks, so a
+    quote living only there verifies nowhere.
+    """
+    mock_client = MagicMock()
+    mock_client.for_stage = lambda stage: mock_client
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["Model theft is covered by insurance."],
+            )
+        ]
+    )
+
+    result = ground_and_extract_evidence(
+        chunk_text="Core text about privacy.",
+        candidates=_verification_candidates(),
+        client=mock_client,
+        model="test-model",
+        document="doc.pdf",
+        chunk_index=1,
+        source_windows=[(0, "Core text about privacy."), (1, "More privacy text.")],
+    )
+
+    evidence, _ = result["R-001"]
+    assert evidence[0].verification == "not_found"
+    assert evidence[0].found_chunk_index is None
+    # Unfound quotes still count as grounding evidence, labelled not_found.
+    assert evidence[0].chunk_index == 1
+
+
+def test_grounding_verification_normalized_quote():
+    """A quote matching only after normalization is labelled normalized."""
+    mock_client = MagicMock()
+    mock_client.for_stage = lambda stage: mock_client
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["The policy states “privacy’s a core value”."],
+            )
+        ]
+    )
+
+    result = ground_and_extract_evidence(
+        chunk_text="The  policy states “privacy’s a core value”.",
+        candidates=_verification_candidates(),
+        client=mock_client,
+        model="test-model",
+        document="doc.pdf",
+        chunk_index=0,
+        source_windows=[(0, "The  policy states “privacy’s a core value”.")],
+    )
+
+    evidence, _ = result["R-001"]
+    assert evidence[0].verification == "normalized"
+    assert evidence[0].found_chunk_index == 0
+
+
+def test_grounding_quotes_after_empty_quote_still_verified():
+    """An empty quote is skipped, not a stop: later quotes still verify."""
+    mock_client = MagicMock()
+    mock_client.for_stage = lambda stage: mock_client
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["", "Encryption at rest is mandatory.", "  "],
+            )
+        ]
+    )
+
+    result = ground_and_extract_evidence(
+        chunk_text="Encryption at rest is mandatory.",
+        candidates=_verification_candidates(),
+        client=mock_client,
+        model="test-model",
+        document="doc.pdf",
+        chunk_index=0,
+        source_windows=[(0, "Encryption at rest is mandatory.")],
+    )
+
+    evidence, _ = result["R-001"]
+    assert [e.text for e in evidence] == ["Encryption at rest is mandatory."]
+    assert evidence[0].verification == "verified"
+
+
+def test_grounding_without_source_windows_leaves_verification_none():
+    """No source windows means the output predates verification (None)."""
+    mock_client = MagicMock()
+    mock_client.for_stage = lambda stage: mock_client
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["A valid quote."],
+            )
+        ]
+    )
+
+    result = ground_and_extract_evidence(
+        chunk_text="A valid quote.",
+        candidates=_verification_candidates(),
+        client=mock_client,
+        model="test-model",
+        document="doc.pdf",
+        chunk_index=0,
+    )
+
+    evidence, _ = result["R-001"]
+    assert evidence[0].verification is None
+    assert evidence[0].found_chunk_index is None
+
+
+def test_variant_grounding_verifies_quotes():
+    """ground_variants verifies quotes the same way when given windows."""
+    mock_client = MagicMock()
+    mock_client.for_stage = lambda stage: mock_client
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["Biometric data requires consent."],
+            )
+        ]
+    )
+
+    result = ground_variants(
+        chunk_text="Biometric data requires consent.",
+        parent_id="P-001",
+        parent_name="Parent",
+        parent_description="Parent description",
+        variants=[{"risk_id": "R-001", "name": "Variant", "description": "Variant description"}],
+        client=mock_client,
+        model="test-model",
+        document="doc.pdf",
+        chunk_index=1,
+        source_windows=[(0, "Unrelated."), (1, "Biometric data requires consent.")],
+    )
+
+    evidence, _ = result["R-001"]
+    assert evidence[0].verification == "verified"
+    assert evidence[0].found_chunk_index == 1
+    assert evidence[0].chunk_index == 1
 
 
 # ---------------------------------------------------------------------------

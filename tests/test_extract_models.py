@@ -37,6 +37,31 @@ def test_evidence_span_with_provenance():
     assert span.section == "Section 4: Oversight"
 
 
+def test_evidence_span_verification_defaults_to_none():
+    """New spans carry no verification label until grounding verifies them."""
+    span = EvidenceSpan(
+        text="AI systems must be monitored.",
+        document="policy.pdf",
+        chunk_index=0,
+    )
+    assert span.verification is None
+    assert span.found_chunk_index is None
+
+
+def test_evidence_span_verification_fields_round_trip():
+    """Verification label and found index serialize with the span."""
+    span = EvidenceSpan(
+        text="AI systems must be monitored.",
+        document="policy.pdf",
+        chunk_index=2,
+        verification="normalized",
+        found_chunk_index=1,
+    )
+    d = span.model_dump()
+    assert d["verification"] == "normalized"
+    assert d["found_chunk_index"] == 1
+
+
 def test_scored_candidate():
     c = ScoredCandidate(
         risk_id="atlas-R-0042",

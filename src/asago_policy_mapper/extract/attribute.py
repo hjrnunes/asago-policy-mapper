@@ -4,6 +4,7 @@ import logging
 import time
 
 from asago_policy_mapper.extract.calllog import next_call_number
+from asago_policy_mapper.extract.evidence import locate_quote
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
     LLMCallRecord,
@@ -50,23 +51,37 @@ def _verdicts_to_result(
     chunk_index: int,
     page: int | None,
     section: str | None,
+    source_windows=None,
 ) -> dict[str, tuple[list[EvidenceSpan], str]]:
-    """Filter grounded verdicts to their risk ids and quote evidence spans."""
+    """Filter grounded verdicts to their risk ids and quote evidence spans.
+
+    With source_windows, each quote is verified against them and the span
+    records where it was found (verification, found_chunk_index). Without
+    them the span carries no verification label — the output predates it.
+    """
     result: dict[str, tuple[list[EvidenceSpan], str]] = {}
     for v in verdicts:
         if not v.grounded or v.risk_id not in batch_ids:
             continue
-        spans = [
-            EvidenceSpan(
-                text=quote,
-                document=document,
-                page=page,
-                section=section,
-                chunk_index=chunk_index,
+        spans = []
+        for quote in v.quotes:
+            if not quote.strip():
+                continue
+            verification = None
+            found_chunk_index = None
+            if source_windows is not None:
+                verification, found_chunk_index = locate_quote(quote, source_windows, preferred_index=chunk_index)
+            spans.append(
+                EvidenceSpan(
+                    text=quote,
+                    document=document,
+                    page=page,
+                    section=section,
+                    chunk_index=chunk_index,
+                    verification=verification,
+                    found_chunk_index=found_chunk_index,
+                )
             )
-            for quote in v.quotes
-            if quote.strip()
-        ]
         if spans:
             result[v.risk_id] = (spans, v.confidence)
     return result
@@ -112,6 +127,7 @@ def ground_and_extract_evidence(
     *,
     records: list[LLMCallRecord] | None = None,
     max_batch_size: int = 0,
+    source_windows=None,
 ) -> dict[str, tuple[list[EvidenceSpan], str]]:
     if not candidates:
         return {}
@@ -150,7 +166,17 @@ def ground_and_extract_evidence(
         duration_ms = (time.time() - t0) * 1000
 
         batch_ids = {c.risk_id for c in batch}
-        result.update(_verdicts_to_result(verdicts, batch_ids, document, chunk_index, page, section))
+        result.update(
+            _verdicts_to_result(
+                verdicts,
+                batch_ids,
+                document,
+                chunk_index,
+                page,
+                section,
+                source_windows=source_windows,
+            )
+        )
 
         if records is not None:
             _record_grounding_call(
@@ -182,6 +208,7 @@ def ground_variants(
     section: str | None = None,
     *,
     records: list[LLMCallRecord] | None = None,
+    source_windows=None,
 ) -> dict[str, tuple[list[EvidenceSpan], str]]:
     """Ground individual variants after parent-level grounding confirms relevance."""
     if not variants:
@@ -209,7 +236,15 @@ def ground_variants(
     duration_ms = (time.time() - t0) * 1000
 
     variant_ids = {v["risk_id"] for v in variants}
-    result = _verdicts_to_result(verdicts, variant_ids, document, chunk_index, page, section)
+    result = _verdicts_to_result(
+        verdicts,
+        variant_ids,
+        document,
+        chunk_index,
+        page,
+        section,
+        source_windows=source_windows,
+    )
 
     if records is not None:
         number = next_call_number(records, counts=_counts_variant)
