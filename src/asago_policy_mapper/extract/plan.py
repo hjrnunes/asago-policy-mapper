@@ -139,7 +139,8 @@ def _rrf_min_score_warnings(retrieval: RetrievalConfig, explicit: frozenset[str]
 
     On per-chunk retrieval the floor applies only when the cross-encoder is
     off; every query-generation search applies it while the value is
-    positive. ColBERT retrieval ignores the value entirely.
+    positive. ColBERT retrieval ignores the value entirely. Negative values
+    never reach the plan: the CLI rejects them before the plan resolves.
     """
     if "--rrf-min-score" not in explicit:
         return []
@@ -149,11 +150,6 @@ def _rrf_min_score_warnings(retrieval: RetrievalConfig, explicit: frozenset[str]
         return _no_cross_encoder_floor_warnings(retrieval)
     if not retrieval.query_gen:
         return ["--rrf-min-score is ignored in per-chunk cross-encoder mode: the floor needs --no-cross-encoder"]
-    if retrieval.rrf_min_score < 0:
-        return [
-            "--rrf-min-score is negative: it sets no floor and leaves the per-chunk path "
-            "unchanged; query-generation searches fall back to the default floor"
-        ]
     if retrieval.rrf_min_score == 0:
         return [
             "--rrf-min-score is zero: it sets no floor, leaves the per-chunk path "
@@ -166,15 +162,12 @@ def _no_cross_encoder_floor_warnings(retrieval: RetrievalConfig) -> list[str]:
     """Warn when an explicit --rrf-min-score drops the per-chunk floor.
 
     Without the cross-encoder the floor branch is the only per-chunk
-    filter, so a non-positive value keeps every fused candidate
-    (the reranker never runs without a cross-encoder).
+    filter, so a zero value keeps every fused candidate (the reranker
+    never runs without a cross-encoder). Negative values are the CLI's
+    to reject; reached programmatically, they get no warning.
     """
-    if retrieval.rrf_min_score > 0:
+    if retrieval.rrf_min_score != 0:
         return []
-    if retrieval.rrf_min_score < 0:
-        return [
-            "--rrf-min-score is negative: the floor is dropped and every fused candidate passes without a cross-encoder"
-        ]
     if retrieval.query_gen:
         return [
             "--rrf-min-score is zero: the per-chunk floor is dropped (every fused "

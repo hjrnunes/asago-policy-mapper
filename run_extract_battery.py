@@ -527,6 +527,9 @@ def main():
         sys.exit(1)
 
     config = yaml.safe_load(battery_path.read_text())
+    if args.rrf_min_score < 0:
+        print("Error: --rrf-min-score must not be negative: it is a floor, never a ceiling")
+        sys.exit(1)
     if args.no_judge and args.no_grounding and args.no_query_gen:
         base_url = args.base_url or "unused"
         model = args.model or config.get("model") or os.environ.get("POLICY_MAPPER_MODEL") or "unused"
