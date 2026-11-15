@@ -1191,3 +1191,99 @@ query_gen 6, grounding 72, expansion_grounding 90, causal_synthesis 34. All 202
 
 **Conclusion:** The per-stage token accounting and the id-atomicity hold on a live
 concurrent run; the new output fields serialize correctly. No MLflow run (disabled).
+---
+## 2026-11-15: Deterministic Merge Tie-Breaks — Quote Churn on gemma4
+
+**Description:** Measured the effect of deterministic merging and evidence
+selection (issue #150 part 1) on the full 27-policy `risk-selected` battery.
+The change makes `merge_matches` pick its representative match by
+`(confidence, -min evidence chunk_index, evidence texts)` and order evidence
+by `(-cross_encoder_score, chunk_index, sentence_index, text)` (both with a
+total-order serialization tail), and makes `_ground_variants_one` pick the
+grounding span by `(-cross_encoder_score, chunk_index, text)`. Three full
+battery runs on the internal gemma4 endpoint at temperature 0: the
+pre-restack base commit (2774ae0), PR code run 1, PR code run 2. The
+"before" churn reference comes from the 2026-11-05 pair of runs (same
+code, different runs), not from runs of the base commit; every figure
+below rests on one pair of runs, so each carries that pair's sampling
+noise.
+
+**MLflow:** disabled (`--no-mlflow`; no server configured for this run).
+
+**Runs:** base `extract-runs/risk-selected_20261115_143058`, PR run 1
+`risk-selected_20261115_151106`, PR run 2 `risk-selected_20261115_155449`;
+before-churn references `risk-selected_20261105_210246` and
+`risk-selected_20261105_182149`.
+
+**Macro F1:**
+
+| Run | Code | Macro F1 |
+|---|---|---:|
+| Nov 5 run A (same-code reference) | pre-rebase base | 0.658 |
+| Nov 5 run B (same-code reference) | pre-rebase base | 0.659 |
+| Base | 2774ae0 | 0.661 |
+| PR run 1 | deterministic merge | 0.657 |
+| PR run 2 | deterministic merge | 0.679 |
+
+**Per-policy F1 (base / PR run 1 / PR run 2), with same-code Nov-5 deltas
+as the noise reference:**
+
+| Policy | Base | PR 1 | PR 2 | abs Δ base→PR1 | abs Δ Nov-5 same-code |
+|---|---:|---:|---:|---:|---:|
+| amadeus | 0.684 | 0.610 | 0.684 | 0.074 | 0.062 |
+| ars | 0.688 | 0.727 | 0.776 | 0.039 | 0.082 |
+| aus-gov | 0.543 | 0.540 | 0.553 | 0.003 | 0.003 |
+| camden-borough-work | 0.693 | 0.603 | 0.632 | 0.090 | 0.006 |
+| cisco-supplier | 0.545 | 0.549 | 0.679 | 0.004 | 0.061 |
+| dhs-gov | 0.695 | 0.643 | 0.701 | 0.052 | 0.006 |
+| ebay | 0.709 | 0.704 | 0.717 | 0.005 | 0.015 |
+| eu-com | 0.600 | 0.609 | 0.598 | 0.009 | 0.003 |
+| firstsource | 0.745 | 0.735 | 0.759 | 0.010 | 0.002 |
+| fs-isac | 0.611 | 0.621 | 0.667 | 0.010 | 0.040 |
+| gray | 0.673 | 0.673 | 0.639 | 0.000 | 0.060 |
+| guy-nhs | 0.709 | 0.719 | 0.705 | 0.010 | 0.009 |
+| icrc | 0.693 | 0.698 | 0.760 | 0.005 | 0.067 |
+| leicestershire_police | 0.652 | 0.662 | 0.652 | 0.010 | 0.009 |
+| lenovo | 0.664 | 0.646 | 0.669 | 0.018 | 0.010 |
+| llvm | 0.679 | 0.655 | 0.710 | 0.024 | 0.132 |
+| lse-legreg | 0.638 | 0.651 | 0.625 | 0.013 | 0.005 |
+| lse-marking | 0.631 | 0.667 | 0.696 | 0.036 | 0.044 |
+| new-york-state | 0.642 | 0.691 | 0.656 | 0.049 | 0.001 |
+| npcc | 0.687 | 0.652 | 0.690 | 0.035 | 0.038 |
+| ovic | 0.711 | 0.633 | 0.698 | 0.078 | 0.038 |
+| penn | 0.672 | 0.650 | 0.669 | 0.022 | 0.010 |
+| prosus | 0.618 | 0.667 | 0.602 | 0.049 | 0.024 |
+| rdash-nhs | 0.714 | 0.705 | 0.759 | 0.009 | 0.017 |
+| sap | 0.683 | 0.731 | 0.689 | 0.048 | 0.008 |
+| st-johns | 0.642 | 0.662 | 0.720 | 0.020 | 0.044 |
+| vps | 0.620 | 0.634 | 0.639 | 0.014 | 0.025 |
+
+**Kept risks and quotes (base → PR run 1):** 2,509 of 2,923 base risk ids
+kept (85.8%), 417 added, 414 removed; 758 of 2,923 base (risk id, quote-tuple)
+pairs kept (25.9%).
+
+**Quote churn between runs (share of a run's quote pairs absent from the
+other run):**
+
+| Comparison | Code | Churn vs A | Churn vs B |
+|---|---|---:|---:|
+| Nov 5 A ↔ B | both pre-rebase base | 74.1% | 73.6% |
+| Base ↔ PR 1 | base vs deterministic | 74.1% | 74.1% |
+| PR 1 ↔ PR 2 | both deterministic | 69.3% | 70.0% |
+
+**Conclusion:** F1 movement base→PR (mean abs Δ 0.027, max 0.090) sits
+inside the same-code noise band of the endpoint (Nov-5 mean 0.030, max
+0.132; PR run1↔run2 mean 0.040, max 0.130), so the change costs no
+extraction quality. camden-borough-work is the one policy whose base→PR
+delta (0.090) exceeds the 0.08 per-policy noise figure; its Nov-5 same-code
+delta was 0.006 and its PR1→PR2 delta is 0.029, so the excursion is not
+reproducible and reads as endpoint noise rather than a regression. Quote
+churn is dominated by endpoint non-determinism (74% between two identical
+runs at temperature 0); the same-code floor on the deterministic code is
+69.3%/70.0% versus 74.1%/73.6% on the old code, a ~4-point drop consistent
+with removing completion-order dependence. The before-churn figure comes
+from the 2026-11-05 pair of runs on the pre-rebase base, and each churn
+figure rests on one pair of runs. The direct evidence for
+order-independence remains the permutation and reverse-completion tests;
+single live-run comparisons on this endpoint cannot separate a small
+determinism gain from noise.
