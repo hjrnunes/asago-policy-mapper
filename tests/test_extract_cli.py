@@ -403,6 +403,27 @@ def _validate_kwargs(tmp_path, **overrides):
     return kwargs
 
 
+def test_validate_extract_options_prefilter_defaults_to_off(tmp_path):
+    """The prefilter argument defaults to off.
+
+    A caller that omits ``prefilter`` describes a plain run: with the
+    default flipped, every such call would resolve a prefilter plan
+    (and a no-grounding run would be refused outright).
+    """
+    from asago_policy_mapper.cli import _validate_extract_options
+
+    base = _validate_kwargs(
+        tmp_path,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True, no_grounding=True, expand_siblings=False),
+        base_url=None,
+        model=None,
+    )
+    base.pop("prefilter")
+    plan = _validate_extract_options(**base)
+    assert plan.prefilter is False
+    assert plan.needs_llm is False
+
+
 def test_validate_extract_options_rejects_bad_output_format(tmp_path):
     from asago_policy_mapper.cli import _validate_extract_options
 

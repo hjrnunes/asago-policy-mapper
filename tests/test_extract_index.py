@@ -269,11 +269,14 @@ def test_scored_candidates_sorts_and_attaches_scores():
     assert [c.cross_encoder_score for c in scored] == [0.9, 0.5]
 
 
-def test_scored_candidates_skips_invalid_scores():
+def test_scored_candidates_skips_invalid_scores(caplog):
     candidates = [_sc("R-001"), _sc("R-002")]
-    scored = _scored_candidates(candidates, np.array([np.nan, 0.4]), top_k=2)
+    with caplog.at_level("WARNING", logger="asago_policy_mapper.extract.index"):
+        scored = _scored_candidates(candidates, np.array([np.nan, 0.4]), top_k=2)
     assert [c.risk_id for c in scored] == ["R-002"]
     assert scored[0].cross_encoder_score == 0.4
+    # The exact rendered message: the skip is diagnosable from the log.
+    assert [record.getMessage() for record in caplog.records] == ["Skipping candidate R-001 with invalid score"]
 
 
 # --- _make_score_normalizer tests ---
