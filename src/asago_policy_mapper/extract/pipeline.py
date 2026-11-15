@@ -43,11 +43,8 @@ from asago_policy_mapper.extract.retrieve import (
     retrieve_chunk,
 )
 from asago_policy_mapper.extract.screening import (
-    Assessor,
-    AnswerBatch,
     Decision,
     DecisionCase,
-    NoAnswer,
     ProbabilityAnswer,
     Question,
     answer_payloads,
@@ -83,10 +80,12 @@ class Prefilter:
     ``rule`` reduces those answers to keep/drop decisions (today
     ``DropThreshold``). Provider settings never travel in here: the
     assessor carries its own endpoint configuration, and the run's
-    ``RetrievalConfig`` stays free of them.
+    ``RetrievalConfig`` stays free of them. The fields stay ``Any`` so
+    concrete assessors (whose ``answer_types`` frozensets are invariant under
+    mypy) satisfy the dataclass without protocol casts.
     """
 
-    assessor: Assessor
+    assessor: Any
     rule: Any
 
 

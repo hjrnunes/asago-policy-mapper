@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 from pathlib import Path
 
 import typer
@@ -65,6 +66,7 @@ def _validate_extract_options(
     no_grounding,
     expand_siblings,
     query_gen,
+    prefilter_profile=None,
 ) -> bool:
     """Validate extract options; exit on error. Returns whether the run needs an LLM."""
     valid_formats = {"json", "yaml", "both"}
@@ -72,6 +74,9 @@ def _validate_extract_options(
         _fail_validation(f"--output-format must be one of: {', '.join(sorted(valid_formats))}")
 
     _require_existing_policy_files(policy_files)
+
+    if prefilter_profile is not None and no_grounding:
+        _fail_validation("--prefilter-profile requires grounding; it filters what grounding sees")
 
     needs_llm = _run_needs_llm(no_judge, no_grounding, expand_siblings, query_gen)
     if needs_llm and (not base_url or not model):
@@ -178,6 +183,114 @@ def _warn_risk_text(all_risks, check_risk_text) -> None:
         )
 
 
+def _validate_prefilter_threshold(value, path) -> float:
+    """Check the profile's threshold: a finite number in [0, 1].
+
+    A bad threshold must fail at profile load, not mid-run: the rule only
+    compares against it at decide time, so a string or NaN would
+    otherwise surface as a ``TypeError`` deep inside the prefilter stage
+    — or, for out-of-range values, filter incorrectly in silence.
+    """
+    if value is None:
+        return 0.10
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        _fail_validation(f"--prefilter-profile {path}: threshold must be a number, got {value!r}")
+    if not 0.0 <= value <= 1.0:
+        _fail_validation(f"--prefilter-profile {path}: threshold must be within [0, 1], got {value!r}")
+    return float(value)
+
+
+def _load_prefilter_profile(path: Path) -> dict:
+    """Read and parse the profile YAML; exit with a validation error on any failure."""
+    if not path.is_file():
+        _fail_validation(f"--prefilter-profile {path} does not exist or is not a file")
+    try:
+        profile = yaml.safe_load(path.read_text())
+    except (yaml.YAMLError, OSError, UnicodeError) as e:
+        _fail_validation(f"--prefilter-profile {path} could not be read as YAML: {e}")
+    if not isinstance(profile, dict):
+        _fail_validation(f"--prefilter-profile {path} must be a YAML mapping of endpoint fields plus threshold")
+    return dict(profile)
+
+
+def _validate_prefilter_numeric(profile: dict, key: str, path: Path, *, minimum: float | None = None) -> None:
+    """Check one optional numeric profile field fails fast when invalid.
+
+    ``ProbabilityEndpoint`` is a plain dataclass: a wrong-typed
+    ``timeout_s`` or ``max_batch`` from YAML would otherwise surface as
+    a ``TypeError`` mid-run, inside the assessor. ``max_batch`` must be
+    an integer (``range`` rejects float steps), and an explicit null is
+    an error rather than a silently-omitted field.
+    """
+    value = profile.get(key)
+    if value is None:
+        if key in profile:
+            _fail_validation(f"--prefilter-profile {path}: {key} must not be null")
+        return
+    numeric = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if key == "max_batch":
+        if not isinstance(value, int) or isinstance(value, bool):
+            _fail_validation(f"--prefilter-profile {path}: {key} must be an integer, got {value!r}")
+    elif not numeric:
+        _fail_validation(f"--prefilter-profile {path}: {key} must be a number, got {value!r}")
+    if minimum is not None and value < minimum:
+        _fail_validation(f"--prefilter-profile {path}: {key} must be at least {minimum}, got {value!r}")
+
+
+def _validate_prefilter_strings(profile: dict, keys: tuple[str, ...], path: Path) -> None:
+    """Check the endpoint's string fields are present as nonempty strings.
+
+    A non-string ``base_url`` fails inside the assessor constructor, and
+    a non-string ``api_key_env`` only fails mid-assessment; both belong
+    at profile load.
+    """
+    for key in keys:
+        value = profile.get(key)
+        if not isinstance(value, str) or not value.strip():
+            _fail_validation(f"--prefilter-profile {path}: {key} must be a nonempty string, got {value!r}")
+
+
+def _build_prefilter(profile_path):
+    """Load a prefilter profile YAML into the pipeline's ``Prefilter``.
+
+    The profile carries the ``ProbabilityEndpoint`` fields plus
+    ``threshold``; the API key itself comes from the environment variable
+    the profile names, never from the profile. ``None`` (no path) means
+    no filter. Malformed or missing profiles exit with a validation
+    error, as do installs without the ``decision`` extra the HTTP
+    assessor needs.
+    """
+    if profile_path is None:
+        return None
+
+    path = Path(profile_path)
+    profile = _load_prefilter_profile(path)
+    _validate_prefilter_strings(profile, ("base_url", "model", "api_key_env"), path)
+    _validate_prefilter_numeric(profile, "timeout_s", path, minimum=0.0)
+    _validate_prefilter_numeric(profile, "max_batch", path, minimum=1.0)
+    threshold = _validate_prefilter_threshold(profile.pop("threshold", None), path)
+
+    try:
+        from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor, ProbabilityEndpoint
+        from asago_policy_mapper.extract.pipeline import Prefilter
+        from asago_policy_mapper.extract.screening import DropThreshold
+    except ImportError as e:
+        _fail_validation(f"--prefilter-profile could not import its stack: {e}")
+
+    try:
+        endpoint = ProbabilityEndpoint(**profile)
+    except TypeError as e:
+        _fail_validation(f"--prefilter-profile {path} has invalid fields: {e}")
+    try:
+        assessor = HttpProbabilityAssessor(endpoint)
+    except ImportError as e:
+        _fail_validation(
+            f"--prefilter-profile needs the decision extra (httpx); install with: uv sync --extra decision ({e})"
+        )
+    rule = DropThreshold(assessor, threshold)
+    return Prefilter(assessor=assessor, rule=rule)
+
+
 def _build_retrieval_config(
     *,
     bi_encoder_model,
@@ -252,7 +365,7 @@ def _echo_extraction_banner(policy_files, all_risks, custom_risk_count) -> None:
         typer.echo(f"Extracting risks from {len(policy_files)} document(s) ({len(all_risks)} Nexus risks loaded)...")
 
 
-def _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction):
+def _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter=None):
     """Run the extraction pipeline over the loaded risk catalog.
 
     The caller resolves run_extraction so its import happens at the same
@@ -265,6 +378,7 @@ def _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_e
         risks=all_risks,
         retrieval=retrieval,
         ocr=ocr,
+        prefilter=prefilter,
     )
 
 
@@ -501,6 +615,12 @@ def extract(
     query_gen: bool = typer.Option(
         True, "--query-gen/--no-query-gen", help="LLM query generation for retrieval (default: on)"
     ),
+    prefilter_profile: Path = typer.Option(
+        None,
+        "--prefilter-profile",
+        envvar="POLICY_MAPPER_PREFILTER_PROFILE",
+        help="YAML profile for the opt-in pre-grounding filter (ProbabilityEndpoint fields plus threshold)",
+    ),
     output_format: str = typer.Option(
         "json", "--output-format", "-f", help="Output format: json, yaml, or both (default: json)"
     ),
@@ -520,6 +640,7 @@ def extract(
         no_grounding=no_grounding,
         expand_siblings=expand_siblings,
         query_gen=query_gen,
+        prefilter_profile=prefilter_profile,
     )
 
     config, tracker, client = _setup_llm(
@@ -580,7 +701,8 @@ def extract(
 
     _echo_extraction_banner(policy_files, all_risks, custom_risk_count)
 
-    result = _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction)
+    prefilter = _build_prefilter(prefilter_profile)
+    result = _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter)
 
     result.token_usage = tracker.to_dict()
 
