@@ -442,6 +442,73 @@ def test_classify_by_rank_all_unscored_all_borderline():
     assert discarded == []
 
 
+def test_classify_by_rank_caps_unscored_at_top_n_judge():
+    """No more than top_n_judge unscored candidates ride along to the judge."""
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.90),
+        ScoredCandidate(risk_id="N-1", risk_name="N1", risk_description="n1", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="N-2", risk_name="N2", risk_description="n2", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="N-3", risk_name="N3", risk_description="n3", cross_encoder_score=float("nan")),
+    ]
+
+    accepted, borderline, discarded = classify_by_rank(candidates, top_n_accept=1, top_n_judge=2)
+
+    assert [c.risk_id for c in accepted] == ["R-001"]
+    assert [c.risk_id for c in borderline] == ["N-1", "N-2"]
+    assert [c.risk_id for c in discarded] == ["N-3"]
+
+
+def test_classify_by_threshold_caps_unscored_at_top_n_judge():
+    """Threshold mode caps unscored riders at top_n_judge too."""
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.90),
+        ScoredCandidate(risk_id="N-1", risk_name="N1", risk_description="n1", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="N-2", risk_name="N2", risk_description="n2", cross_encoder_score=float("nan")),
+    ]
+
+    accepted, borderline, discarded = classify_by_threshold(candidates, threshold_high=0.8, threshold_low=0.2)
+
+    # Default top_n_judge is 5, so both ride along.
+    assert [c.risk_id for c in borderline] == ["N-1", "N-2"]
+    assert discarded == []
+
+    accepted, borderline, discarded = classify_by_threshold(
+        candidates, threshold_high=0.8, threshold_low=0.2, top_n_judge=1
+    )
+
+    assert [c.risk_id for c in borderline] == ["N-1"]
+    assert [c.risk_id for c in discarded] == ["N-2"]
+
+
+def test_classify_by_threshold_default_budget_is_five():
+    """Six unscored riders: exactly five ride along under the default budget."""
+    candidates = [
+        ScoredCandidate(risk_id=f"N-{i}", risk_name=f"N{i}", risk_description="n", cross_encoder_score=float("nan"))
+        for i in range(1, 7)
+    ]
+
+    accepted, borderline, discarded = classify_by_threshold(candidates, threshold_high=0.8, threshold_low=0.2)
+
+    assert len(borderline) == 5
+    assert len(discarded) == 1
+
+
+def test_classify_candidates_forwards_top_n_judge_to_threshold_mode():
+    """The threshold branch through classify_candidates honours the judge budget."""
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.90),
+        ScoredCandidate(risk_id="N-1", risk_name="N1", risk_description="n1", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="N-2", risk_name="N2", risk_description="n2", cross_encoder_score=float("nan")),
+    ]
+
+    accepted, borderline, discarded = classify_candidates(
+        candidates, threshold_high=0.8, threshold_low=0.2, top_n_judge=1
+    )
+
+    assert [c.risk_id for c in borderline] == ["N-1"]
+    assert [c.risk_id for c in discarded] == ["N-2"]
+
+
 # --- retrieve_chunk: unscored candidates reach the judge as borderline ---
 
 

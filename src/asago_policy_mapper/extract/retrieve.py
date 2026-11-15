@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -209,17 +208,32 @@ def _split_unscored(
     return scored, unscored
 
 
+def _cap_unscored(
+    unscored: list[ScoredCandidate], top_n_judge: int
+) -> tuple[list[ScoredCandidate], list[ScoredCandidate]]:
+    """Split unscored candidates into (riders, over-cap) at the judge budget.
+
+    No more than top_n_judge unscored candidates may ride along to the
+    borderline list per chunk; the rest are discarded.
+    """
+    if len(unscored) <= top_n_judge:
+        return unscored, []
+    return unscored[:top_n_judge], unscored[top_n_judge:]
+
+
 def classify_by_threshold(
     candidates: list[ScoredCandidate],
     *,
     threshold_high: float,
     threshold_low: float = 0.15,
     bm25_rescue_rank: int = 0,
+    top_n_judge: int = 5,
 ) -> tuple[list[ScoredCandidate], list[ScoredCandidate], list[ScoredCandidate]]:
     scored, unscored = _split_unscored(candidates)
+    riders, over_cap = _cap_unscored(unscored, top_n_judge)
     accepted = []
     borderline = []
-    discarded = []
+    discarded = list(over_cap)
     for c in scored:
         if c.cross_encoder_score >= threshold_high:
             accepted.append(c)
@@ -229,7 +243,7 @@ def classify_by_threshold(
             borderline.append(c)
         else:
             discarded.append(c)
-    borderline.extend(unscored)
+    borderline.extend(riders)
     return accepted, borderline, discarded
 
 
@@ -242,10 +256,11 @@ def classify_by_rank(
     bm25_rescue_rank: int = 0,
 ) -> tuple[list[ScoredCandidate], list[ScoredCandidate], list[ScoredCandidate]]:
     scored, unscored = _split_unscored(candidates)
+    riders, over_cap = _cap_unscored(unscored, top_n_judge)
     ranked = sorted(scored, key=lambda c: c.cross_encoder_score, reverse=True)
     accepted = []
     borderline = []
-    discarded = []
+    discarded = list(over_cap)
     for i, c in enumerate(ranked):
         if min_score_floor > 0 and c.cross_encoder_score < min_score_floor:
             if bm25_rescue_rank > 0 and c.bm25_rank > 0 and c.bm25_rank <= bm25_rescue_rank:
@@ -260,7 +275,7 @@ def classify_by_rank(
             borderline.append(c)
         else:
             discarded.append(c)
-    borderline.extend(unscored)
+    borderline.extend(riders)
     return accepted, borderline, discarded
 
 
@@ -280,6 +295,7 @@ def classify_candidates(
             threshold_high=threshold_high,
             threshold_low=threshold_low if threshold_low is not None else 0.15,
             bm25_rescue_rank=bm25_rescue_rank,
+            top_n_judge=top_n_judge,
         )
     return classify_by_rank(
         candidates,

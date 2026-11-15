@@ -837,6 +837,13 @@ class RiskIndex:
                 self.unscored_count += 1
                 logger.warning("Candidate %s unscored by reranker", c.risk_id)
                 unscored.append(c)
+        if len(unscored) > len(candidates) // 2:
+            # A majority-unscored call means the reranker is broken, not
+            # chatty: refuse to rank on the few scores that remain.
+            raise RuntimeError(
+                f"Reranker left {len(unscored)} of {len(candidates)} candidates unscored; "
+                "check the reranker endpoint and model"
+            )
         scored = sorted(finite_scored, key=lambda x: x[1], reverse=True)
         results = []
         for c, score in scored[:top_k]:

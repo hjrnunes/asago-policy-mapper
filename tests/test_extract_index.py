@@ -149,20 +149,61 @@ def test_rerank_counts_unavailable(monkeypatch, caplog):
     Unscored candidates stay in the returned list, after every scored one,
     so the selection path can route them to the judge (D3 option b).
     """
-    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan")])
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan"), 0.8])
     candidates = [
         ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
         ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
         ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c"),
+        ScoredCandidate(risk_id="R-D", risk_name="D", risk_description="d"),
     ]
 
     with caplog.at_level("WARNING", logger="asago_policy_mapper.extract.index"):
-        reranked = index.rerank("query", candidates, top_k=3)
+        reranked = index.rerank("query", candidates, top_k=4)
 
-    assert [c.risk_id for c in reranked] == ["R-B", "R-A", "R-C"]
+    assert [c.risk_id for c in reranked] == ["R-B", "R-D", "R-A", "R-C"]
     assert index.rerank_unavailable == 2
+    skip_warnings = [r.getMessage() for r in caplog.records if "unscored" in r.getMessage()]
+    assert skip_warnings == ["Candidate R-A unscored by reranker", "Candidate R-C unscored by reranker"]
+
+
+def test_rerank_majority_unscored_raises(monkeypatch, caplog):
+    """A majority-unscored rerank call raises: the reranker is broken, not chatty."""
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan"), float("nan")])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
+        ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c"),
+        ScoredCandidate(risk_id="R-D", risk_name="D", risk_description="d"),
+    ]
+
+    with caplog.at_level("WARNING", logger="asago_policy_mapper.extract.index"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"^Reranker left 3 of 4 candidates unscored; check the reranker endpoint and model$",
+        ):
+            index.rerank("query", candidates, top_k=4)
+
+    # The count and warnings land before the raise, so the failure is
+    # observable in the run's diagnostics.
+    assert index.rerank_unavailable == 3
     skip_warnings = [r for r in caplog.records if "unscored by reranker" in r.message]
-    assert len(skip_warnings) == 2
+    assert len(skip_warnings) == 3
+
+
+def test_rerank_half_unscored_does_not_raise(monkeypatch):
+    """Exactly half unscored is not a majority: candidates still ride along."""
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan"), 0.8])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
+        ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c"),
+        ScoredCandidate(risk_id="R-D", risk_name="D", risk_description="d"),
+    ]
+
+    reranked = index.rerank("query", candidates, top_k=4)
+
+    assert [c.risk_id for c in reranked] == ["R-B", "R-D", "R-A", "R-C"]
+    assert index.rerank_unavailable == 2
 
 
 def test_rerank_unavailable_counter_starts_at_zero():
@@ -172,11 +213,14 @@ def test_rerank_unavailable_counter_starts_at_zero():
 
 def test_rerank_unavailable_accumulates_across_calls(monkeypatch):
     """The counter accumulates across rerank calls, not resets per call."""
-    index = _index_with_predict(monkeypatch, [float("nan")])
-    candidates = [ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a")]
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
+    ]
 
-    index.rerank("query one", candidates, top_k=1)
-    index.rerank("query two", candidates, top_k=1)
+    index.rerank("query one", candidates, top_k=2)
+    index.rerank("query two", candidates, top_k=2)
 
     assert index.rerank_unavailable == 2
 
