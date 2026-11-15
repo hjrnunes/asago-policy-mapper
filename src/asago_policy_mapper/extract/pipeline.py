@@ -673,13 +673,15 @@ def _ground_expansion_groups(
     return expansion_matches, expanded_grounded
 
 
-def _expand_siblings(risks, merged, chunk_results, chunks, stats) -> tuple:
+def _expand_siblings(risks, merged, chunk_results, chunks, stats, dropped_ids: set[str] | None = None) -> tuple:
     """Prepare sibling-expansion candidates and their grounding groups.
 
     Returns (expanded, groups, risk_lookup): the sibling candidates not yet
     found, their grounding groups (empty when there are no candidates), and
     the catalog lookup the matches are built from. Records the candidate and
-    group counts in stats.
+    group counts in stats. When ``dropped_ids`` carries the prefilter's
+    dropped catalog ids, ``stats["prefilter_reentered"]`` counts how many
+    of them expansion proposes again.
     """
     from asago_policy_mapper.extract.expand import (
         build_expansion_graph,
@@ -698,6 +700,8 @@ def _expand_siblings(risks, merged, chunk_results, chunks, stats) -> tuple:
     merged_ids = {m.risk_id for m in merged}
     expanded = expand_with_siblings(merged_ids, expansion_graph, risk_lookup)
     stats["expanded_candidates"] = len(expanded)
+    if dropped_ids:
+        stats["prefilter_reentered"] = len({er.risk_id for er in expanded} & dropped_ids)
     if not expanded:
         return expanded, [], risk_lookup
 
@@ -709,6 +713,35 @@ def _expand_siblings(risks, merged, chunk_results, chunks, stats) -> tuple:
     )
     stats["expansion_groups"] = len(groups)
     return expanded, groups, risk_lookup
+
+
+def _prefilter_dropped_catalog(drops, variant_map) -> tuple[set[str], set[str]]:
+    """The dropped ids at catalog granularity, plus the dropped parents.
+
+    A dropped synthetic parent counts as its member variant ids, because
+    expansion proposes and grounds at that granularity; the parents get
+    their own set so the run can report how many whole groups came back.
+    """
+    dropped_ids: set[str] = set()
+    parents: set[str] = set()
+    for drop in drops:
+        members = (variant_map or {}).get(drop.risk_id)
+        if members:
+            parents.add(drop.risk_id)
+            dropped_ids.update(m["risk_id"] for m in members)
+        else:
+            dropped_ids.add(drop.risk_id)
+    return dropped_ids, parents
+
+
+def _record_reentry_parents(stats, dropped_parents: set[str], expanded, variant_map) -> None:
+    """Count dropped parents whose member variants expansion proposed again."""
+    if not dropped_parents:
+        return
+    proposed = {er.risk_id for er in expanded}
+    stats["prefilter_reentered_parents"] = sum(
+        1 for parent in dropped_parents if proposed & {m["risk_id"] for m in (variant_map or {}).get(parent, [])}
+    )
 
 
 def _run_expansion(
@@ -725,10 +758,27 @@ def _run_expansion(
     expansion_passes: int = 1,
     variant_map: dict | None = None,
     chunk_contexts=None,
+    prefilter_drops: list[FilteredCandidate] | None = None,
 ) -> tuple[list[RiskMatch], dict]:
     stats = {"expanded_candidates": 0, "expanded_grounded": 0, "expansion_groups": 0}
-    expanded, groups, risk_lookup = _expand_siblings(risks, merged, chunk_results, chunks, stats)
+    dropped_ids, dropped_parents = (
+        _prefilter_dropped_catalog(prefilter_drops, variant_map)
+        if prefilter_drops
+        else (
+            set(),
+            set(),
+        )
+    )
+    expanded, groups, risk_lookup = _expand_siblings(
+        risks, merged, chunk_results, chunks, stats, dropped_ids=dropped_ids or None
+    )
+    # Records 0 for dropped parents whose members expansion never proposed,
+    # so the key appears whenever parents were dropped, even when expansion
+    # proposes nothing at all.
+    _record_reentry_parents(stats, dropped_parents, expanded, variant_map)
     if not expanded:
+        if dropped_ids:
+            stats["prefilter_reentered_grounded"] = 0
         return merged, stats
 
     logger.info(
@@ -741,6 +791,8 @@ def _run_expansion(
     expansion_matches, stats["expanded_grounded"] = _ground_expansion_groups(
         groups, chunks, documents, index, client, config, max_workers, call_collector, expansion_passes, risk_lookup
     )
+    if dropped_ids:
+        stats["prefilter_reentered_grounded"] = len({m.risk_id for m in expansion_matches} & dropped_ids)
 
     if expansion_matches and variant_map:
         expansion_matches = _run_variant_grounding(
@@ -1313,11 +1365,14 @@ def _run_expansion_stage(
     chunk_contexts,
     max_workers,
     timing,
+    prefilter_drops=None,
 ) -> tuple[list, dict]:
     """Expand to sibling risks and ground them; grounded runs only.
 
     Returns the (possibly expanded) merged list and the expansion stats; the
-    counters stay at zero when the stage is skipped.
+    counters stay at zero when the stage is skipped. ``prefilter_drops``
+    carries the prefilter's drop records, whose ids the expansion counts
+    when it proposes them again.
     """
     if retrieval.expand_siblings and not retrieval.no_grounding and client is not None:
         with timed(timing, "expansion_ms"):
@@ -1335,6 +1390,7 @@ def _run_expansion_stage(
                 expansion_passes=retrieval.expansion_passes,
                 variant_map=index.variant_map if index.variant_map else None,
                 chunk_contexts=chunk_contexts,
+                prefilter_drops=prefilter_drops,
             )
             return merged, expansion_stats
     return merged, _EMPTY_EXPANSION_STATS.copy()
@@ -1489,6 +1545,7 @@ def run_extraction(
         chunk_contexts,
         max_workers,
         timing,
+        prefilter_drops=prefilter_drops or None,
     )
 
     merged = _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, call_collector, max_workers, timing)
