@@ -114,13 +114,20 @@ def _mine_other_chunk_negatives(
 def _load_pipeline_negatives(
     run_dir: Path, policy: str
 ) -> dict[int, list[dict]]:
-    """Load grounding_filtered_candidates from a pipeline run, keyed by chunk_index."""
+    """Load grounding_filtered_candidates from a pipeline run, keyed by chunk_index.
+
+    Prefilter drops (``dropped_by="prefilter"``) never reached grounding,
+    so they are not grounding rejections and are excluded: the grounder
+    trains only on candidates grounding itself rejected.
+    """
     result_path = run_dir / policy / "risk-extraction.json"
     if not result_path.exists():
         return {}
     data = json.loads(result_path.read_text())
     by_chunk: dict[int, list[dict]] = {}
     for c in data.get("grounding_filtered_candidates", []):
+        if c.get("dropped_by") == "prefilter":
+            continue
         ci = c.get("chunk_index", -1)
         if ci < 0:
             continue

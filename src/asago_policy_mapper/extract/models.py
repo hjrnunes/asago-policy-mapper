@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_serializer
 
 
 class ScoredCandidate(BaseModel):
@@ -150,6 +150,39 @@ class FilteredCandidate(BaseModel):
     bm25_rank: int = 0
     accepted_by: str
     chunk_index: int
+    dropped_by: str | None = None
+    score: float | None = None
+    reason: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_prefilter_fields(self, handler) -> dict[str, Any]:
+        """Leave the prefilter provenance fields out unless the prefilter set them.
+
+        Grounding rejections keep all three ``None``, and serializing them
+        would change the output of every filter-off run; only a prefilter
+        drop carries ``dropped_by``/``score``/``reason``.
+        """
+        data: dict[str, Any] = handler(self)
+        for key in ("dropped_by", "score", "reason"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+class DecisionCallRecord(BaseModel):
+    """One decision-stage call: what was sent and what was decided.
+
+    ``request`` holds the exact request the stage sent, with no
+    credentials (the prefilter's key travels in a header the body never
+    sees). Assessors that batch report one body per batch as a list;
+    single-shot assessors report one body as a dict. ``decision`` is the
+    ``DecisionLog`` the seam produced.
+    """
+
+    stage: str
+    chunk_index: int
+    request: dict | list
+    decision: DecisionLog | None = None
 
 
 class ExtractionResult(BaseModel):
@@ -162,7 +195,20 @@ class ExtractionResult(BaseModel):
     chunks: list[ChunkSummary] = []
     llm_calls: list[LLMCallRecord] = []
     grounding_filtered_candidates: list[FilteredCandidate] = []
+    decision_calls: list[DecisionCallRecord] = []
     eval: dict | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_decision_calls_when_off(self, handler) -> dict[str, Any]:
+        """Leave ``decision_calls`` out unless the prefilter recorded any.
+
+        With the filter off the list stays empty, and the serialized result
+        must stay byte-identical to the pre-filter output.
+        """
+        data: dict[str, Any] = handler(self)
+        if not data.get("decision_calls"):
+            data.pop("decision_calls", None)
+        return data
 
 
 class _JudgeVerdict(BaseModel):
