@@ -12,8 +12,13 @@ This software takes raw, unstructured policy documents and produces a **risk lan
 
 - **Risk identification** — Identifies Nexus risk IDs (e.g., `atlas-hallucination`, `air-2024-0042`, `nist-ms-2.5`) directly from policy text
 - **Cross-taxonomy mapping** — A static SSSOM mapping (`src/asago_policy_mapper/data/risk_to_category.sssom.tsv`) maps extracted risks to category-level taxonomies (NIST AI RMF, OWASP Top 10 LLM, OWASP ASI, AILuminate)
+<<<<<<< HEAD
 - **Evidence grounding** — Each identified risk is grounded to specific passages in the source document, providing traceability from risk to policy text
 - **Confidence scoring** — Each risk mapping carries the score that selected it and a `confidence_source` label (`cross_encoder`, `colbert`, `rrf`, or `none`); null confidence means no score was calculated for that candidate, so human review can target genuinely unscored mappings
+=======
+- **Evidence grounding** — Each identified risk is grounded to specific passages in the source document, providing traceability from risk to policy text. Every evidence quote is verified against the source chunks that made up the grounding context: `verification` marks it `verified` (exact match), `normalized` (match after Unicode/whitespace normalization) or `not_found`, and `found_chunk_index` records where the quote really is (`chunk_index` still names the chunk whose context was used; group-grounded quotes that match no chunk carry `chunk_index: null`)
+- **Confidence scoring** — Each risk mapping includes a confidence score, enabling human review of uncertain mappings
+>>>>>>> 2b22fdc (docs: describe evidence verification in README and CLAUDE.md)
 
 ### Example
 
@@ -70,7 +75,7 @@ flowchart LR
 5. **Query gen** *(optional, on by default)* — LLM generates 1-3 search queries per section group in risk-taxonomy vocabulary (parallel; disable with `--no-query-gen`)
 6. **Retrieve** — Hybrid search using generated queries (or, with `--no-query-gen`, per-chunk BM25 + semantic search with RRF fusion and cross-encoder reranking)
 7. **Judge** — LLM judges borderline candidates (parallel; only applies to fallback chunks in query-gen mode, since query-gen chunks bypass borderline classification)
-8. **Ground** — LLM extracts evidence passages and confidence (parallel, multi-pass)
+8. **Ground** — LLM extracts evidence passages and confidence (parallel, multi-pass); each quote is then verified against the same-document chunks behind the context sent to the model
 9. **Variant ground** — For collapsed parent risks that survived grounding, a specialized LLM call selects only the specifically evidenced variant sub-types
 10. **Merge** — Deduplicate across chunks, keep top-3 evidence spans
 11. **Expand** — Sibling expansion: found risks are expanded to parent siblings + cross-taxonomy mappings, then grounded against relevant document chunks (parallel)
