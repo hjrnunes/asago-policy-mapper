@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from asago_policy_mapper.extract.models import LLMCallRecord, ScoredCandidate, _JudgeVerdict, _JudgeVerdicts
 from asago_policy_mapper.extract.parse import Chunk
 from asago_policy_mapper.extract.retrieve import (
+    build_chunk_context_indices,
     build_chunk_contexts,
     build_padded_text,
     classify_by_rank,
@@ -454,3 +455,103 @@ def test_build_chunk_contexts_symmetric_expansion():
     assert "core chunk" in ctx
     assert "chunk one with some words" in ctx
     assert "chunk three with some words" in ctx
+
+
+# --- build_chunk_context_indices tests ---
+
+
+def test_context_indices_match_context_text_order():
+    """The indices for chunk i list the chunks whose texts build_chunk_contexts joins."""
+    chunks = [
+        Chunk(text="chunk zero with some words", source="a.pdf", index=0),
+        Chunk(text="chunk one with some words", source="a.pdf", index=1),
+        Chunk(text="core chunk", source="a.pdf", index=2),
+        Chunk(text="chunk three with some words", source="a.pdf", index=3),
+        Chunk(text="chunk four with some words", source="a.pdf", index=4),
+    ]
+    contexts = build_chunk_contexts(chunks, max_context_tokens=17)
+    indices = build_chunk_context_indices(chunks, max_context_tokens=17)
+    assert indices[2] == [0, 1, 2, 3]
+    # Every listed chunk's text appears in the context; unlisted chunks do not.
+    assert chunks[0].text in contexts[2]
+    assert chunks[3].text in contexts[2]
+    assert chunks[4].text not in contexts[2]
+
+
+def test_context_indices_with_section_headings():
+    """Indices stay raw chunk positions while the context gains synthetic headings."""
+    chunks = [
+        Chunk(text="intro text", source="a.pdf", index=0, section="Introduction"),
+        Chunk(text="method text", source="a.pdf", index=1, section="Methods"),
+        Chunk(text="more methods", source="a.pdf", index=2, section="Methods"),
+    ]
+    indices = build_chunk_context_indices(chunks, max_context_tokens=100)
+    contexts = build_chunk_contexts(chunks, max_context_tokens=100)
+    assert indices[1] == [0, 1, 2]
+    # The context inserts a heading at the section transition; the index list
+    # carries only real chunk positions, never the heading.
+    assert contexts[1] == "intro text\n\n## Methods\n\nmethod text\n\nmore methods"
+
+
+def test_context_indices_exclude_other_documents():
+    """Neighbours from a different source never appear in the indices."""
+    chunks = [
+        Chunk(text="prev from other doc", source="b.pdf", index=0),
+        Chunk(text="core chunk text", source="a.pdf", index=1),
+        Chunk(text="next from other doc", source="c.pdf", index=2),
+    ]
+    indices = build_chunk_context_indices(chunks, max_context_tokens=100)
+    assert indices[1] == [1]
+
+
+def test_context_indices_core_only_when_no_budget():
+    """A spent budget yields just the core chunk's index."""
+    chunks = [
+        Chunk(text="previous text", source="a.pdf", index=0),
+        Chunk(text="core chunk text", source="a.pdf", index=1),
+        Chunk(text="next text", source="a.pdf", index=2),
+    ]
+    indices = build_chunk_context_indices(chunks, max_context_tokens=3)
+    assert indices[1] == [1]
+
+
+def test_context_indices_first_and_last_chunk():
+    """Edge chunks expand toward both sides that exist within the budget."""
+    chunks = [
+        Chunk(text="first chunk", source="a.pdf", index=0),
+        Chunk(text="middle chunk", source="a.pdf", index=1),
+        Chunk(text="last chunk", source="a.pdf", index=2),
+    ]
+    indices = build_chunk_context_indices(chunks, max_context_tokens=100)
+    assert indices[0] == [0, 1, 2]
+    assert indices[2] == [0, 1, 2]
+
+
+def test_context_indices_stop_at_document_edge():
+    """A small budget expands an edge chunk only toward the existing side."""
+    chunks = [
+        Chunk(text="first chunk", source="a.pdf", index=0),
+        Chunk(text="middle chunk", source="a.pdf", index=1),
+        Chunk(text="last chunk", source="a.pdf", index=2),
+    ]
+    # Budget for exactly one neighbour (core=2 words, neighbours=2 words each).
+    indices = build_chunk_context_indices(chunks, max_context_tokens=5)
+    assert indices[0] == [0, 1]
+    assert indices[2] == [1, 2]
+
+
+def test_context_indices_default_budget():
+    """The default budget is 1024 tokens, matching build_chunk_contexts."""
+    chunks = [Chunk(text="w" if i > 0 else "core", source="a.pdf", index=i) for i in range(1200)]
+    # Core chunk 0 spends 1 token; the default 1024 budget admits 1023 one-word
+    # neighbours, for 1024 indices. A 1025 budget would admit one more.
+    assert build_chunk_context_indices(chunks)[0] == list(range(1024))
+
+
+def test_context_indices_parallel_to_chunks():
+    """One index list per chunk, core index always present at its position."""
+    chunks = [Chunk(text=f"chunk {i} text", source="a.pdf", index=i) for i in range(4)]
+    indices = build_chunk_context_indices(chunks, max_context_tokens=100)
+    assert len(indices) == len(chunks)
+    for i, idx_list in enumerate(indices):
+        assert i in idx_list
