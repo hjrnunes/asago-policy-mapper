@@ -27,6 +27,8 @@ class ScoredCandidate(BaseModel):
     embedding_distance: float = 0.0
     cross_encoder_score: float = 0.0
     rrf_score: float = 0.0
+    rerank_source: Literal["cross_encoder", "colbert"] | None = None
+    selected_by: str | None = None
 
 
 DPV_RISK_CONTROLS = Literal[
@@ -68,7 +70,7 @@ class EvidenceSpan(BaseModel):
 class RetrievalScores(BaseModel):
     bm25_rank: int
     embedding_distance: float
-    cross_encoder_score: float
+    cross_encoder_score: float | None
     rrf_score: float
 
 
@@ -77,7 +79,8 @@ class RiskMatch(BaseModel):
     risk_name: str
     risk_description: str
     taxonomy: str = ""
-    confidence: float
+    confidence: float | None
+    confidence_source: Literal["cross_encoder", "colbert", "rrf", "none"] = "none"
     grounding_confidence: str
     accepted_by: str
     evidence: list[EvidenceSpan]
@@ -88,6 +91,7 @@ class RiskMatch(BaseModel):
     vulnerability: str | None = None
     consequence: str | None = None
     impact: str | None = None
+    scores_inherited_from: str | None = None
 
     _reject_nan_confidence = field_validator("confidence")(_reject_nan)
 
@@ -220,7 +224,7 @@ class DecisionCallRecord(BaseModel):
 
 
 class ExtractionResult(BaseModel):
-    version: str = "0.3"
+    version: str = "0.4"
     risks: list[RiskMatch]
     source_documents: list[str]
     token_usage: dict = {}

@@ -8,6 +8,17 @@ from pydantic import BaseModel
 from asago_policy_mapper.extract.models import EvidenceSpan, RiskMatch
 
 
+def _confidence_order_key(confidence: float | None) -> tuple[bool, float]:
+    """Order confidences where None is lower than any number.
+
+    The first component separates null from numeric so no numeric value —
+    however extreme — can compare equal to None; False sorts below True,
+    so None takes the lowest slot. The second orders the numeric values
+    themselves.
+    """
+    return (confidence is not None, confidence or 0.0)
+
+
 def _tiebreak_key(model: BaseModel) -> str:
     """Total-order tie-break for models the ordering keys cannot separate.
 
@@ -32,7 +43,28 @@ def _best_match_key(m: RiskMatch) -> tuple:
     between real numbers and the order is total.
     """
     min_chunk = min((e.chunk_index for e in m.evidence), default=math.inf)
-    return (m.confidence, -min_chunk, tuple(e.text for e in m.evidence), _tiebreak_key(m))
+    return (
+        _confidence_order_key(m.confidence),
+        -min_chunk,
+        tuple(e.text for e in m.evidence),
+        _tiebreak_key(m),
+    )
+
+
+def _confidence_desc_key(confidence: float | None) -> tuple[bool, float]:
+    """Order confidences descending for output sorting, None last.
+
+    The nullness flag sends None below every number; the negated numeric
+    value sorts higher confidences first.
+    """
+    is_none = confidence is None
+    numeric = confidence if confidence is not None else 0.0
+    return (is_none, -numeric)
+
+
+def _max_confidence(confidences) -> float | None:
+    """Max over confidences where None counts as lower than any number."""
+    return max((c for c in confidences if c is not None), default=None)
 
 
 def _evidence_sort_key(s: EvidenceSpan) -> tuple:
@@ -79,11 +111,11 @@ def merge_matches(
         merged.append(
             best.model_copy(
                 update={
-                    "confidence": max(m.confidence for m in group),
+                    "confidence": _max_confidence(m.confidence for m in group),
                     "evidence": _merge_evidence(group, max_evidence),
                 }
             )
         )
 
-    merged.sort(key=lambda m: (-m.confidence, m.risk_id))
+    merged.sort(key=lambda m: (_confidence_desc_key(m.confidence), m.risk_id))
     return merged
