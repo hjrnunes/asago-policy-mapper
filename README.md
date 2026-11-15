@@ -283,6 +283,8 @@ The result metadata also carries `metadata.run_plan`: the requested retrieval se
 
 `--prefilter-profile PATH` (env var `POLICY_MAPPER_PREFILTER_PROFILE`) turns on the opt-in pre-grounding filter. The profile is a YAML mapping of the HTTP probability endpoint's fields (`base_url`, `model`, `api_key_env`, `timeout_s`, `max_batch`) plus `threshold`; the API key itself is read from the environment variable named by `api_key_env`, never from the profile. `base_url` must be an http(s) URL with a host, `timeout_s` must be greater than 0, and an offsite endpoint whose `api_key_env` variable is unset fails at load. The filter runs once per chunk over the accepted candidates after the judge, using exactly the grounding context, and drops candidates whose grounding probability is at or below the threshold; timeouts, invalid answers and assessor exceptions keep the candidate (fail-open). It requires grounding (it is refused with `--no-grounding`) and the `decision` extra. With the filter on, the result carries `decision_calls` (the exact request bodies, without credentials, and the decision log for each chunk; a body the assessor built for the record instead of sending — a replayed run, or a chunk where the assessor failed before sending — carries `synthesized: true`) and drops in `grounding_filtered_candidates` with `dropped_by: "prefilter"`, their score and the rule's reason; `retrieval_stats.prefilter_dropped` counts them, and `retrieval_stats.grounding_filtered` counts only candidates grounding itself rejected (the two never overlap); `metadata.prefilter` records the assessor, rule, threshold, endpoint host, offsite flag and fields sent. A run with no documents or an empty risk catalog short-circuits before the filter stage and carries none of these fields. Expansion is not blacklisted: `expansion_stats.prefilter_reentered` counts dropped catalog ids expansion proposes again, `prefilter_reentered_grounded` those that then grounded, and `prefilter_reentered_parents` dropped synthetic parents (a dropped parent counts as its member variant ids). With the filter off, none of these fields appear and the output is unchanged. `--no-prefilter` turns the filter off, overriding both `POLICY_MAPPER_PREFILTER_PROFILE` and `--prefilter-profile`.
 
+For the Jev (TypeSafe System One) provider, `asago_policy_mapper.assessors.jev` provides `JevProbabilityEndpoint` and `JevProbabilityAssessor`: thin subclasses of the generic HTTP probability endpoint and assessor that translate the seam's `{context, cases}` onto Jev's `POST /v1/systemone` wire — the chunk context as `state`, one Noul question per case keyed by risk id, and each answer's `noul` probability read back as the score. The default `base_url` is `https://api.typesafe.ai`, the default `model` is `jev-latest`, and the default `api_key_env` is `POLICY_MAPPER_JEV_API_KEY`; every field stays overridable, and the key travels in the `Authorization: Bearer` header only, never in a request body or a log.
+
 ### Evaluate against ground truth
 
 ```bash
@@ -346,6 +348,20 @@ uv run asago-policy-mapper extract policy.pdf -o output/ \
 uv run asago-policy-mapper extract policy.pdf -o output/ \
   --prefilter-profile prefilter.yaml \
   --base-url <url> --model <model>
+
+# Jev (TypeSafe System One) prefilter: construct the mapping in Python and
+# pass it as the assessor. --prefilter-profile stays generic (it always
+# builds the {context, items} HTTP assessor); the Jev classes translate
+# onto POST /v1/systemone. The API key is read from the env var named by
+# api_key_env (default POLICY_MAPPER_JEV_API_KEY) at runtime, never from
+# code or a profile:
+#
+#   from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
+#   from asago_policy_mapper.extract.gates import ThresholdDrop
+#   from asago_policy_mapper.extract.pipeline import Prefilter
+#
+#   assessor = JevProbabilityAssessor(JevProbabilityEndpoint())   # https://api.typesafe.ai, jev-latest
+#   prefilter = Prefilter(assessor=assessor, rule=ThresholdDrop(assessor, threshold=0.10))
 
 # Rebuild mitigation index (after data file changes)
 python scripts/build_mitigation_index.py
