@@ -131,6 +131,35 @@ def test_ir_summary_does_not_hide_query_generation(tmp_path, capsys):
     assert "query generation" in out
 
 
+def test_llm_judge_summary_without_grounding(tmp_path, capsys):
+    """A judge-only run (no grounding) reports the LLM-judged line.
+
+    The judge runs as an LLM stage here, so the summary must not call the
+    run IR-only: it names the LLM-judged count and the missing grounding.
+    """
+    from asago_policy_mapper.cli import _write_extraction_outputs
+
+    result = SimpleNamespace(
+        risks=[], retrieval_stats=SimpleNamespace(auto_accepted=2, llm_judged=5, grounding_filtered=0)
+    )
+    retrieval = RetrievalConfig(query_gen=False, no_grounding=True, expand_siblings=False)
+    plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+    assert plan.judge == "llm" and plan.grounding is False and plan.needs_llm
+
+    _write_extraction_outputs(
+        result,
+        {"risks": []},
+        tmp_path,
+        output_format="json",
+        plan=plan,
+        tracker=SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0, calls=0),
+    )
+
+    out = capsys.readouterr().out
+    assert "IR-only" not in out
+    assert "5 LLM-judged (no grounding)" in out
+
+
 def test_existing_command_lines_accepted(tmp_path, monkeypatch):
     """The CLI invocations used across the test suite still run.
 
@@ -233,6 +262,42 @@ def test_existing_command_lines_accepted(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, (result.output, result.exception)
     assert captured["retrieval"].no_judge is True
+
+
+def test_explicit_option_names_reads_the_real_click_context():
+    """_explicit_option_names maps passed flags to their dashed names.
+
+    Store-true flags map directly (``no_judge`` → ``--no-judge``), the
+    boolean pairs record the polarity actually passed (``--no-query-gen``
+    when the positive form was declined), and options left at their
+    defaults or fed through environment variables never make the set.
+    """
+    import click
+    import click.testing
+
+    from asago_policy_mapper.cli import _explicit_option_names
+
+    seen = {}
+
+    @click.command()
+    @click.option("--no-judge", is_flag=True)
+    @click.option("--query-gen/--no-query-gen", default=True)
+    @click.option("--rrf-min-score", type=float, default=0.015)
+    def probe(no_judge, query_gen, rrf_min_score):
+        seen["result"] = _explicit_option_names(("no_judge", "query_gen", "rrf_min_score"))
+
+    # Only --no-judge and the declined boolean pair were passed on the
+    # command line; rrf_min_score keeps its default.
+    click.testing.CliRunner().invoke(probe, ["--no-judge", "--no-query-gen"], env={"POLICY_MAPPER_RRF_MIN_SCORE": ""})
+    assert seen["result"] == frozenset({"--no-judge", "--no-query-gen"})
+
+    # The positive forms and an explicit value all land in the set.
+    click.testing.CliRunner().invoke(probe, ["--rrf-min-score", "0.02"])
+    assert seen["result"] == frozenset({"--rrf-min-score"})
+
+    # Nothing passed: the set is empty even with defaults resolved.
+    click.testing.CliRunner().invoke(probe, [])
+    assert seen["result"] == frozenset()
 
 
 def test_cli_forwards_the_resolved_plan(tmp_path, monkeypatch):
@@ -373,6 +438,53 @@ def test_metadata_records_requested_and_effective(mock_config, tmp_path, monkeyp
     assert "query_gen_queries" not in result.metadata or result.metadata["query_gen_queries"] == []
 
 
+def test_empty_run_records_the_plan(tmp_path, mock_config):
+    """A short-circuited run still records the run plan under its key.
+
+    An empty document exits before any stage runs; the metadata carries
+    only ``run_plan``, and it describes the plan the caller passed (or
+    derives one). A derived plan on a prefilter run records the prefilter
+    stage, because the empty-exit path forwards the prefilter flag.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    empty = tmp_path / "empty.txt"
+    empty.write_text("   ")
+    retrieval = RetrievalConfig(query_gen=False, no_judge=True, no_grounding=True, expand_siblings=False)
+    plan = resolve_plan(retrieval, prefilter=True, explicit=frozenset())
+
+    result = pipeline.run_extraction(
+        documents=[empty],
+        client=None,
+        config=mock_config,
+        risks=[],
+        retrieval=retrieval,
+        ocr=False,
+        plan=plan,
+    )
+
+    assert set(result.metadata) == {"run_plan"}
+    assert result.metadata["run_plan"]["effective"] == asdict(plan)
+
+    # Without a plan, the empty run derives one from the same inputs:
+    # the prefilter flag survives the short circuit. (The prefilter needs
+    # grounding, so this retrieval keeps grounding on.)
+    prefilter_retrieval = RetrievalConfig(query_gen=False, no_judge=True)
+    prefilter = SimpleNamespace(profile="stub")
+    result = pipeline.run_extraction(
+        documents=[empty],
+        client=None,
+        config=mock_config,
+        risks=[],
+        retrieval=prefilter_retrieval,
+        ocr=False,
+        prefilter=prefilter,
+    )
+    derived = resolve_plan(prefilter_retrieval, prefilter=True, explicit=frozenset())
+    assert result.metadata["run_plan"]["effective"] == asdict(derived)
+    assert result.metadata["run_plan"]["effective"]["prefilter"] is True
+
+
 # --- the explicit reranker argument (step 3) ---
 
 
@@ -441,6 +553,12 @@ def test_hybrid_search_explicit_rerank_overrides_floor(monkeypatch, tmp_path):
     # rerank=None keeps the old rule: rerank iff rrf_min_score <= 0.
     results = index.hybrid_search("query", top_k=5, rrf_min_score=0.0, rerank=None)
     assert [c.cross_encoder_score for c in results] == [0.5]
+
+    # ...and a positive floor with rerank=None stays on the floor path
+    # (the fused candidate survives, no cross-encoder score is set).
+    results = index.hybrid_search("query", top_k=5, rrf_min_score=0.01, rerank=None)
+    assert [c.risk_id for c in results] == ["R-001"]
+    assert all(c.cross_encoder_score == 0.0 for c in results)
 
 
 def test_rrf_floor_does_not_toggle_reranking(mock_config, tmp_path, monkeypatch):
@@ -567,6 +685,20 @@ def test_judge_context_tokens_used_when_positive(mock_config, monkeypatch, tmp_p
     assert seen[0] == expected
     assert seen[0] != "grounding context"
     assert "more words" not in seen[0]
+
+    # A budget of exactly 1 still builds judge contexts (the smallest
+    # positive budget never expands to neighbors); 0 shares the grounding
+    # context instead.
+    seen.clear()
+    retrieval = RetrievalConfig(query_gen=False, judge_context_tokens=1)
+    pipeline._run_judge([cr], chunks, MagicMock(), mock_config, retrieval, [], chunk_contexts=["grounding context"])
+    assert seen[0] == build_chunk_contexts(chunks, max_context_tokens=1)[0]
+    assert seen[0] != "grounding context"
+
+    seen.clear()
+    retrieval = RetrievalConfig(query_gen=False, judge_context_tokens=0)
+    pipeline._run_judge([cr], chunks, MagicMock(), mock_config, retrieval, [], chunk_contexts=["grounding context"])
+    assert seen[0] == "grounding context"
 
 
 def test_judge_context_budget_does_not_change_grounding_context(mock_config, tmp_path, monkeypatch):
