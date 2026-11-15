@@ -351,6 +351,36 @@ def test_retrieve_chunk_rerank_unavailable_defaults_to_zero():
     assert cr.stats["rerank_unavailable"] == 0
 
 
+def test_count_unavailable_reads_int_counter():
+    """The helper returns the index counter verbatim when it is an int."""
+    from asago_policy_mapper.extract.retrieve import _count_unavailable
+
+    class _Idx:
+        rerank_unavailable = 4
+
+    assert _count_unavailable(_Idx()) == 4
+
+
+def test_count_unavailable_missing_attribute_is_zero():
+    """No counter attribute reads as zero, whatever the getattr default mutates to."""
+    from asago_policy_mapper.extract.retrieve import _count_unavailable
+
+    class _Idx:
+        pass
+
+    assert _count_unavailable(_Idx()) == 0
+
+
+def test_count_unavailable_non_int_is_zero():
+    """Mock-style counters (auto-attributes) read as zero, not as a count."""
+    from asago_policy_mapper.extract.retrieve import _count_unavailable
+
+    class _Idx:
+        rerank_unavailable = "not-an-int"
+
+    assert _count_unavailable(_Idx()) == 0
+
+
 # --- classify_by_rank / classify_by_threshold direct tests ---
 
 
