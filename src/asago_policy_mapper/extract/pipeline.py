@@ -513,6 +513,7 @@ def _run_judge(
                 cr.borderline_judged = list(cr.borderline)
                 cr.accepted.extend(cr.borderline)
     elif retrieval.use_cross_encoder:
+        judge_contexts = _judge_contexts(chunks, retrieval, chunk_contexts)
         if judge_tasks:
             # One records list per chunk; the submit and merge loops walk the
             # same list-position pairing, so the merge order is the chunk order.
@@ -528,7 +529,7 @@ def _run_judge(
                         task_records[pos],
                         retrieval.judge_prompt,
                         retrieval.grounding_batch_size,
-                        chunk_contexts[i] if chunk_contexts else "",
+                        judge_contexts[i] if judge_contexts else "",
                     ): i
                     for pos, (i, cr) in enumerate(judge_tasks)
                 }
@@ -539,6 +540,17 @@ def _run_judge(
             if call_collector is not None:
                 for records in task_records:
                     merge_call_records(call_collector, records, counts=_counts_judge)
+
+
+def _judge_contexts(chunks, retrieval, chunk_contexts):
+    """Pick the context list the judge reads.
+
+    A positive ``judge_context_tokens`` builds judge-only contexts with
+    that budget; the grounding and prefilter contexts are untouched.
+    """
+    if retrieval.judge_context_tokens > 0:
+        return build_chunk_contexts(chunks, max_context_tokens=retrieval.judge_context_tokens)
+    return chunk_contexts
 
 
 def _build_chunk_risk_map(chunk_results, all_matches, no_grounding):

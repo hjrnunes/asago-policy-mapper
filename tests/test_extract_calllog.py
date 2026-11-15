@@ -345,7 +345,15 @@ def test_run_judge_numbers_records_in_task_order(monkeypatch):
     collector: list[LLMCallRecord] = []
     config = LLMConfig(base_url="http://test", model="test-model", max_context=0)
     retrieval = type(
-        "R", (), {"no_judge": False, "use_cross_encoder": True, "judge_prompt": "judge_risk", "grounding_batch_size": 0}
+        "R",
+        (),
+        {
+            "no_judge": False,
+            "use_cross_encoder": True,
+            "judge_prompt": "judge_risk",
+            "grounding_batch_size": 0,
+            "judge_context_tokens": 0,
+        },
     )()
     chunk_results = _grounding_chunk_results(task_count)
     for cr in chunk_results:
@@ -372,7 +380,15 @@ def test_run_judge_without_collector_records_nothing(monkeypatch):
     monkeypatch.setattr(pipeline, "_judge_one", fake_judge_one)
     config = LLMConfig(base_url="http://test", model="test-model", max_context=0)
     retrieval = type(
-        "R", (), {"no_judge": False, "use_cross_encoder": True, "judge_prompt": "judge_risk", "grounding_batch_size": 0}
+        "R",
+        (),
+        {
+            "no_judge": False,
+            "use_cross_encoder": True,
+            "judge_prompt": "judge_risk",
+            "grounding_batch_size": 0,
+            "judge_context_tokens": 0,
+        },
     )()
     chunk_results = _grounding_chunk_results(2)
     for cr in chunk_results:
