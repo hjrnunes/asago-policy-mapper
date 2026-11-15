@@ -11,7 +11,9 @@ from asago_policy_mapper.extract.index import (
     _parse_remote_url,
     _RemoteBiEncoder,
     _RemoteCrossEncoder,
+    _rerank_pairs,
     _rrf_fuse,
+    _scored_candidates,
 )
 from asago_policy_mapper.extract.models import ScoredCandidate
 
@@ -243,6 +245,35 @@ def test_rrf_fuse_first_occurrence_wins():
     list_b = [_sc("R-001", ce_score=0.1)]
     _, candidate_data, _ = _rrf_fuse(list_a, list_b)
     assert candidate_data["R-001"].cross_encoder_score == 0.9
+
+
+# --- _rerank_pairs and _scored_candidates tests ---
+
+
+def test_rerank_pairs_score_models_reverse_the_pair():
+    candidates = [_sc("R-001"), _sc("R-002")]
+    pairs = _rerank_pairs(is_nli=False, text="chunk text", candidates=candidates)
+    assert pairs == [("R-001: ", "chunk text"), ("R-002: ", "chunk text")]
+
+
+def test_rerank_pairs_nli_models_statement_second():
+    candidates = [_sc("R-001")]
+    pairs = _rerank_pairs(is_nli=True, text="chunk text", candidates=candidates)
+    assert pairs == [("chunk text", "This text discusses R-001")]
+
+
+def test_scored_candidates_sorts_and_attaches_scores():
+    candidates = [_sc("R-001"), _sc("R-002"), _sc("R-003")]
+    scored = _scored_candidates(candidates, np.array([0.1, 0.9, 0.5]), top_k=2)
+    assert [c.risk_id for c in scored] == ["R-002", "R-003"]
+    assert [c.cross_encoder_score for c in scored] == [0.9, 0.5]
+
+
+def test_scored_candidates_skips_invalid_scores():
+    candidates = [_sc("R-001"), _sc("R-002")]
+    scored = _scored_candidates(candidates, np.array([np.nan, 0.4]), top_k=2)
+    assert [c.risk_id for c in scored] == ["R-002"]
+    assert scored[0].cross_encoder_score == 0.4
 
 
 # --- _make_score_normalizer tests ---
