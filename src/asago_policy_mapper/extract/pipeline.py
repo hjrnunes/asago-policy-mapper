@@ -907,6 +907,7 @@ def _run_retrieval(chunks, index, retrieval, query_results, fallback_chunk_indic
                     top_k=50,
                     bm25_rescue_rank=retrieval.bm25_rescue_rank,
                     rrf_min_score=retrieval.rrf_min_score or 0.015,
+                    rerank=False,
                 )
                 _merge_query_candidates(chunk_results, chunks, qr, candidates)
 

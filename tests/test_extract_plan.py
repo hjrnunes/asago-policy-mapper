@@ -271,16 +271,16 @@ def test_warns_only_on_explicit_flags():
 
 def test_warns_non_positive_rrf_min_score():
     # Without the cross-encoder the floor branch is the only per-chunk
-    # filter: zero and negative values both drop it, but a negative value
-    # also bypasses the default floor on the query-generation searches.
+    # filter: zero and negative values both drop it, and the reranker
+    # never runs without a cross-encoder, so every fused candidate passes.
     zero = resolve_plan(
         RetrievalConfig(use_cross_encoder=False, rrf_min_score=0.0),
         prefilter=False,
         explicit=frozenset({"--rrf-min-score"}),
     )
     assert zero.warnings == (
-        "--rrf-min-score is zero: the per-chunk floor is dropped (the rerank path "
-        "returns no candidates without a cross-encoder), and query-generation "
+        "--rrf-min-score is zero: the per-chunk floor is dropped (every fused "
+        "candidate passes without a cross-encoder), and query-generation "
         "searches fall back to the default floor",
     )
 
@@ -290,8 +290,7 @@ def test_warns_non_positive_rrf_min_score():
         explicit=frozenset({"--rrf-min-score"}),
     )
     assert negative.warnings == (
-        "--rrf-min-score is negative: the floor is dropped and the rerank path "
-        "returns no candidates without a cross-encoder",
+        "--rrf-min-score is negative: the floor is dropped and every fused candidate passes without a cross-encoder",
     )
 
     # Zero without query generation has no fallback to describe.
@@ -301,7 +300,7 @@ def test_warns_non_positive_rrf_min_score():
         explicit=frozenset({"--rrf-min-score"}),
     )
     assert per_chunk_zero.warnings == (
-        "--rrf-min-score is zero: the per-chunk floor is dropped and the rerank path returns no candidates",
+        "--rrf-min-score is zero: the per-chunk floor is dropped and every fused candidate passes",
     )
 
     # Not passed explicitly: no warning, the plan just records the value.
@@ -313,9 +312,9 @@ def test_warns_non_positive_rrf_min_score():
 
 def test_warns_non_positive_rrf_min_score_with_cross_encoder():
     # With the cross-encoder on and query generation on, a non-positive
-    # --rrf-min-score neither sets a floor nor changes the per-chunk path.
-    # Zero falls back to the default floor on the query-generation searches;
-    # a negative value bypasses it and gets those searches reranked.
+    # --rrf-min-score neither sets a floor nor changes the per-chunk path;
+    # the query-generation searches fall back to the default floor either
+    # way (they never rerank).
     zero = resolve_plan(
         RetrievalConfig(rrf_min_score=0.0),
         prefilter=False,
@@ -332,8 +331,8 @@ def test_warns_non_positive_rrf_min_score_with_cross_encoder():
         explicit=frozenset({"--rrf-min-score"}),
     )
     assert negative.warnings == (
-        "--rrf-min-score is negative: it sets no floor, leaves the per-chunk path "
-        "unchanged, and query-generation searches get reranked instead of floored",
+        "--rrf-min-score is negative: it sets no floor and leaves the per-chunk path "
+        "unchanged; query-generation searches fall back to the default floor",
     )
 
     # Positive values are honoured on the query-generation searches, so no
