@@ -154,7 +154,7 @@ def test_extraction_result_defaults():
             grounding_filtered=1,
         ),
     )
-    assert result.version == "0.3"
+    assert result.version == "0.4"
     assert result.token_usage == {}
     assert result.metadata == {}
     assert result.retrieval_stats.timing_ms == {}
@@ -163,7 +163,7 @@ def test_extraction_result_defaults():
     assert result.eval is None
 
 
-def test_extraction_result_v03_defaults():
+def test_extraction_result_v04_defaults():
     result = ExtractionResult(
         risks=[],
         source_documents=["policy.pdf"],
@@ -175,13 +175,13 @@ def test_extraction_result_v03_defaults():
             grounding_filtered=1,
         ),
     )
-    assert result.version == "0.3"
+    assert result.version == "0.4"
     assert result.chunks == []
     assert result.llm_calls == []
     assert result.eval is None
 
 
-def test_extraction_result_v03_with_chunks_and_calls():
+def test_extraction_result_v04_with_chunks_and_calls():
     result = ExtractionResult(
         risks=[],
         source_documents=["policy.pdf"],
@@ -223,7 +223,7 @@ def test_extraction_result_v03_with_chunks_and_calls():
     assert result.eval["f1"] == 0.85
 
 
-def test_extraction_result_v03_serialization_roundtrip():
+def test_extraction_result_v04_serialization_roundtrip():
     result = ExtractionResult(
         risks=[],
         source_documents=["policy.pdf"],
@@ -239,7 +239,7 @@ def test_extraction_result_v03_serialization_roundtrip():
     )
     d = result.model_dump()
     restored = ExtractionResult(**d)
-    assert restored.version == "0.3"
+    assert restored.version == "0.4"
     assert restored.chunks == []
     assert restored.llm_calls == []
     assert restored.eval is None
