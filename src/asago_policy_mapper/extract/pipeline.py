@@ -410,6 +410,19 @@ def _variant_evidence_key(e: EvidenceSpan) -> tuple:
     return (-e.cross_encoder_score, e.chunk_index, e.text)
 
 
+def _variant_context_span(evidence: list[EvidenceSpan]) -> EvidenceSpan | None:
+    """Pick the best evidence span that names a chunk to ground against.
+
+    Variant grounding needs a chunk; spans the group stage could not
+    attribute (chunk_index None) cannot provide one, so they are excluded
+    before the 150a tie-break key runs.
+    """
+    attributed = [e for e in evidence if e.chunk_index is not None]
+    if not attributed:
+        return None
+    return min(attributed, key=_variant_evidence_key)
+
+
 def _ground_variants_one(
     parent_match,
     chunks,
@@ -430,7 +443,10 @@ def _ground_variants_one(
     if not evidence:
         return parent_match, {}
 
-    best_ev = min(evidence, key=_variant_evidence_key)
+    best_ev = _variant_context_span(evidence)
+    if best_ev is None or best_ev.chunk_index is None:
+        return parent_match, {}
+
     ci = best_ev.chunk_index
     text = chunk_contexts[ci] if chunk_contexts and ci < len(chunk_contexts) else chunks[ci].text
     chunk = chunks[ci]
@@ -633,6 +649,8 @@ def _build_chunk_risk_map(chunk_results, all_matches, plan):
     else:
         for m in all_matches:
             for ev in m.evidence:
+                if ev.chunk_index is None:
+                    continue
                 chunk_risk_ids.setdefault(ev.chunk_index, []).append(m.risk_id)
     return chunk_risk_ids
 
@@ -650,6 +668,8 @@ def _build_found_risk_chunks(merged, chunk_results) -> dict[str, set[int]]:
             found_risk_chunks.setdefault(cid, set()).add(cr.chunk_index)
     for m in merged:
         for ev in m.evidence:
+            if ev.chunk_index is None:
+                continue
             found_risk_chunks.setdefault(m.risk_id, set()).add(ev.chunk_index)
     return found_risk_chunks
 

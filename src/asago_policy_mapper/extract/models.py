@@ -65,7 +65,7 @@ class EvidenceSpan(BaseModel):
     document: str
     page: int | None = None
     section: str | None = None
-    chunk_index: int
+    chunk_index: int | None
     sentence_index: int = 0
     cross_encoder_score: float = 0.0
     verification: Literal["verified", "normalized", "not_found"] | None = None

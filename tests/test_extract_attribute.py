@@ -987,10 +987,11 @@ def test_ground_risk_group_skips_empty_quotes():
 
 
 def test_group_unmatched_quote_pinned_to_first_today():
-    """Characterization: today an unmatched group quote is pinned to chunk_indices[0].
+    """An unmatched group quote carries no chunk attribution.
 
-    This pins current behavior before evidence verification lands (bead
-    #152 part 1 flips it: the span will carry chunk_index=None instead).
+    Characterization of the pre-verification behavior (pinned to
+    chunk_indices[0]) flipped by evidence verification: unmatched quotes
+    now get chunk_index=None instead of the first chunk of the group.
     """
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _RiskEvidenceList(
@@ -1019,7 +1020,183 @@ def test_group_unmatched_quote_pinned_to_first_today():
     )
 
     evidence, _ = result["R-001"]
-    assert evidence[0].chunk_index == 1  # pinned to chunk_indices[0], not found anywhere
+    assert evidence[0].chunk_index is None  # FLIPPED: was pinned to chunk_indices[0]
+    assert evidence[0].verification == "not_found"
+    assert evidence[0].found_chunk_index is None
+
+
+def _make_meta_chunks(entries):
+    """Chunks with source/page/section metadata, keyed by (index, text)."""
+    return [
+        SimpleNamespace(
+            text=text,
+            source=source,
+            index=i,
+            page=page,
+            section=section,
+        )
+        for i, (text, source, page, section) in enumerate(entries)
+    ]
+
+
+def test_group_quote_uses_actual_document():
+    """A matched group quote takes document, page and section from its chunk."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["Encryption at rest is mandatory."],
+            )
+        ]
+    )
+
+    chunks = _make_meta_chunks(
+        [
+            ("Retention is 30 days.", "first.md", 1, "Retention"),
+            ("Encryption at rest is mandatory.", "first.md", 2, "Security"),
+            ("Unrelated third chunk.", "second.md", 1, "Other"),
+        ]
+    )
+    risks = [
+        {"risk_id": "R-001", "risk_name": "Security", "risk_description": "Security risk."},
+    ]
+
+    result = ground_risk_group(
+        chunks=chunks,
+        chunk_indices=[0, 1, 2],
+        risks=risks,
+        client=mock_client,
+        model="test-model",
+        document="fallback.md",
+    )
+
+    evidence, _ = result["R-001"]
+    e = evidence[0]
+    assert e.chunk_index == 1
+    assert e.verification == "verified"
+    assert e.found_chunk_index == 1
+    # Document, page and section come from the matched chunk, not documents[0]
+    # or the group's fallback document argument.
+    assert e.document == "first.md"
+    assert e.page == 2
+    assert e.section == "Security"
+
+
+def test_group_quote_normalized_match_finds_chunk():
+    """A group quote matching only after normalization still finds its chunk."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["The policy states “privacy’s a core value”."],
+            )
+        ]
+    )
+
+    chunks = _make_meta_chunks(
+        [
+            ("The  policy states “privacy’s a core value”.", "doc.md", 3, "Privacy"),
+        ]
+    )
+    risks = [
+        {"risk_id": "R-001", "risk_name": "Privacy", "risk_description": "Privacy risk."},
+    ]
+
+    result = ground_risk_group(
+        chunks=chunks,
+        chunk_indices=[0],
+        risks=risks,
+        client=mock_client,
+        model="test-model",
+        document="doc.md",
+    )
+
+    evidence, _ = result["R-001"]
+    e = evidence[0]
+    assert e.verification == "normalized"
+    assert e.chunk_index == 0
+    assert e.found_chunk_index == 0
+
+
+def test_group_quote_without_chunk_metadata_uses_fallback_document():
+    """Chunks without source metadata fall back to the group document."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["Plain chunk text."],
+            )
+        ]
+    )
+
+    chunks = _make_chunks(["Plain chunk text."])  # .source missing
+    risks = [
+        {"risk_id": "R-001", "risk_name": "Bias", "risk_description": "Bias risk."},
+    ]
+
+    result = ground_risk_group(
+        chunks=chunks,
+        chunk_indices=[0],
+        risks=risks,
+        client=mock_client,
+        model="test-model",
+        document="group-doc.md",
+    )
+
+    evidence, _ = result["R-001"]
+    e = evidence[0]
+    assert e.document == "group-doc.md"
+    assert e.page is None
+    assert e.section is None
+    assert e.chunk_index == 0
+
+
+def test_group_quotes_after_empty_quote_still_located():
+    """An empty group quote is skipped, not a stop: later quotes still locate."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["", "Second chunk text.", "  "],
+            )
+        ]
+    )
+
+    chunks = _make_meta_chunks(
+        [
+            ("First chunk text.", "a.md", 1, "One"),
+            ("Second chunk text.", "a.md", 2, "Two"),
+        ]
+    )
+    risks = [
+        {"risk_id": "R-001", "risk_name": "Bias", "risk_description": "Bias risk."},
+    ]
+
+    result = ground_risk_group(
+        chunks=chunks,
+        chunk_indices=[0, 1],
+        risks=risks,
+        client=mock_client,
+        model="test-model",
+        document="group-doc.md",
+    )
+
+    evidence, _ = result["R-001"]
+    assert [e.text for e in evidence] == ["Second chunk text."]
+    assert evidence[0].chunk_index == 1
+    assert evidence[0].document == "a.md"
 
 
 def test_ground_risk_group_captures_call(mock_client):
@@ -1369,3 +1546,35 @@ def test_synthesize_causal_chain_records_call(mock_client):
     assert collector[0].call_id == "causal-001"
     assert collector[0].risk_ids == ["atlas-bias"]
     assert collector[0].duration_ms >= 0
+
+
+def test_synthesize_causal_chain_records_attributed_chunk_after_unattributed(mock_client):
+    """The causal record names the first attributed chunk, skipping None spans."""
+    mock_client.chat.completions.create.return_value = _CausalChains(
+        items=[
+            _CausalChain(
+                threat="Threat",
+                threat_source="Source",
+                vulnerability="Vuln",
+                consequence="Consequence",
+                impact="Impact",
+            ),
+        ]
+    )
+
+    risk = _make_risk_match(chunk_indices=[0, 2])
+    # First span unattributed: the record must skip it, not record None.
+    risk.evidence[0].chunk_index = None
+    chunk_texts = {0: "Text zero.", 2: "Text two."}
+    collector: list[LLMCallRecord] = []
+
+    synthesize_causal_chain(
+        risk_match=risk,
+        chunk_texts=chunk_texts,
+        client=mock_client,
+        model="test-model",
+        call_collector=collector,
+    )
+
+    assert len(collector) == 1
+    assert collector[0].chunk_index == 2

@@ -249,23 +249,34 @@ def ground_variants(
 def _group_verdicts_to_result(
     verdicts,
     risk_ids: set[str],
-    document: str,
-    find_chunk_for_quote,
+    locate_in_group,
 ) -> dict[str, tuple[list[EvidenceSpan], str]]:
-    """Filter grounded group verdicts, placing each quote in its chunk."""
+    """Filter grounded group verdicts, placing each quote in its chunk.
+
+    locate_in_group(quote) returns the matched chunk (or None) plus the
+    document, page and section recorded for it; unmatched quotes keep
+    chunk_index=None and the group's fallback document.
+    """
     result: dict[str, tuple[list[EvidenceSpan], str]] = {}
     for v in verdicts:
         if not v.grounded or v.risk_id not in risk_ids:
             continue
-        spans = [
-            EvidenceSpan(
-                text=quote,
-                document=document,
-                chunk_index=find_chunk_for_quote(quote),
+        spans = []
+        for quote in v.quotes:
+            if not quote.strip():
+                continue
+            match = locate_in_group(quote)
+            spans.append(
+                EvidenceSpan(
+                    text=quote,
+                    document=match["document"],
+                    page=match["page"],
+                    section=match["section"],
+                    chunk_index=match["chunk_index"],
+                    verification=match["verification"],
+                    found_chunk_index=match["found_chunk_index"],
+                )
             )
-            for quote in v.quotes
-            if quote.strip()
-        ]
         if spans:
             result[v.risk_id] = (spans, v.confidence)
     return result
@@ -341,15 +352,32 @@ def ground_risk_group(
 
     risk_ids = {r["risk_id"] for r in risks}
 
-    passage_texts = {idx: chunks[idx].text for idx in chunk_indices if idx < len(chunks)}
+    # Windows are the group's real source chunks, in group order; locate_quote
+    # never joins across documents because each window is one chunk's text.
+    source_windows = [(idx, chunks[idx].text) for idx in chunk_indices if idx < len(chunks)]
 
-    def _find_chunk_for_quote(quote: str) -> int:
-        for idx, text in passage_texts.items():
-            if quote in text:
-                return idx
-        return chunk_indices[0] if chunk_indices else 0
+    def _locate_in_group(quote: str) -> dict:
+        verification, found_index = locate_quote(quote, source_windows)
+        if found_index is None:
+            return {
+                "document": document,
+                "page": None,
+                "section": None,
+                "chunk_index": None,
+                "verification": verification,
+                "found_chunk_index": None,
+            }
+        chunk = chunks[found_index]
+        return {
+            "document": getattr(chunk, "source", None) or document,
+            "page": getattr(chunk, "page", None),
+            "section": getattr(chunk, "section", None),
+            "chunk_index": found_index,
+            "verification": verification,
+            "found_chunk_index": found_index,
+        }
 
-    result = _group_verdicts_to_result(verdicts, risk_ids, document, _find_chunk_for_quote)
+    result = _group_verdicts_to_result(verdicts, risk_ids, _locate_in_group)
 
     if call_collector is not None:
         _record_group_call(
@@ -458,7 +486,13 @@ def synthesize_causal_chain(
     chain = _downgrade_empty_chain(results[0] if results else None, risk_match.risk_id)
 
     if call_collector is not None:
-        first_chunk = risk_match.evidence[0].chunk_index if risk_match.evidence else -1
+        # Synthesis only runs when some evidence names a chunk in chunk_texts,
+        # so a reachable record always has an attributed span; the fallback
+        # guards spans whose chunk never made it into the record's int field.
+        first_chunk = next(
+            (e.chunk_index for e in risk_match.evidence if e.chunk_index is not None),
+            -1,
+        )
         append_with_call_id(
             call_collector,
             counts=lambda record: record.stage == "causal_synthesis",

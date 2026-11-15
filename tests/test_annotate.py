@@ -9,6 +9,7 @@ import pytest
 from asago_policy_mapper.extract.annotate import (
     _find_span_in_chunk,
     _locate_evidence,
+    _locate_risk_evidence,
     _map_normalized_offsets,
     _normalize,
     _overlaps_existing,
@@ -152,6 +153,61 @@ class TestLocateEvidence:
         assert ci == 1
         assert chunks[ci].text[start:end] == "eee fff"
 
+    def test_hinted_index_zero_used_directly(self):
+        """A hint of 0 is a valid chunk position and is probed directly.
+
+        Distinguishes the None-hint sentinel (-1) from a real 0 hint: the
+        sentinel must never be treated as a chunk position.
+        """
+        chunks = self._make_chunks(["aaa bbb ccc", "aaa bbb ccc"])
+        ci, start, end, is_fuzzy = _locate_evidence("aaa bbb", 0, chunks)
+        assert ci == 0
+        assert chunks[ci].text[start:end] == "aaa bbb"
+
+    def test_hint_negative_treated_as_no_hint(self):
+        """A negative hint skips the direct probe and scans every chunk."""
+        chunks = self._make_chunks(["aaa bbb ccc", "ddd eee fff"])
+        ci, start, end, is_fuzzy = _locate_evidence("ddd eee", -5, chunks)
+        assert ci == 1
+        assert chunks[ci].text[start:end] == "ddd eee"
+
+    def test_hint_wins_over_earlier_duplicate(self):
+        """The hinted chunk is probed before the scan, so it wins duplicates."""
+        chunks = self._make_chunks(["aaa bbb", "aaa bbb"])
+        ci, _, _, _ = _locate_evidence("aaa bbb", 1, chunks)
+        assert ci == 1
+
+    def test_hint_equal_to_len_falls_back_to_scan(self):
+        """A hint one past the last chunk is out of range, not an index."""
+        chunks = self._make_chunks(["aaa bbb", "ddd eee"])
+        ci, start, end, _ = _locate_evidence("ddd eee", 2, chunks)
+        assert ci == 1
+        assert chunks[ci].text[start:end] == "ddd eee"
+
+    def test_custom_threshold_used_on_direct_probe(self):
+        """The caller's fuzzy threshold applies on the hinted-chunk probe."""
+
+        class _Recorder:
+            def __init__(self):
+                self.thresholds = []
+
+        import asago_policy_mapper.extract.annotate as ann
+
+        recorded = []
+
+        def fake_find(text, chunk_text, fuzzy_threshold=0.8):
+            recorded.append(fuzzy_threshold)
+            return 0, len(text), False
+
+        original = ann._find_span_in_chunk
+        ann._find_span_in_chunk = fake_find
+        try:
+            chunks = self._make_chunks(["aaa bbb ccc"])
+            _locate_evidence("aaa bbb", 0, chunks, fuzzy_threshold=0.5)
+        finally:
+            ann._find_span_in_chunk = original
+        assert recorded == [0.5]
+
     def test_wrong_hint_found_elsewhere(self):
         chunks = self._make_chunks(["aaa bbb ccc", "ddd eee fff", "ggg hhh iii"])
         ci, start, end, is_fuzzy = _locate_evidence("ggg hhh", 0, chunks)
@@ -169,6 +225,75 @@ class TestLocateEvidence:
         ci, start, end, is_fuzzy = _locate_evidence("aaa bbb", 99, chunks)
         assert ci == 0
         assert chunks[ci].text[start:end] == "aaa bbb"
+
+    def test_none_hint_scans_all_chunks(self):
+        """An unattributed span (chunk_index None) scans from the first chunk."""
+        chunks = self._make_chunks(["aaa bbb ccc", "ddd eee fff", "ggg hhh iii"])
+        ci, start, end, is_fuzzy = _locate_evidence("eee fff", None, chunks)
+        assert ci == 1
+        assert chunks[ci].text[start:end] == "eee fff"
+
+    def test_none_hint_not_found_reports_zero(self):
+        """An unattributed span that matches nowhere reports chunk 0, empty span."""
+        chunks = self._make_chunks(["aaa bbb", "ccc ddd"])
+        ci, start, end, is_fuzzy = _locate_evidence("zzz yyy", None, chunks)
+        assert ci == 0
+        assert start == 0
+        assert end == 0
+
+    def test_none_hint_first_chunk_match(self):
+        """An unattributed span matching chunk 0 locates there directly."""
+        chunks = self._make_chunks(["aaa bbb ccc", "ddd eee fff"])
+        ci, start, end, is_fuzzy = _locate_evidence("aaa bbb", None, chunks)
+        assert ci == 0
+        assert chunks[ci].text[start:end] == "aaa bbb"
+
+
+class TestLocateRiskEvidence:
+    def _run(self, evidence_hint, texts, quote="shared quote"):
+        chunks = [Chunk(text=t, source="p.txt", index=i) for i, t in enumerate(texts)]
+        data = {
+            "risks": [
+                {
+                    "risk_id": "r1",
+                    "risk_name": "Risk",
+                    "risk_description": "Desc",
+                    "evidence": [{"text": quote, "document": "p.txt", "chunk_index": evidence_hint}],
+                }
+            ]
+        }
+        annotations: dict[int, list[dict]] = {i: [] for i in range(len(chunks))}
+        totals = _locate_risk_evidence(data, chunks, annotations, [])
+        return annotations, totals
+
+    def test_hint_picks_hinted_chunk_over_earlier_duplicate(self):
+        """The evidence's chunk_index hint wins over an earlier duplicate."""
+        annotations, totals = self._run(1, ["shared quote appears here", "shared quote appears here"])
+        assert 1 in annotations and annotations[1]
+        assert 0 not in annotations or not annotations[0]
+
+    def test_none_hint_in_extraction_scans_chunks(self):
+        """A null chunk_index in serialized evidence scans all chunks."""
+        annotations, totals = self._run(None, ["nothing here", "the quote is found only here"], quote="found only here")
+        assert annotations[1] and not annotations[0]
+        assert totals[1] == 1  # matched_spans
+
+    def test_missing_chunk_index_defaults_to_scan(self):
+        """Evidence without a chunk_index field locates by scanning."""
+        chunks = [Chunk(text="nothing", source="p.txt", index=0), Chunk(text="target text", source="p.txt", index=1)]
+        data = {
+            "risks": [
+                {
+                    "risk_id": "r1",
+                    "risk_name": "Risk",
+                    "risk_description": "Desc",
+                    "evidence": [{"text": "target text", "document": "p.txt"}],
+                }
+            ]
+        }
+        annotations: dict[int, list[dict]] = {0: [], 1: []}
+        _locate_risk_evidence(data, chunks, annotations, [])
+        assert annotations[1] and not annotations[0]
 
 
 class TestPrepareAnnotationData:

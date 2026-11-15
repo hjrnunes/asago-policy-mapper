@@ -31,6 +31,11 @@ def _tiebreak_key(model: BaseModel) -> str:
     return str(sorted(model.model_dump().items()))
 
 
+def _chunk_sort_value(chunk_index: int | None) -> tuple[int, int]:
+    """Order chunk positions, placing unattributed spans (None) last."""
+    return (1, 0) if chunk_index is None else (0, chunk_index)
+
+
 def _best_match_key(m: RiskMatch) -> tuple:
     """Ordering key that picks a risk group's representative match.
 
@@ -38,14 +43,18 @@ def _best_match_key(m: RiskMatch) -> tuple:
     the lowest chunk index, then the lexicographically largest tuple of
     evidence texts. The serialization tail makes the order total, so ties
     past those components still pick a fixed representative. A match
-    without evidence ranks last on the chunk component. The models reject
-    NaN confidence and scores at construction, so every comparison here is
-    between real numbers and the order is total.
+    without evidence, or one whose evidence is entirely unattributed
+    (chunk_index None), ranks last on the chunk component. The models
+    reject NaN confidence and scores at construction, so every comparison
+    here is between real numbers and the order is total.
     """
-    min_chunk = min((e.chunk_index for e in m.evidence), default=math.inf)
+    min_chunk = min((_chunk_sort_value(e.chunk_index) for e in m.evidence), default=(1, math.inf))
+    # Unattributed spans (chunk_index None) sort last: the (1, 0) sentinel
+    # beats every real chunk's negated index.
+    chunk_component = -math.inf if min_chunk[0] == 1 else -min_chunk[1]
     return (
         _confidence_order_key(m.confidence),
-        -min_chunk,
+        chunk_component,
         tuple(e.text for e in m.evidence),
         _tiebreak_key(m),
     )
@@ -73,8 +82,15 @@ def _evidence_sort_key(s: EvidenceSpan) -> tuple:
     Cross-encoder score decides first (descending); ties break on chunk
     index, then sentence index, then text, then the serialization tail, so
     the order never depends on the order the group's matches arrived in.
+    Unattributed spans (chunk_index None) sort after attributed ones.
     """
-    return (-s.cross_encoder_score, s.chunk_index, s.sentence_index, s.text, _tiebreak_key(s))
+    return (
+        -s.cross_encoder_score,
+        *_chunk_sort_value(s.chunk_index),
+        s.sentence_index,
+        s.text,
+        _tiebreak_key(s),
+    )
 
 
 def _merge_evidence(group: list[RiskMatch], max_evidence: int) -> list[EvidenceSpan]:
