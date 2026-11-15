@@ -253,3 +253,67 @@ def test_hybrid_search_colbert_bm25_rescue(monkeypatch):
     assert rescued_two[2].rrf_score == pytest.approx(1 / 62)
     assert rescued_two[2].cross_encoder_score == 0.0
     assert rescued_two[2].bm25_rank == 2
+
+
+# --- score-source provenance (issue #150 part 2) ---
+
+
+def test_search_colbert_stamps_rerank_source():
+    """ColBERT-scored candidates carry rerank_source=colbert."""
+    index = _colbert_index(COLBERT_RISKS)
+
+    results = index.search_colbert("data privacy", top_k=10)
+
+    assert all(c.rerank_source == "colbert" for c in results)
+    assert results[0].cross_encoder_score == pytest.approx(1.0)
+
+
+def test_hybrid_colbert_scored_candidates_carry_source(monkeypatch):
+    """Fused ColBERT candidates carry the source; BM25-only ones do not."""
+    index = _colbert_index(COLBERT_RISKS)
+    # BM25 sees R-003 (scored by ColBERT) and R-004 (never scored):
+    # both fuse into the RRF top_k, but only R-003 carries a measurement.
+    _stub_bm25(monkeypatch, index, ["R-003", "R-004"])
+
+    results = index.hybrid_search("data privacy")
+
+    by_id = {c.risk_id: c for c in results}
+    assert by_id["R-003"].rerank_source == "colbert"
+    assert by_id["R-003"].cross_encoder_score == pytest.approx(1.0)
+    # R-004 shares no ColBERT vocabulary word: never scored, no source
+    assert by_id["R-004"].rerank_source is None
+    assert by_id["R-004"].cross_encoder_score == 0.0
+    # R-002 is ColBERT-only, scored
+    assert by_id["R-002"].rerank_source == "colbert"
+
+
+def test_hybrid_colbert_rescued_keeps_measured_score(monkeypatch):
+    """A BM25-rescued candidate ColBERT scored keeps its measured score and source.
+
+    A scored candidate can fall out of the RRF top_k slice; rescue then
+    re-admits it by BM25 rank. Its measured ColBERT score must survive,
+    with rerank_source=colbert — not the 0.0 "not calculated" default.
+    """
+    index = _colbert_index(RESCUE_RISKS)
+    # "governance" is R-004's vocabulary word and BM25 ranks it first, but
+    # ColBERT only matches "bias" (R-001), "privacy" (R-003) and "data"
+    # (R-002). Construct a case where a ColBERT-scored risk is rescued:
+    # BM25 ranks governance, oversight and privacy above the bias risk;
+    # top_k=1 keeps only R-003 (privacy, scored) in the fused slice; the
+    # scored R-001 and unscored R-004/R-005 come back via rescue ranks.
+    query = "privacy bias governance oversight"
+    _stub_bm25(monkeypatch, index, ["R-004", "R-005", "R-003", "R-001"])
+
+    rescued = index.hybrid_search(query, top_k=1, bm25_rescue_rank=4)
+
+    by_id = {c.risk_id: c for c in rescued}
+    # fused top-1: R-003 (privacy), scored by ColBERT
+    assert by_id["R-003"].rerank_source == "colbert"
+    # rescued, scored by ColBERT earlier but sliced out of top_k=1
+    assert by_id["R-001"].rerank_source == "colbert"
+    assert by_id["R-001"].cross_encoder_score == pytest.approx(0.5)
+    # rescued, never scored by ColBERT
+    assert by_id["R-004"].rerank_source is None
+    assert by_id["R-004"].cross_encoder_score == 0.0
+    assert by_id["R-005"].rerank_source is None
+    assert by_id["R-005"].cross_encoder_score == 0.0

@@ -433,6 +433,15 @@ class ChunkResult:
     stats: dict
 
 
+def _stamp_selected_by(candidates: list[ScoredCandidate], label: str) -> list[ScoredCandidate]:
+    """Return copies of candidates stamped with how each was selected.
+
+    Always copies: query-gen candidates are shared between chunks, so no
+    candidate is ever mutated in place.
+    """
+    return [c.model_copy(update={"selected_by": label}) for c in candidates]
+
+
 def retrieve_chunk(
     chunks: list[Chunk],
     chunk_index: int,
@@ -465,7 +474,7 @@ def retrieve_chunk(
             source=chunk.source,
             page=chunk.page,
             section=chunk.section,
-            accepted=candidates,
+            accepted=_stamp_selected_by(candidates, "rrf"),
             borderline=[],
             borderline_judged=[],
             stats={
@@ -490,13 +499,14 @@ def retrieve_chunk(
     bm25_rescued = sum(
         1 for c in borderline if c.cross_encoder_score < floor and c.bm25_rank > 0 and c.bm25_rank <= bm25_rescue_rank
     )
+    selected_by = "threshold" if threshold_high is not None else "rank"
     return ChunkResult(
         chunk_index=chunk_index,
         source=chunk.source,
         page=chunk.page,
         section=chunk.section,
-        accepted=accepted,
-        borderline=borderline,
+        accepted=_stamp_selected_by(accepted, selected_by),
+        borderline=_stamp_selected_by(borderline, selected_by),
         borderline_judged=[],
         stats={
             "candidates_retrieved": len(candidates),

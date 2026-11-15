@@ -6,15 +6,16 @@ from typing import Any, Literal
 from pydantic import BaseModel, field_validator, model_serializer
 
 
-def _reject_nan(value: float) -> float:
+def _reject_nan(value: float | None) -> float | None:
     """Reject NaN scores: they break the merge ordering keys.
 
     NaN compares unequal to everything, including itself, so max() and
     sort() become input-order dependent wherever a NaN reaches them. A NaN
     confidence or cross-encoder score is always a bug — a score that was
     never computed or failed to parse — so the models refuse it up front.
+    A None is "not calculated" and passes through untouched.
     """
-    if value != value:
+    if value is not None and value != value:
         raise ValueError("score must not be NaN")
     return value
 
@@ -27,6 +28,10 @@ class ScoredCandidate(BaseModel):
     embedding_distance: float = 0.0
     cross_encoder_score: float = 0.0
     rrf_score: float = 0.0
+    # Which reranker produced cross_encoder_score; None means "never
+    # calculated" (the candidate was outside the rerank window or its only
+    # measurement was invalid) — the 0.0 default is a placeholder, not a
+    # measurement.
     rerank_source: Literal["cross_encoder", "colbert"] | None = None
     selected_by: str | None = None
 
@@ -74,6 +79,18 @@ class RetrievalScores(BaseModel):
     rrf_score: float
 
 
+# How a risk candidate was accepted into the result set.
+ACCEPTED_BY = Literal[
+    "rank",
+    "threshold",
+    "rrf",
+    "query_gen",
+    "llm_judge",
+    "auto_promoted",
+    "expansion",
+]
+
+
 class RiskMatch(BaseModel):
     risk_id: str
     risk_name: str
@@ -82,7 +99,7 @@ class RiskMatch(BaseModel):
     confidence: float | None
     confidence_source: Literal["cross_encoder", "colbert", "rrf", "none"] = "none"
     grounding_confidence: str
-    accepted_by: str
+    accepted_by: ACCEPTED_BY
     evidence: list[EvidenceSpan]
     scores: RetrievalScores
     mitigations: list[MitigationRef] = []
