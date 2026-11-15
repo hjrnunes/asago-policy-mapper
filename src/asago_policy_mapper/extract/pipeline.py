@@ -716,33 +716,31 @@ def _expand_siblings(risks, merged, chunk_results, chunks, stats, dropped_ids: s
     return expanded, groups, risk_lookup
 
 
-def _prefilter_dropped_catalog(drops, variant_map) -> tuple[set[str], set[str]]:
-    """The dropped ids at catalog granularity, plus the dropped parents.
+def _prefilter_dropped_catalog(drops, variant_map) -> tuple[set[str], dict[str, list[str]]]:
+    """The dropped ids at catalog granularity, plus each dropped parent's members.
 
     A dropped synthetic parent counts as its member variant ids, because
-    expansion proposes and grounds at that granularity; the parents get
-    their own set so the run can report how many whole groups came back.
+    expansion proposes and grounds at that granularity; the parents map to
+    their member ids so the run can report how many whole groups came back.
     """
     dropped_ids: set[str] = set()
-    parents: set[str] = set()
+    parent_members: dict[str, list[str]] = {}
     for drop in drops:
         members = (variant_map or {}).get(drop.risk_id)
         if members:
-            parents.add(drop.risk_id)
-            dropped_ids.update(m["risk_id"] for m in members)
+            parent_members[drop.risk_id] = [m["risk_id"] for m in members]
+            dropped_ids.update(parent_members[drop.risk_id])
         else:
             dropped_ids.add(drop.risk_id)
-    return dropped_ids, parents
+    return dropped_ids, parent_members
 
 
-def _record_reentry_parents(stats, dropped_parents: set[str], expanded, variant_map) -> None:
+def _record_reentry_parents(stats, parent_members: dict[str, list[str]], expanded) -> None:
     """Count dropped parents whose member variants expansion proposed again."""
-    if not dropped_parents:
+    if not parent_members:
         return
     proposed = {er.risk_id for er in expanded}
-    stats["prefilter_reentered_parents"] = sum(
-        1 for parent in dropped_parents if proposed & {m["risk_id"] for m in (variant_map or {}).get(parent, [])}
-    )
+    stats["prefilter_reentered_parents"] = sum(1 for members in parent_members.values() if proposed & set(members))
 
 
 def _run_expansion(
@@ -762,12 +760,12 @@ def _run_expansion(
     prefilter_drops: list[FilteredCandidate] | None = None,
 ) -> tuple[list[RiskMatch], dict]:
     stats = {"expanded_candidates": 0, "expanded_grounded": 0, "expansion_groups": 0}
-    dropped_ids, dropped_parents = (
+    dropped_ids, parent_members = (
         _prefilter_dropped_catalog(prefilter_drops, variant_map)
         if prefilter_drops
         else (
             set(),
-            set(),
+            {},
         )
     )
     expanded, groups, risk_lookup = _expand_siblings(
@@ -776,7 +774,7 @@ def _run_expansion(
     # Records 0 for dropped parents whose members expansion never proposed,
     # so the key appears whenever parents were dropped, even when expansion
     # proposes nothing at all.
-    _record_reentry_parents(stats, dropped_parents, expanded, variant_map)
+    _record_reentry_parents(stats, parent_members, expanded)
     if not expanded:
         if dropped_ids:
             stats["prefilter_reentered_grounded"] = 0
@@ -1056,9 +1054,7 @@ def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> d
     }
 
 
-def _prefilter_decision_log(
-    cases: list[DecisionCase], decisions: list[Decision], assessment, rule, assessor_id: str
-) -> DecisionLog:
+def _prefilter_decision_log(decisions: list[Decision], assessment, rule, assessor_id: str) -> DecisionLog:
     """Assemble the prefilter's DecisionLog for one chunk."""
     items = [
         DecisionItem(
@@ -1168,7 +1164,7 @@ def _prefilter_one_chunk(
         stage="prefilter",
         chunk_index=cr.chunk_index,
         request=_prefilter_request(context, cases, assessment),
-        decision=_prefilter_decision_log(cases, decisions, assessment, prefilter.rule, prefilter.assessor.assessor_id),
+        decision=_prefilter_decision_log(decisions, assessment, prefilter.rule, prefilter.assessor.assessor_id),
     )
     drops = [
         _prefilter_drop_record(
@@ -1242,10 +1238,10 @@ def _run_prefilter_stage(
 def _assessor_endpoint_host(assessor) -> str | None:
     """The hostname of a probability assessor's endpoint, when it has one."""
     endpoint = getattr(assessor, "endpoint", None)
-    base_url = getattr(endpoint, "base_url", None) if endpoint is not None else None
-    if not isinstance(base_url, str) or not base_url:
-        return None
-    return urlsplit(base_url).hostname
+    base_url = getattr(endpoint, "base_url", None)
+    if isinstance(base_url, str) and base_url:
+        return urlsplit(base_url).hostname
+    return None
 
 
 def _prefilter_metadata(prefilter: Prefilter) -> dict:
@@ -1258,7 +1254,7 @@ def _prefilter_metadata(prefilter: Prefilter) -> dict:
         "threshold": getattr(rule, "threshold", None),
         "endpoint_host": _assessor_endpoint_host(assessor),
         "sends_offsite": bool(getattr(assessor, "sends_offsite", False)),
-        "fields_sent": list(_PREFILTER_FIELDS_SENT),
+        "fields_sent": _PREFILTER_FIELDS_SENT.copy(),
     }
 
 

@@ -163,7 +163,7 @@ def test_prefilter_refuses_no_grounding(mock_config, tmp_path):
     """prefilter + retrieval.no_grounding raises ValueError."""
     doc = tmp_path / "p.md"
     doc.write_text(DOC)
-    with pytest.raises(ValueError, match="prefilter requires grounding"):
+    with pytest.raises(ValueError, match="^prefilter requires grounding; it filters what grounding sees"):
         _run(
             DOC,
             MOCK_RISKS,
@@ -376,6 +376,8 @@ def test_prefilter_drops_at_0_10_keeps_above(mock_config, tmp_path, monkeypatch)
     assert "R-001" not in grounded_ids
     assert "R-003" not in grounded_ids
     assert "R-002" in grounded_ids
+    # The filter stage is timed under its own key.
+    assert "prefilter_ms" in result.retrieval_stats.timing_ms
     # The drops are recorded with provenance.
     dropped = {fc.risk_id: fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"}
     assert set(dropped) == {"R-001", "R-003"}
@@ -1789,6 +1791,67 @@ def test_prefilter_assessor_without_optional_attributes_records_defaults(mock_co
     assert block["sends_offsite"] is False
     assert block["endpoint_host"] is None
     assert result.decision_calls == []
+
+
+def test_prefilter_nonparent_drop_reentry_counted(mock_config, tmp_path, monkeypatch):
+    """A dropped plain risk that expansion re-proposes counts as re-entered.
+
+    The dropped-id catalog adds non-parent drops under their own ids;
+    losing that (for example recording None) would silently zero the
+    re-entry count.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    sibling_risks = [
+        _make_risk("R-001", "Model Bias", "Systematic errors in AI outputs", parent="sibling-group"),
+        _make_risk("R-002", "Data Poisoning", "Malicious manipulation of training data", parent="sibling-group"),
+    ]
+
+    class _SiblingIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in sibling_risks
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _SiblingIndex())
+    monkeypatch.setattr(
+        pipeline,
+        "ground_and_extract_evidence",
+        lambda **kwargs: {c.risk_id: ([], "medium") for c in kwargs["candidates"] if c.risk_id == "R-002"},
+    )
+
+    def ground_group(chunks, chunk_indices, risks, client, model, document, records=None):
+        return {r["risk_id"]: ([], "medium") for r in risks if r["risk_id"] == "R-001"}
+
+    monkeypatch.setattr(pipeline, "ground_risk_group", ground_group)
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=sibling_risks,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=_prefilter({"R-001": ProbabilityAnswer(0.01)}),
+        ocr=False,
+    )
+
+    stats = result.metadata["expansion_stats"]
+    # R-002 grounded; expansion proposed its sibling R-001 (dropped): one
+    # re-entry, which then grounded.
+    assert stats["prefilter_reentered"] == 1
+    assert stats["prefilter_reentered_grounded"] == 1
+    assert "prefilter_reentered_parents" not in stats
+    # No blacklist: the re-entered risk is in the final output.
+    assert "R-001" in {m.risk_id for m in result.risks}
 
 
 def test_prefilter_one_chunk_copy_keeps_page_and_section():

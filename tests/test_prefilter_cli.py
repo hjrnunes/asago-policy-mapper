@@ -1,7 +1,7 @@
 """CLI tests for the prefilter profile (asago-uzfb1.7 step 4).
 
 ``--prefilter-profile PATH`` loads a YAML file with the
-``ProbabilityEndpoint`` fields plus ``threshold`` and turns it into the
+``ProbabilityAnswerEndpoint`` fields plus ``threshold`` and turns it into the
 pipeline's ``Prefilter``. The API key comes from the environment
 variable the profile names, never from the profile itself. The option's
 own environment variable is ``POLICY_MAPPER_PREFILTER_PROFILE``.
@@ -189,7 +189,7 @@ def test_build_prefilter_threshold_defaults(tmp_path):
 
 
 def test_build_prefilter_rejects_missing_endpoint_fields(tmp_path):
-    """A profile missing required ProbabilityEndpoint fields fails clearly."""
+    """A profile missing required ProbabilityAnswerEndpoint fields fails clearly."""
     from asago_policy_mapper.cli import _build_prefilter
 
     path = tmp_path / "bad.yaml"
@@ -240,7 +240,7 @@ def test_extract_passes_prefilter_to_pipeline(tmp_path, profile_path, monkeypatc
     captured = {}
 
     def fake_run_extraction(**kwargs):
-        captured["prefilter"] = kwargs.get("prefilter")
+        captured.update(kwargs)
         return pipeline._empty_result(kwargs["documents"])
 
     monkeypatch.setattr(pipeline, "run_extraction", fake_run_extraction)
@@ -291,6 +291,9 @@ def test_extract_passes_prefilter_to_pipeline(tmp_path, profile_path, monkeypatc
     assert result.exit_code == 0, result.output
     assert captured["prefilter"] is not None
     assert captured["prefilter"].rule.threshold == 0.10
+    # The pipeline call forwards the resolved client and the ocr flag.
+    assert captured["client"] is not None
+    assert captured["ocr"] is False
 
 
 def test_extract_envvar_loads_profile(tmp_path, profile_path, monkeypatch):
