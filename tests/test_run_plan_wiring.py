@@ -102,6 +102,48 @@ def test_error_lists_llm_stages(tmp_path, capsys):
     assert plan.needs_llm is False
 
 
+def test_negative_rrf_min_score_is_rejected(tmp_path, capsys):
+    """A negative --rrf-min-score is a hard validation error.
+
+    A negative floor never does what the user wants (it passes every
+    fused candidate, including on the query-generation searches where the
+    default-floor fallback would otherwise mask it), so the CLI refuses
+    it outright instead of warning. Zero keeps the no-floor semantics.
+    """
+    from asago_policy_mapper.cli import _validate_extract_options
+
+    with pytest.raises(typer.Exit):
+        _validate_extract_options(
+            **_validate_kwargs(
+                tmp_path,
+                retrieval=RetrievalConfig(
+                    query_gen=False,
+                    no_judge=True,
+                    no_grounding=True,
+                    expand_siblings=False,
+                    rrf_min_score=-0.5,
+                ),
+            )
+        )
+    err = capsys.readouterr().err
+    assert err.strip() == "Error: --rrf-min-score must not be negative: it is a floor, never a ceiling"
+
+    # Zero is the documented no-floor value and passes validation.
+    plan = _validate_extract_options(
+        **_validate_kwargs(
+            tmp_path,
+            retrieval=RetrievalConfig(
+                query_gen=False,
+                no_judge=True,
+                no_grounding=True,
+                expand_siblings=False,
+                rrf_min_score=0.0,
+            ),
+        )
+    )
+    assert plan.needs_llm is False
+
+
 def test_ir_summary_does_not_hide_query_generation(tmp_path, capsys):
     """The CLI summary reports query generation even on IR-only runs.
 
@@ -271,6 +313,8 @@ def test_explicit_option_names_reads_the_real_click_context():
     boolean pairs record the polarity actually passed (``--no-query-gen``
     when the positive form was declined), and options left at their
     defaults or fed through environment variables never make the set.
+    Only the ``--no-`` prefix of a declined boolean pair comes from the
+    pair check — a falsy non-pair value keeps its plain dashed name.
     """
     import click
     import click.testing
@@ -281,23 +325,31 @@ def test_explicit_option_names_reads_the_real_click_context():
 
     @click.command()
     @click.option("--no-judge", is_flag=True)
+    @click.option("--expand-siblings/--no-expand-siblings", default=True)
     @click.option("--query-gen/--no-query-gen", default=True)
     @click.option("--rrf-min-score", type=float, default=0.015)
-    def probe(no_judge, query_gen, rrf_min_score):
-        seen["result"] = _explicit_option_names(("no_judge", "query_gen", "rrf_min_score"))
+    def probe(no_judge, expand_siblings, query_gen, rrf_min_score):
+        seen["result"] = _explicit_option_names(("no_judge", "expand_siblings", "query_gen", "rrf_min_score"))
 
     # Only --no-judge and the declined boolean pair were passed on the
-    # command line; rrf_min_score keeps its default.
+    # command line; expand_siblings and rrf_min_score keep their defaults.
     click.testing.CliRunner().invoke(probe, ["--no-judge", "--no-query-gen"], env={"POLICY_MAPPER_RRF_MIN_SCORE": ""})
     assert seen["result"] == frozenset({"--no-judge", "--no-query-gen"})
 
-    # The positive forms and an explicit value all land in the set.
+    # The positive pair form, an explicit falsy value and an explicit
+    # truthy value all land in the set under their plain dashed names.
+    click.testing.CliRunner().invoke(probe, ["--expand-siblings", "--rrf-min-score", "0"])
+    assert seen["result"] == frozenset({"--expand-siblings", "--rrf-min-score"})
+
     click.testing.CliRunner().invoke(probe, ["--rrf-min-score", "0.02"])
     assert seen["result"] == frozenset({"--rrf-min-score"})
 
     # Nothing passed: the set is empty even with defaults resolved.
     click.testing.CliRunner().invoke(probe, [])
     assert seen["result"] == frozenset()
+
+    # Outside a command the lookup is silent: no context, no names.
+    assert _explicit_option_names(("no_judge",)) == frozenset()
 
 
 def test_cli_forwards_the_resolved_plan(tmp_path, monkeypatch):
@@ -370,6 +422,47 @@ def test_cli_forwards_the_resolved_plan(tmp_path, monkeypatch):
     expected = resolve_plan(retrieval, prefilter=False, explicit=frozenset({"--no-judge", "--no-cross-encoder"}))
     assert asdict(forwarded) == asdict(expected)
     assert any(warning.startswith("--no-judge is redundant with --no-cross-encoder") for warning in forwarded.warnings)
+
+
+def test_run_pipeline_omits_the_plan_kwarg_without_a_plan():
+    """_run_pipeline calls run_extraction without the plan kwarg when it has none.
+
+    A ``run_extraction`` stand-in predating the plan parameter (a fixed
+    signature, no ``**kwargs``) must keep working: no plan, no kwarg.
+    """
+    from asago_policy_mapper.cli import _run_pipeline
+
+    def old_signature_run_extraction(documents, client, config, risks, retrieval, ocr, prefilter=None):
+        return "result"
+
+    result = _run_pipeline(
+        [],  # policy_files
+        None,  # client
+        SimpleNamespace(model="m"),  # config
+        [],  # risks
+        RetrievalConfig(query_gen=False),
+        False,  # ocr
+        old_signature_run_extraction,
+    )
+    assert result == "result"
+
+    # With a plan present the kwarg is forwarded (the pipeline accepts it).
+    plan = resolve_plan(RetrievalConfig(query_gen=False), prefilter=False, explicit=frozenset())
+
+    def plan_aware_run_extraction(documents, client, config, risks, retrieval, ocr, prefilter=None, plan=None):
+        return plan
+
+    result = _run_pipeline(
+        [],
+        None,
+        SimpleNamespace(model="m"),
+        [],
+        RetrievalConfig(query_gen=False),
+        False,
+        plan_aware_run_extraction,
+        plan=plan,
+    )
+    assert result is plan
 
 
 # --- the metadata (step 2) ---
@@ -450,8 +543,11 @@ def test_empty_run_records_the_plan(tmp_path, mock_config):
 
     empty = tmp_path / "empty.txt"
     empty.write_text("   ")
-    retrieval = RetrievalConfig(query_gen=False, no_judge=True, no_grounding=True, expand_siblings=False)
-    plan = resolve_plan(retrieval, prefilter=True, explicit=frozenset())
+    # --no-judge with --no-cross-encoder carries a warning, so a dropped or
+    # re-derived plan is observable: the derived one (explicit empty) has none.
+    retrieval = RetrievalConfig(query_gen=False, no_judge=True, use_cross_encoder=False)
+    plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset({"--no-judge", "--no-cross-encoder"}))
+    assert plan.warnings, "the passed plan must carry a warning"
 
     result = pipeline.run_extraction(
         documents=[empty],
@@ -465,6 +561,7 @@ def test_empty_run_records_the_plan(tmp_path, mock_config):
 
     assert set(result.metadata) == {"run_plan"}
     assert result.metadata["run_plan"]["effective"] == asdict(plan)
+    assert result.metadata["run_plan"]["warnings"] == list(plan.warnings)
 
     # Without a plan, the empty run derives one from the same inputs:
     # the prefilter flag survives the short circuit. (The prefilter needs

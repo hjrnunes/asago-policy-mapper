@@ -105,6 +105,9 @@ def _validate_extract_options(
     if prefilter and retrieval.no_grounding:
         _fail_validation("--prefilter-profile requires grounding; it filters what grounding sees")
 
+    if retrieval.rrf_min_score < 0:
+        _fail_validation("--rrf-min-score must not be negative: it is a floor, never a ceiling")
+
     plan = resolve_plan(retrieval, prefilter=prefilter, explicit=explicit)
     if plan.needs_llm and (not base_url or not model):
         stages = ", ".join(plan.llm_stages)
@@ -648,7 +651,9 @@ def extract(
         False, "--no-cross-encoder", help="Skip cross-encoder reranking and LLM judge; use RRF score floor instead"
     ),
     rrf_min_score: float = typer.Option(
-        0.015, "--rrf-min-score", help="RRF floor; used with --no-cross-encoder and on every query-generation search"
+        0.015,
+        "--rrf-min-score",
+        help="RRF floor; used with --no-cross-encoder and on every query-generation search (0 = no floor)",
     ),
     colbert_model: str = typer.Option(
         None,
