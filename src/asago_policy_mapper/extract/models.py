@@ -27,6 +27,8 @@ class ScoredCandidate(BaseModel):
     embedding_distance: float = 0.0
     cross_encoder_score: float = 0.0
     rrf_score: float = 0.0
+    # Which reranker produced cross_encoder_score; None means "never
+    # calculated" — the 0.0 default is a placeholder, not a measurement.
     rerank_source: Literal["cross_encoder", "colbert"] | None = None
     selected_by: str | None = None
 

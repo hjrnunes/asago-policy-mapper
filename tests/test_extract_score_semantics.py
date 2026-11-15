@@ -7,6 +7,9 @@ tests here pin the model-level contract (step 1) and the setter behaviour
 (steps 2-4 build on it).
 """
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 from asago_policy_mapper.extract.merge import merge_matches
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
@@ -175,3 +178,265 @@ def test_scored_candidate_source_defaults():
     assert c.rerank_source is None
     assert c.selected_by is None
     assert c.cross_encoder_score == 0.0
+
+
+# --- setter behaviour (step 2: index.py and retrieve.py) ---
+
+
+class _StubCrossEncoder:
+    """Local cross-encoder stand-in returning fixed scores."""
+
+    def predict(self, pairs):
+        return [0.9, 0.2]
+
+
+class _ZeroThenHighCrossEncoder:
+    """Measures a true 0.0 for the first pair and 0.8 for the second."""
+
+    def predict(self, pairs):
+        return [0.0 if i == 0 else 0.8 for i in range(len(pairs))]
+
+
+def _index_with_cross_encoder(monkeypatch):
+    from asago_policy_mapper.extract import index as index_mod
+
+    risks = [
+        SimpleNamespace(
+            id=rid,
+            name=f"name-{rid}",
+            description=f"desc-{rid}",
+            concern="",
+            risk_type="",
+            isDefinedByTaxonomy="test-tax",
+            isPartOf="",
+        )
+        for rid in ("R-001", "R-002")
+    ]
+    with (
+        patch.object(index_mod, "_load_bi_encoder", return_value=(None, None, None)),
+        patch.object(index_mod, "_load_cross_encoder", return_value=(_StubCrossEncoder(), None, False, False)),
+    ):
+        return index_mod.RiskIndex(risks)
+
+
+def test_rerank_stamps_cross_encoder_source(monkeypatch):
+    """rerank sets rerank_source=cross_encoder alongside the measured score."""
+    idx = _index_with_cross_encoder(monkeypatch)
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a"),
+        ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b"),
+    ]
+
+    reranked = idx.rerank("some text", candidates, top_k=5)
+
+    assert [c.risk_id for c in reranked] == ["R-001", "R-002"]
+    assert all(c.rerank_source == "cross_encoder" for c in reranked)
+    assert reranked[0].cross_encoder_score == 0.9
+    # the input candidates are not mutated
+    assert all(c.rerank_source is None for c in candidates)
+
+
+def test_hybrid_search_reranked_candidates_carry_source(monkeypatch):
+    """hybrid_search results that went through rerank carry the source; measured 0.0 survives."""
+    idx = _index_with_cross_encoder(monkeypatch)
+    monkeypatch.setattr(idx, "search_bm25", lambda text, top_k=100: [])
+    monkeypatch.setattr(
+        idx,
+        "search_semantic",
+        lambda text, top_k=100: [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a")],
+    )
+
+    results = idx.hybrid_search("text about bias", top_k=5)
+
+    assert results
+    assert all(c.rerank_source == "cross_encoder" for c in results)
+    # the stub returns 0.9 and 0.2 — both measured, both kept
+    assert {c.cross_encoder_score for c in results} >= {0.9}
+
+
+def test_rrf_only_candidates_have_no_rerank_source(monkeypatch):
+    """With rrf_min_score filtering (no rerank), candidates keep rerank_source None.
+
+    The candidate-level score keeps its 0.0 default (classification
+    compares it); the "not calculated" null is written at the RiskMatch
+    boundary in the pipeline, driven by the missing rerank_source.
+    """
+    idx = _index_with_cross_encoder(monkeypatch)
+    monkeypatch.setattr(idx, "search_bm25", lambda text, top_k=100: [])
+    monkeypatch.setattr(
+        idx,
+        "search_semantic",
+        lambda text, top_k=100: [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a")],
+    )
+
+    results = idx.hybrid_search("text about bias", top_k=5, rrf_min_score=0.001)
+
+    assert results
+    assert all(c.rerank_source is None for c in results)
+
+
+def test_bm25_rescued_candidate_keeps_null_score(monkeypatch):
+    """A BM25-rescued candidate the reranker never saw carries no rerank_source."""
+    from asago_policy_mapper.extract import index as index_mod
+
+    class _OneSidedCrossEncoder:
+        """Scores only the pair it recognizes; the other gets dropped by top_k."""
+
+        def predict(self, pairs):
+            return [0.9 if "A" in p[0] else 0.0 for p in pairs]
+
+    risks = [
+        SimpleNamespace(
+            id=rid,
+            name=name,
+            description="desc",
+            concern="",
+            risk_type="",
+            isDefinedByTaxonomy="test-tax",
+            isPartOf="",
+        )
+        for rid, name in (("R-001", "A"), ("R-002", "B"), ("R-003", "C"))
+    ]
+    with (
+        patch.object(index_mod, "_load_bi_encoder", return_value=(None, None, None)),
+        patch.object(index_mod, "_load_cross_encoder", return_value=(_OneSidedCrossEncoder(), None, False, False)),
+    ):
+        idx = index_mod.RiskIndex(risks)
+
+    # BM25 returns two candidates; the reranker (top_k=1) keeps only R-001,
+    # so R-003 falls out of the rerank window and is rescued by BM25 rank.
+    monkeypatch.setattr(
+        idx,
+        "search_bm25",
+        lambda text, top_k=100: [
+            ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", bm25_rank=1),
+            ScoredCandidate(risk_id="R-003", risk_name="C", risk_description="c", bm25_rank=2),
+        ],
+    )
+    monkeypatch.setattr(
+        idx,
+        "search_semantic",
+        lambda text, top_k=100: [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a")],
+    )
+
+    results = idx.hybrid_search("text", top_k=1, bm25_rescue_rank=5)
+
+    by_id = {c.risk_id: c for c in results}
+    assert "R-003" in by_id
+    # rescued candidate was never reranked: no source stamp, BM25 rank kept
+    assert by_id["R-003"].rerank_source is None
+    assert by_id["R-003"].bm25_rank == 2
+
+
+def test_rerank_measured_zero_is_kept_with_source(monkeypatch):
+    """A reranker-measured 0.0 survives rerank stamped with its source."""
+    from asago_policy_mapper.extract import index as index_mod
+
+    risks = [
+        SimpleNamespace(
+            id=rid,
+            name=f"name-{rid}",
+            description=f"desc-{rid}",
+            concern="",
+            risk_type="",
+            isDefinedByTaxonomy="test-tax",
+            isPartOf="",
+        )
+        for rid in ("R-001", "R-002")
+    ]
+    with (
+        patch.object(index_mod, "_load_bi_encoder", return_value=(None, None, None)),
+        patch.object(index_mod, "_load_cross_encoder", return_value=(_ZeroThenHighCrossEncoder(), None, False, False)),
+    ):
+        idx = index_mod.RiskIndex(risks)
+
+    reranked = idx.rerank(
+        "some text",
+        [
+            ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a"),
+            ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b"),
+        ],
+        top_k=5,
+    )
+
+    by_id = {c.risk_id: c for c in reranked}
+    # measured 0.0: kept as 0.0, stamped as measured — not dropped, not nulled
+    assert by_id["R-001"].cross_encoder_score == 0.0
+    assert by_id["R-001"].rerank_source == "cross_encoder"
+    assert by_id["R-002"].cross_encoder_score == 0.8
+    assert by_id["R-002"].rerank_source == "cross_encoder"
+
+
+def test_retrieve_chunk_labels_rank_and_threshold():
+    """retrieve_chunk stamps selected_by=rank or threshold after classification."""
+    from asago_policy_mapper.extract.parse import Chunk
+    from asago_policy_mapper.extract.retrieve import retrieve_chunk
+
+    mock_index = MagicMock()
+    mock_index.hybrid_search.return_value = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9),
+        ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b", cross_encoder_score=0.3),
+    ]
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    # rank mode: no threshold_high
+    cr = retrieve_chunk(chunks, 0, mock_index, top_n_accept=1, top_n_judge=1)
+    assert all(c.selected_by == "rank" for c in cr.accepted)
+    assert all(c.selected_by == "rank" for c in cr.borderline)
+
+    # threshold mode: threshold_high set
+    cr = retrieve_chunk(chunks, 0, mock_index, threshold_high=0.7, threshold_low=0.2)
+    assert all(c.selected_by == "threshold" for c in cr.accepted)
+    assert all(c.selected_by == "threshold" for c in cr.borderline)
+    # the candidates from the mock were not mutated in place
+    for c in mock_index.hybrid_search.return_value:
+        assert c.selected_by is None
+
+
+def test_retrieve_chunk_no_cross_encoder_labels_rrf():
+    """Without the cross-encoder, accepted candidates are labelled rrf."""
+    from asago_policy_mapper.extract.parse import Chunk
+    from asago_policy_mapper.extract.retrieve import retrieve_chunk
+
+    mock_index = MagicMock()
+    mock_index.hybrid_search.return_value = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", rrf_score=0.02),
+    ]
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, mock_index, use_cross_encoder=False, rrf_min_score=0.01)
+
+    assert len(cr.accepted) == 1
+    assert cr.accepted[0].selected_by == "rrf"
+    assert mock_index.hybrid_search.return_value[0].selected_by is None
+
+
+def test_retrieve_chunk_cross_encoder_score_null_untouched():
+    """A never-reranked candidate's provenance survives retrieve_chunk unharmed.
+
+    The candidate-level score keeps its 0.0 default so classification
+    still works; the null for "not calculated" is written later at the
+    RiskMatch boundary from the missing rerank_source.
+    """
+    from asago_policy_mapper.extract.parse import Chunk
+    from asago_policy_mapper.extract.retrieve import retrieve_chunk
+
+    mock_index = MagicMock()
+    # rank mode: both candidates survive (top_n_accept=2), but R-001 was
+    # never reranked while R-002 carries a measured score
+    mock_index.hybrid_search.return_value = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", rerank_source=None),
+        ScoredCandidate(
+            risk_id="R-002", risk_name="B", risk_description="b", cross_encoder_score=0.5, rerank_source="cross_encoder"
+        ),
+    ]
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, mock_index, top_n_accept=2, top_n_judge=0)
+
+    by_id = {c.risk_id: c for c in cr.accepted + cr.borderline}
+    assert by_id["R-002"].cross_encoder_score == 0.5
+    assert by_id["R-002"].rerank_source == "cross_encoder"
+    assert by_id["R-002"].selected_by == "rank"
+    assert by_id["R-001"].rerank_source is None
+    assert by_id["R-001"].selected_by == "rank"

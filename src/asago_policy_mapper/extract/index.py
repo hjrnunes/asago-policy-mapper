@@ -405,7 +405,10 @@ def _rescue_and_merge_scores(
         reranked_ids = {c.risk_id for c in reranked}
         for c in rrf_candidates:
             if c.risk_id not in reranked_ids and 0 < c.bm25_rank <= bm25_rescue_rank:
-                reranked.append(c)
+                # The reranker never scored this candidate. The 0.0 default
+                # with no rerank_source marks "not calculated" here; the
+                # null is written at the RiskMatch boundary.
+                reranked.append(c.model_copy(update={"rerank_source": None}))
 
     rrf_lookup = {c.risk_id: c for c in rrf_candidates}
     results = []
@@ -749,6 +752,7 @@ class RiskIndex:
                     risk_description=meta["description"],
                     cross_encoder_score=float(scores[idx]),
                     embedding_distance=0.0,
+                    rerank_source="colbert",
                 )
             )
         return results
@@ -764,7 +768,8 @@ class RiskIndex:
             raw_scores = self._cross_encoder.predict(pairs)
         raw_scores = np.array(raw_scores)
         scores = self._score_normalizer(raw_scores)
-        return _scored_candidates(candidates, scores, top_k)
+        scored = _scored_candidates(candidates, scores, top_k)
+        return [c.model_copy(update={"rerank_source": "cross_encoder"}) for c in scored]
 
     def hybrid_search(
         self,
@@ -807,6 +812,9 @@ class RiskIndex:
         if _should_rerank(rerank, rrf_min_score):
             reranked = self.rerank(text, rrf_candidates, top_k=top_k)
             return _rescue_and_merge_scores(reranked, rrf_candidates, bm25_rescue_rank)
+        # RRF-floor mode skips the reranker; the candidate score stays at its
+        # 0.0 default and rerank_source stays None. The null for "not
+        # calculated" is written at the RiskMatch boundary.
         return [c for c in rrf_candidates if c.rrf_score >= rrf_min_score][:top_k]
 
     def _hybrid_search_colbert(
@@ -840,12 +848,14 @@ class RiskIndex:
         results = []
         for rid in sorted_ids:
             c = candidate_data[rid]
+            colbert_score = colbert_scores.get(rid)
             results.append(
                 c.model_copy(
                     update={
                         "rrf_score": rrf_scores[rid],
                         "bm25_rank": bm25_ranks.get(rid, 0),
-                        "cross_encoder_score": colbert_scores.get(rid, 0.0),
+                        "cross_encoder_score": colbert_score if colbert_score is not None else 0.0,
+                        "rerank_source": "colbert" if colbert_score is not None else None,
                     }
                 )
             )
@@ -854,11 +864,18 @@ class RiskIndex:
             result_ids = {c.risk_id for c in results}
             for c in bm25_results:
                 if c.risk_id not in result_ids and c.bm25_rank <= bm25_rescue_rank:
+                    # Keep ColBERT's measured score when it scored this
+                    # candidate (a scored candidate can fall out of the
+                    # RRF top_k slice); otherwise the candidate was never
+                    # scored, and the 0.0 default plus the missing
+                    # rerank_source marks "not calculated".
+                    measured = colbert_scores.get(c.risk_id)
                     results.append(
                         c.model_copy(
                             update={
                                 "rrf_score": rrf_scores.get(c.risk_id, 0),
-                                "cross_encoder_score": colbert_scores.get(c.risk_id, 0.0),
+                                "cross_encoder_score": measured if measured is not None else 0.0,
+                                "rerank_source": "colbert" if measured is not None else None,
                             }
                         )
                     )
