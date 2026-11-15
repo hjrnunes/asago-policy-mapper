@@ -187,7 +187,7 @@ def test_prefilter_off_is_noop(mock_config, tmp_path, monkeypatch):
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -279,7 +279,7 @@ def test_prefilter_records_exchange_requests_when_assessor_batches(mock_config, 
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -368,7 +368,7 @@ def test_prefilter_drops_at_0_10_keeps_above(mock_config, tmp_path, monkeypatch)
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -432,7 +432,7 @@ def test_prefilter_bypass_keeps_and_records(mock_config, tmp_path, monkeypatch):
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -520,7 +520,7 @@ def test_prefilter_drops_variant_group_together(mock_config, tmp_path, monkeypat
 
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             # The collapsed index returns the synthetic parent, not the variants.
             return [
                 ScoredCandidate(
@@ -624,7 +624,7 @@ def test_prefilter_preserves_expansion_context(mock_config, tmp_path, monkeypatc
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -696,7 +696,7 @@ def test_dropped_candidates_distinguishable(mock_config, tmp_path, monkeypatch):
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -759,7 +759,7 @@ def test_prefilter_skips_chunks_without_accepted_candidates(mock_config, tmp_pat
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return []
 
         def get_taxonomy(self, rid):
@@ -801,7 +801,7 @@ def test_metadata_records_offsite_and_fields(mock_config, tmp_path, monkeypatch)
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -858,7 +858,7 @@ def test_prefilter_metadata_defaults_for_local_assessors(mock_config, tmp_path, 
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -916,7 +916,7 @@ def test_prefilter_cases_carry_name_and_description(mock_config, tmp_path, monke
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -955,7 +955,7 @@ def test_prefilter_assessor_sees_the_probability_task(mock_config, tmp_path, mon
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1001,7 +1001,7 @@ def test_prefilter_sends_the_chunk_context_the_grounder_sees(mock_config, tmp_pa
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1076,7 +1076,7 @@ def test_prefilter_assesses_every_chunk_until_the_end(mock_config, tmp_path, mon
         def __init__(self):
             self.calls = 0
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             self.calls += 1
             # Chunk 0 is empty; chunk 1 gets candidates.
             if self.calls == 1:
@@ -1128,7 +1128,7 @@ def test_prefilter_drop_records_carry_full_provenance(mock_config, tmp_path, mon
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(
                     risk_id="R-001",
@@ -1184,7 +1184,7 @@ def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, mo
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1259,7 +1259,7 @@ def test_prefilter_request_synthesizes_through_assessor_builder(mock_config, tmp
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1307,7 +1307,7 @@ def test_prefilter_copy_preserves_chunk_identity_fields(mock_config, tmp_path, m
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(
                     risk_id=r.id,
@@ -1362,7 +1362,7 @@ def test_prefilter_copy_carries_chunk_metadata_to_grounding(mock_config, tmp_pat
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1437,7 +1437,7 @@ def test_prefilter_drop_keeps_auto_promoted_provenance(mock_config, tmp_path, mo
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1489,7 +1489,7 @@ def test_prefilter_copy_stats_are_independent(mock_config, tmp_path, monkeypatch
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1532,7 +1532,7 @@ def test_prefilter_accepted_by_flows_through_filter(mock_config, tmp_path, monke
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(
                     risk_id=r.id,
@@ -1590,7 +1590,7 @@ def test_prefilter_unmatched_ids_and_latency_recorded(mock_config, tmp_path, mon
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1644,7 +1644,7 @@ def test_prefilter_drop_with_no_outcomes_records_empty_payload(mock_config, tmp_
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1701,7 +1701,7 @@ def test_prefilter_dropped_score_takes_max_probability(mock_config, tmp_path, mo
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1738,7 +1738,7 @@ def test_prefilter_offsite_without_endpoint_is_none_host(mock_config, tmp_path, 
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1779,7 +1779,7 @@ def test_prefilter_endpoint_host_ignores_non_string_base_url(mock_config, tmp_pa
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1828,7 +1828,7 @@ def test_prefilter_rule_without_rule_id_records_empty(mock_config, tmp_path, mon
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1869,7 +1869,7 @@ def test_prefilter_assessor_without_optional_attributes_records_defaults(mock_co
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return []
 
         def get_taxonomy(self, rid):
@@ -1914,7 +1914,7 @@ def test_prefilter_bare_assessor_with_candidates_records_empty_id(mock_config, t
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -1972,7 +1972,7 @@ def test_prefilter_nonparent_drop_reentry_counted(mock_config, tmp_path, monkeyp
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in sibling_risks
@@ -2320,7 +2320,7 @@ def test_prefilter_assessor_exception_keeps_everything(mock_config, tmp_path, mo
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -2408,7 +2408,7 @@ def test_prefilter_assessor_exception_survives_serialization(mock_config, tmp_pa
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -2454,7 +2454,7 @@ def test_prefilter_rule_returning_no_decisions_keeps_everything(mock_config, tmp
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS
@@ -2564,7 +2564,7 @@ def test_prefilter_real_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in MOCK_RISKS

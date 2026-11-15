@@ -230,7 +230,7 @@ def test_run_extraction_passes_every_metadata_argument(mock_config, tmp_path, mo
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return []
 
         def get_taxonomy(self, rid):

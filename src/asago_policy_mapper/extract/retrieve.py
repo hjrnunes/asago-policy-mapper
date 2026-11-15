@@ -449,6 +449,7 @@ def retrieve_chunk(
         top_k=top_k,
         bm25_rescue_rank=bm25_rescue_rank,
         rrf_min_score=rrf_min_score,
+        rerank=use_cross_encoder,
     )
 
     if not use_cross_encoder:
