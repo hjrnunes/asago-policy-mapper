@@ -473,6 +473,7 @@ def _run_judge(
                 cr.borderline_judged = list(cr.borderline)
                 cr.accepted.extend(cr.borderline)
     elif retrieval.use_cross_encoder:
+        judge_contexts = _judge_contexts(chunks, retrieval, chunk_contexts)
         if judge_tasks:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
@@ -485,7 +486,7 @@ def _run_judge(
                         call_collector,
                         retrieval.judge_prompt,
                         retrieval.grounding_batch_size,
-                        chunk_contexts[i] if chunk_contexts else "",
+                        judge_contexts[i] if judge_contexts else "",
                     ): i
                     for i, cr in judge_tasks
                 }
@@ -493,6 +494,17 @@ def _run_judge(
                     idx, judged = future.result()
                     chunk_results[idx].borderline_judged = judged
                     chunk_results[idx].accepted.extend(judged)
+
+
+def _judge_contexts(chunks, retrieval, chunk_contexts):
+    """Pick the context list the judge reads.
+
+    A positive ``judge_context_tokens`` builds judge-only contexts with
+    that budget; the grounding and prefilter contexts are untouched.
+    """
+    if retrieval.judge_context_tokens > 0:
+        return build_chunk_contexts(chunks, max_context_tokens=retrieval.judge_context_tokens)
+    return chunk_contexts
 
 
 def _build_chunk_risk_map(chunk_results, all_matches, no_grounding):
