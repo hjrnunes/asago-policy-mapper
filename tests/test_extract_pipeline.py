@@ -23,18 +23,20 @@ from asago_policy_mapper.extract.models import (
     _RiskEvidence,
     _RiskEvidenceList,
 )
+from asago_policy_mapper.extract.parse import Chunk
 from asago_policy_mapper.extract.pipeline import (
     PipelineInvariantError,
     _build_result_metadata,
     _build_retrieval_stats,
     _cap_accepted_candidates,
     _run_causal_synthesis,
+    _run_grounding,
     _run_judge,
     build_risk_match,
     determine_accepted_by,
     run_extraction,
 )
-from asago_policy_mapper.extract.retrieve import ChunkResult
+from asago_policy_mapper.extract.retrieve import ChunkResult, build_chunk_context_indices, build_chunk_contexts
 
 
 def _make_risk(id, name, description, concern="", parent=""):
@@ -1265,3 +1267,255 @@ def test_run_judge_cross_encoder_without_borderline_makes_no_calls(mock_config, 
     assert submitted == []
     assert cr.stats["auto_accepted"] == 1
     assert cr.borderline_judged == []
+
+
+# --- grounding source-window threading tests ---
+
+
+def _grounding_chunks():
+    """Two documents: doc A chunks 0-2, doc B chunk 3."""
+    return [
+        Chunk(text="First chunk of doc A about data retention.", source="docA.md", index=0),
+        Chunk(text="Second chunk: encryption at rest is mandatory.", source="docA.md", index=1),
+        Chunk(text="Third chunk of doc A about audits.", source="docA.md", index=2),
+        Chunk(text="Doc B: model theft is covered by insurance.", source="docB.md", index=3),
+    ]
+
+
+def _grounding_verdict_response(quotes_by_risk):
+    return _RiskEvidenceList(
+        items=[
+            _RiskEvidence(risk_id=rid, grounded=True, confidence="high", quotes=quotes)
+            for rid, quotes in quotes_by_risk.items()
+        ]
+    )
+
+
+class _RecordingClient:
+    """Mock client that records prompts and returns fixed verdicts."""
+
+    def __init__(self, quotes_by_risk):
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **kw: _grounding_verdict_response(quotes_by_risk))
+        )
+        self.prompts = []
+
+    def record(self, messages):
+        self.prompts.append(messages)
+
+
+def test_run_grounding_passes_same_document_windows(mock_config):
+    """Chunk grounding verifies quotes against same-document neighbour windows."""
+    chunks = _grounding_chunks()
+    contexts = build_chunk_contexts(chunks)
+    indices = build_chunk_context_indices(chunks)
+
+    # Doc B's quote only exists in chunk 3 (another document); the doc A
+    # quote lives in chunk 0, a neighbour of the grounded chunk 1.
+    client = MagicMock()
+    client.chat.completions.create.return_value = _grounding_verdict_response(
+        {"R-001": ["encryption at rest is mandatory.", "model theft is covered by insurance."]}
+    )
+
+    cr = ChunkResult(
+        chunk_index=1,
+        source="docA.md",
+        page=None,
+        section=None,
+        accepted=[_candidate("R-001")],
+        borderline=[],
+        borderline_judged=[],
+        stats={"auto_accepted": 1, "candidates_retrieved": 1},
+    )
+    retrieval = RetrievalConfig(query_gen=False, no_judge=True)
+
+    matches, filtered, _ = _run_grounding(
+        [cr],
+        chunks,
+        client,
+        mock_config,
+        retrieval,
+        SimpleNamespace(get_taxonomy=lambda rid: "tax"),
+        [],
+        chunk_contexts=contexts,
+        chunk_context_indices=indices,
+    )
+
+    assert len(matches) == 1
+    evidence = matches[0].evidence
+    by_text = {e.text: e for e in evidence}
+    # Same-document neighbour quote: verified where it really is.
+    assert by_text["encryption at rest is mandatory."].verification == "verified"
+    assert by_text["encryption at rest is mandatory."].found_chunk_index == 1
+    # Cross-document quote: the windows never include doc B, so not_found.
+    assert by_text["model theft is covered by insurance."].verification == "not_found"
+    assert by_text["model theft is covered by insurance."].found_chunk_index is None
+    # chunk_index stays the chunk whose context was used.
+    assert all(e.chunk_index == 1 for e in evidence)
+    # The prompt was built from the context, unchanged.
+    sent = client.chat.completions.create.call_args.kwargs["messages"]
+    user_content = next(m["content"] for m in sent if "encryption at rest" in m["content"])
+    assert contexts[1] in user_content
+
+
+def test_run_grounding_quote_from_neighbour_chunk_found(mock_config):
+    """A quote living in a neighbour chunk records that neighbour as found."""
+    chunks = _grounding_chunks()
+    contexts = build_chunk_contexts(chunks)
+    indices = build_chunk_context_indices(chunks)
+
+    client = MagicMock()
+    client.chat.completions.create.return_value = _grounding_verdict_response(
+        {"R-001": ["First chunk of doc A about data retention."]}
+    )
+
+    cr = ChunkResult(
+        chunk_index=1,
+        source="docA.md",
+        page=None,
+        section=None,
+        accepted=[_candidate("R-001")],
+        borderline=[],
+        borderline_judged=[],
+        stats={"auto_accepted": 1, "candidates_retrieved": 1},
+    )
+    retrieval = RetrievalConfig(query_gen=False, no_judge=True)
+
+    matches, _, _ = _run_grounding(
+        [cr],
+        chunks,
+        client,
+        mock_config,
+        retrieval,
+        SimpleNamespace(get_taxonomy=lambda rid: "tax"),
+        [],
+        chunk_contexts=contexts,
+        chunk_context_indices=indices,
+    )
+
+    e = matches[0].evidence[0]
+    assert e.verification == "verified"
+    # The quote lives in chunk 0, a neighbour admitted into chunk 1's context.
+    assert e.found_chunk_index == 0
+    assert e.chunk_index == 1
+
+
+def test_run_grounding_without_indices_leaves_verification_none(mock_config):
+    """No index list means the spans carry no verification label."""
+    chunks = _grounding_chunks()
+    contexts = build_chunk_contexts(chunks)
+
+    client = MagicMock()
+    client.chat.completions.create.return_value = _grounding_verdict_response(
+        {"R-001": ["encryption at rest is mandatory."]}
+    )
+
+    cr = ChunkResult(
+        chunk_index=1,
+        source="docA.md",
+        page=None,
+        section=None,
+        accepted=[_candidate("R-001")],
+        borderline=[],
+        borderline_judged=[],
+        stats={"auto_accepted": 1, "candidates_retrieved": 1},
+    )
+    retrieval = RetrievalConfig(query_gen=False, no_judge=True)
+
+    matches, _, _ = _run_grounding(
+        [cr],
+        chunks,
+        client,
+        mock_config,
+        retrieval,
+        SimpleNamespace(get_taxonomy=lambda rid: "tax"),
+        [],
+        chunk_contexts=contexts,
+        chunk_context_indices=None,
+    )
+
+    e = matches[0].evidence[0]
+    assert e.verification is None
+    assert e.found_chunk_index is None
+
+
+def test_ground_one_bare_chunk_fallback_verifies_against_chunk(mock_config):
+    """Without context text, _ground_one verifies against the bare chunk."""
+    from asago_policy_mapper.extract.pipeline import _ground_one
+
+    chunks = _grounding_chunks()
+    client = MagicMock()
+    client.chat.completions.create.return_value = _grounding_verdict_response(
+        {"R-001": ["Second chunk: encryption at rest is mandatory."]}
+    )
+
+    cr = ChunkResult(
+        chunk_index=1,
+        source="docA.md",
+        page=None,
+        section=None,
+        accepted=[_candidate("R-001")],
+        borderline=[],
+        borderline_judged=[],
+        stats={"auto_accepted": 1, "candidates_retrieved": 1},
+    )
+
+    _, merged = _ground_one(
+        cr,
+        chunks,
+        client,
+        "test-model",
+        None,
+        passes=1,
+        max_batch_size=0,
+        context_text="",
+        context_source_windows=None,
+    )
+
+    e = merged["R-001"][0][0]
+    assert e.verification == "verified"
+    assert e.found_chunk_index == 1
+
+
+def test_ground_variants_one_passes_windows(mock_config):
+    """Variant grounding verifies quotes against the context's chunk windows."""
+    from asago_policy_mapper.extract.pipeline import _ground_variants_one
+
+    chunks = _grounding_chunks()
+    contexts = build_chunk_contexts(chunks)
+    indices = build_chunk_context_indices(chunks)
+
+    client = MagicMock()
+    client.chat.completions.create.return_value = _grounding_verdict_response(
+        {"child-risk": ["First chunk of doc A about data retention."]}
+    )
+
+    parent = RiskMatch(
+        risk_id="parent-risk",
+        risk_name="Parent",
+        risk_description="Parent description",
+        taxonomy="tax",
+        confidence=0.9,
+        grounding_confidence="high",
+        accepted_by="threshold",
+        evidence=[
+            EvidenceSpan(text="Second chunk: encryption at rest is mandatory.", document="docA.md", chunk_index=1)
+        ],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.05),
+    )
+
+    _, grounded = _ground_variants_one(
+        parent,
+        chunks,
+        {"parent-risk": [{"risk_id": "child-risk", "name": "Child", "description": "Child description"}]},
+        client,
+        "test-model",
+        None,
+        chunk_contexts=contexts,
+        chunk_context_indices=indices,
+    )
+
+    e = grounded["child-risk"][0][0]
+    assert e.verification == "verified"
+    assert e.found_chunk_index == 0
+    assert e.chunk_index == 1
