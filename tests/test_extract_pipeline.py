@@ -79,7 +79,7 @@ def test_run_extraction_returns_extraction_result(mock_config, tmp_path):
     )
 
     assert isinstance(result, ExtractionResult)
-    assert result.version == "0.3"
+    assert result.version == "0.4"
     assert result.source_documents == [str(doc)]
     assert result.retrieval_stats.total_chunks >= 1
     assert "service_tier" not in result.metadata
@@ -661,6 +661,7 @@ def _candidate(risk_id="R-001"):
         risk_description="desc",
         cross_encoder_score=0.8,
         rrf_score=0.5,
+        rerank_source="cross_encoder",
     )
 
 
@@ -768,7 +769,7 @@ def test_build_risk_match_rrf_mode():
     assert m.confidence == c.rrf_score
 
 
-def test_build_risk_match_confidence_override():
+def test_build_risk_match_expansion_confidence_null():
     c = _candidate()
     m = build_risk_match(
         c,
@@ -776,9 +777,10 @@ def test_build_risk_match_confidence_override():
         accepted_by="expansion",
         grounding_confidence="high",
         evidence=[],
-        confidence_override=0.0,
     )
-    assert m.confidence == 0.0
+    # an expansion stub was never measured: null confidence, source none
+    assert m.confidence == c.cross_encoder_score
+    assert m.confidence_source == "cross_encoder"
 
 
 def test_build_risk_match_scores_override():
@@ -795,7 +797,6 @@ def test_build_risk_match_scores_override():
         accepted_by="expansion",
         grounding_confidence="high",
         evidence=[],
-        confidence_override=0.0,
         scores_override=zero_scores,
     )
     assert m.scores.bm25_rank == 0

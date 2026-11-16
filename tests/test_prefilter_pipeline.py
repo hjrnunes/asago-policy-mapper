@@ -741,8 +741,8 @@ def test_dropped_candidates_distinguishable(mock_config, tmp_path, monkeypatch):
     assert by_id["R-001"].score == 0.03
     assert by_id["R-001"].reason is not None
     # The drop keeps its retrieval provenance: the prefilter filtered it,
-    # it did not accept it.
-    assert by_id["R-001"].accepted_by == "threshold"
+    # it did not accept it. Rank cutoff auto-accept labels as "rank".
+    assert by_id["R-001"].accepted_by == "rank"
     # R-002 passed the filter, was sent to grounding, and was rejected there:
     # no prefilter provenance.
     assert by_id["R-002"].dropped_by is None
@@ -1165,7 +1165,9 @@ def test_prefilter_drop_records_carry_full_provenance(mock_config, tmp_path, mon
     assert fc.taxonomy == "taxonomy-R-001"
     assert fc.rrf_score == 0.0123
     assert fc.bm25_rank == 7
-    assert fc.accepted_by == "threshold"
+    # Rank cutoff auto-accept labels as "rank"; the provenance survived the
+    # prefilter's filtered copy.
+    assert fc.accepted_by == "rank"
     assert fc.score == 0.05
     assert fc.reason == "p=0.05"
 
@@ -1568,9 +1570,8 @@ def test_prefilter_accepted_by_flows_through_filter(mock_config, tmp_path, monke
 
     kept = {m.risk_id: m for m in result.risks}
     assert "R-002" in kept
-    # Auto-accepted by cross-encoder threshold: the provenance survived
-    # the filtered copy.
-    assert kept["R-002"].accepted_by == "threshold"
+    # Auto-accepted by rank cutoff: the provenance survived the filtered copy.
+    assert kept["R-002"].accepted_by == "rank"
 
 
 def test_prefilter_unmatched_ids_and_latency_recorded(mock_config, tmp_path, monkeypatch):
