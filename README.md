@@ -59,7 +59,7 @@ flowchart LR
     vg --> merge[Merge]
     merge --> expand@{ shape: st-rect, label: "Expand" }
     expand --> causal@{ shape: st-rect, label: "Causal\nsynthesis" }
-    expand -.->|--no-causal-synthesis| miti
+    expand -.->|--no-causal-synthesis or --no-grounding| miti
     causal -.->|CLI post‑processing| miti[Mitigations]
 ```
 
@@ -74,8 +74,6 @@ flowchart LR
 9. **Variant ground** — For collapsed parent risks that survived grounding, a specialized LLM call selects only the specifically evidenced variant sub-types
 10. **Merge** — Deduplicate across chunks, keep top-3 evidence spans
 11. **Expand** — Sibling expansion: found risks are expanded to parent siblings + cross-taxonomy mappings, then grounded against relevant document chunks (parallel)
-12. **Causal synthesis** — LLM synthesizes threat-source → threat → vulnerability → consequence → impact chains per matched risk (parallel; disable with `--no-causal-synthesis`)
-13. **Mitigations** — CLI post-processing: enriches results with mitigation actions and risk cross-maps from Nexus (not part of the extraction pipeline)
 
 ### Two-Tier Evaluation
 

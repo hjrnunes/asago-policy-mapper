@@ -142,6 +142,13 @@ class RiskMatch(BaseModel):
     consequence: str | None = None
     impact: str | None = None
     scores_inherited_from: str | None = None
+    # Why there is no causal chain: "disabled" covers synthesis turned off,
+    # no client or no grounding; the other values come from
+    # CausalSynthesisStatus.
+    causal_status: Literal["generated", "no_evidence", "empty_answer", "validation_exhausted", "disabled"] | None = None
+    # Which source supplied each causal field: LLM synthesis or the built-in
+    # catalog tables.
+    causal_provenance: dict[str, Literal["generated", "catalog"]] = {}
 
     _reject_nan_confidence = field_validator("confidence")(_reject_nan)
 
@@ -364,6 +371,23 @@ class _CausalChain(BaseModel):
 
 class _CausalChains(BaseModel):
     items: list[_CausalChain]
+
+
+CausalSynthesisStatus = Literal["generated", "no_evidence", "empty_answer", "validation_exhausted"]
+
+
+@dataclass
+class CausalSynthesisResult:
+    """The result of one causal-synthesis attempt, with the reason for no chain.
+
+    ``status`` keeps the three "no chain" reasons apart: ``no_evidence``
+    (the risk's evidence points at no known chunk), ``empty_answer`` (the
+    model returned no chain content) and ``validation_exhausted`` (the
+    model output failed parsing or validation until retries ran out).
+    """
+
+    status: CausalSynthesisStatus
+    chain: _CausalChain | None = None
 
 
 @dataclass
