@@ -193,6 +193,7 @@ def test_prefilter_reentry_counted(mock_config, tmp_path, monkeypatch):
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         return {c.risk_id: ([], "medium") for c in candidates if c.risk_id == "R-003"}
 

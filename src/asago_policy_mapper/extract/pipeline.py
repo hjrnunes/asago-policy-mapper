@@ -1347,7 +1347,17 @@ def _prefilter_fields_sent(assessor) -> list[str]:
 
 
 def _run_matches_stage(
-    chunk_results, chunks, client, config, retrieval, plan, index, call_collector, chunk_contexts, chunk_context_indices, timing
+    chunk_results,
+    chunks,
+    client,
+    config,
+    retrieval,
+    plan,
+    index,
+    call_collector,
+    chunk_contexts,
+    chunk_context_indices,
+    timing,
 ) -> tuple[list[RiskMatch], list[FilteredCandidate], int]:
     """Ground accepted candidates, or collect them ungrounded when grounding is disabled."""
     if not plan.grounding:
@@ -1469,7 +1479,18 @@ _EMPTY_EXPANSION_STATS = {"expanded_candidates": 0, "expanded_grounded": 0, "exp
 
 
 def _run_variant_grounding_stage(
-    all_matches, chunks, index, client, config, retrieval, plan, call_collector, chunk_contexts, chunk_context_indices, max_workers, timing
+    all_matches,
+    chunks,
+    index,
+    client,
+    config,
+    retrieval,
+    plan,
+    call_collector,
+    chunk_contexts,
+    chunk_context_indices,
+    max_workers,
+    timing,
 ):
     """Variant-ground grounded matches when variants and a client are present."""
     if index.variant_map and plan.grounding and client is not None:
@@ -1674,12 +1695,33 @@ def run_extraction(
         grounding_inputs = chunk_results
 
     all_matches, all_filtered, grounding_filtered = _run_matches_stage(
-        grounding_inputs, chunks, client, config, retrieval, plan, index, call_collector, chunk_contexts, chunk_context_indices, timing
+        grounding_inputs,
+        chunks,
+        client,
+        config,
+        retrieval,
+        plan,
+        index,
+        call_collector,
+        chunk_contexts,
+        chunk_context_indices,
+        timing,
     )
     all_filtered = prefilter_drops + all_filtered
 
     all_matches = _run_variant_grounding_stage(
-        all_matches, chunks, index, client, config, retrieval, plan, call_collector, chunk_contexts, chunk_context_indices, max_workers, timing
+        all_matches,
+        chunks,
+        index,
+        client,
+        config,
+        retrieval,
+        plan,
+        call_collector,
+        chunk_contexts,
+        chunk_context_indices,
+        max_workers,
+        timing,
     )
 
     chunk_risk_ids = _build_chunk_risk_map(chunk_results, all_matches, plan)

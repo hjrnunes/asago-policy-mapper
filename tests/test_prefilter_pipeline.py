@@ -207,6 +207,7 @@ def test_prefilter_off_is_noop(mock_config, tmp_path, monkeypatch):
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         return {c.risk_id: ([], "medium") for c in candidates if c.risk_id != "R-003"}
 
@@ -351,6 +352,7 @@ def test_prefilter_drops_at_0_10_keeps_above(mock_config, tmp_path, monkeypatch)
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates}
@@ -415,6 +417,7 @@ def test_prefilter_bypass_keeps_and_records(mock_config, tmp_path, monkeypatch):
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {}
@@ -520,6 +523,7 @@ def test_prefilter_drops_variant_group_together(mock_config, tmp_path, monkeypat
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates if not c.risk_id.startswith("unauthorized-processing")}
@@ -607,6 +611,7 @@ def test_prefilter_preserves_expansion_context(mock_config, tmp_path, monkeypatc
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         return {c.risk_id: ([], "medium") for c in candidates}
 
@@ -679,6 +684,7 @@ def test_dropped_candidates_distinguishable(mock_config, tmp_path, monkeypatch):
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         # R-002 reaches grounding but is rejected by it.
         return {}
@@ -1280,6 +1286,7 @@ def test_prefilter_copy_carries_chunk_metadata_to_grounding(mock_config, tmp_pat
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounding_calls.append({"page": page, "section": section, "document": document})
         return {c.risk_id: ([], "medium") for c in candidates}
