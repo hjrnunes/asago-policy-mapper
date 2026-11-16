@@ -438,6 +438,34 @@ def _ground_variants_one(
     return parent_match, grounded
 
 
+def _variant_stub(variant_id, variant_info, parent_match):
+    """Build the candidate a grounded variant stands in for at match time.
+
+    The parent's scores carry over: a reranker measured them for the same
+    matching work, so they still hold. A measured reranker score rides with
+    its source; an unmeasured parent leaves rerank_source unset, so its null
+    confidence stays null instead of posing as a measured 0.0.
+    """
+    stub = ScoredCandidate(
+        risk_id=variant_id,
+        risk_name=variant_info["name"],
+        risk_description=variant_info["description"],
+        bm25_rank=parent_match.scores.bm25_rank,
+        embedding_distance=parent_match.scores.embedding_distance,
+        rrf_score=parent_match.scores.rrf_score,
+    )
+    parent_source = parent_match.confidence_source
+    parent_score = parent_match.scores.cross_encoder_score
+    if parent_score is None:
+        return stub
+    return stub.model_copy(
+        update={
+            "cross_encoder_score": parent_score,
+            "rerank_source": parent_source if parent_source in ("cross_encoder", "colbert") else None,
+        }
+    )
+
+
 def _run_variant_grounding(
     grounded_matches,
     chunks,
@@ -492,22 +520,7 @@ def _run_variant_grounding(
                 )
                 if not vinfo:
                     continue
-                # confidence follows the parent's selection mode: a reranker-
-                # measured parent keeps its measured score, an RRF parent
-                # inherits its ranking score. The score RECORD transfers
-                # verbatim via scores_override either way, so a parent that
-                # was reranked but selected by RRF keeps its measured scores.
-                parent_source = parent_match.confidence_source
-                stub = ScoredCandidate(
-                    risk_id=vid,
-                    risk_name=vinfo["name"],
-                    risk_description=vinfo["description"],
-                    bm25_rank=parent_match.scores.bm25_rank,
-                    embedding_distance=parent_match.scores.embedding_distance,
-                    cross_encoder_score=parent_match.scores.cross_encoder_score or 0.0,
-                    rrf_score=parent_match.scores.rrf_score,
-                    rerank_source=parent_source if parent_source in ("cross_encoder", "colbert") else None,
-                )
+                stub = _variant_stub(vid, vinfo, parent_match)
                 variant_matches.append(
                     build_risk_match(
                         stub,
@@ -518,7 +531,7 @@ def _run_variant_grounding(
                         scores_override=parent_match.scores.model_copy(deep=True),
                         # an RRF-mode parent inherits its ranking score as
                         # confidence, exactly like the retrieval path
-                        use_cross_encoder=parent_source != "rrf",
+                        use_cross_encoder=parent_match.confidence_source != "rrf",
                     ).model_copy(update={"scores_inherited_from": parent_match.risk_id})
                 )
     if call_collector is not None:
