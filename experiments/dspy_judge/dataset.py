@@ -175,9 +175,12 @@ def _build_threshold_examples_from_run(
 
     chunk_texts = {i: c.text for i, c in enumerate(chunks)}
 
+    # auto-accepted risks: threshold-crossing reranker scores or top-k rank
+    # selection (default runs select by rank, not by a threshold crossing)
+    auto_accept_labels = {"threshold", "rank"}
     threshold_by_chunk: dict[int, list[dict]] = {}
     for r in ext["risks"]:
-        if r["accepted_by"] != "threshold":
+        if r["accepted_by"] not in auto_accept_labels:
             continue
         for c_info in ext.get("chunks", []):
             if r["risk_id"] in c_info.get("accepted_risk_ids", []):

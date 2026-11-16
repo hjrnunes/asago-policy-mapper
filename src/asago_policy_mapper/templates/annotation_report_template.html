@@ -202,7 +202,7 @@
             <span>
               <span x-text="risk.evidence_count + ' evidence span' + (risk.evidence_count !== 1 ? 's' : '')"></span>
               <span class="mx-1">&middot;</span>
-              <span x-text="(risk.confidence * 100).toFixed(0) + '%'"></span>
+              <span x-text="confidenceLabel(risk.confidence, risk.confidence_source)"></span>
             </span>
             <!-- GT curation button -->
             <template x-if="gtMode && risk.classification === 'spurious'">
@@ -404,7 +404,7 @@
           <!-- Taxonomy & confidence -->
           <div class="flex gap-2 mb-2 flex-wrap">
             <span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700" x-text="ann.taxonomy"></span>
-            <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-700" x-text="(ann.confidence * 100).toFixed(0) + '% confidence'"></span>
+            <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-700" x-text="confidenceLabel(ann.confidence, ann.confidence_source)"></span>
             <span
               class="text-xs px-2 py-0.5 rounded"
               :class="{
@@ -476,6 +476,7 @@ function annotationApp() {
           risk_name: a.risk_name,
           taxonomy: a.taxonomy,
           confidence: a.confidence,
+          confidence_source: a.confidence_source || 'none',
           classification: a.classification || null,
           evidence_count: 0,
         };
@@ -530,6 +531,15 @@ function annotationApp() {
 
     taxFilterActive(tax) {
       return this.selectedTaxonomies.includes(tax);
+    },
+
+    confidenceLabel(confidence, source) {
+      if (confidence == null) return 'no confidence score';
+      if (source === 'rrf') {
+        // an RRF value is a ranking score, not a calibrated probability
+        return 'RRF ' + confidence.toFixed(3);
+      }
+      return (confidence * 100).toFixed(0) + '% confidence';
     },
 
     filteredRisks() {

@@ -156,7 +156,8 @@ def _build_annotation(ev: dict, risk: dict, evidence_id: str, start: int, end: i
         "risk_name": risk.get("risk_name", ""),
         "risk_description": risk.get("risk_description", ""),
         "taxonomy": risk.get("taxonomy", ""),
-        "confidence": risk.get("confidence", 0.0),
+        "confidence": risk.get("confidence"),
+        "confidence_source": risk.get("confidence_source", "none"),
         "grounding_confidence": risk.get("grounding_confidence", ""),
         "causal_chain": {
             "threat": risk.get("threat"),
