@@ -504,7 +504,7 @@ class TestRunVariantGrounding:
             ]
         )
 
-        parent = _make_parent_match(chunk_index=0)
+        parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence_source": "cross_encoder"})
         chunks = _make_chunks(["health records were accessed."])
 
         result = _run_variant_grounding(
@@ -526,6 +526,7 @@ class TestRunVariantGrounding:
         assert variant.scores.rrf_score == parent.scores.rrf_score
         assert variant.accepted_by == parent.accepted_by
         assert variant.grounding_confidence == "medium"
+        assert variant.scores_inherited_from == parent.risk_id
 
     def test_no_parents_returns_unchanged(self):
         """When no parent matches exist, returns input unchanged."""
@@ -772,7 +773,7 @@ def test_ground_expansion_group_multi_empty_passes_change_nothing():
 
 
 def test_build_expansion_matches_uses_risk_lookup_and_taxonomy():
-    """Each grounded risk becomes an expansion match with zeroed confidence."""
+    """Each grounded risk becomes an expansion match with null confidence."""
     from asago_policy_mapper.extract import pipeline
 
     grounded = {
@@ -789,7 +790,8 @@ def test_build_expansion_matches_uses_risk_lookup_and_taxonomy():
     assert m.risk_name == "Model Bias"
     assert m.risk_description == "Systematic errors."
     assert m.accepted_by == "expansion"
-    assert m.confidence == 0.0
+    assert m.confidence is None
+    assert m.confidence_source == "none"
     assert m.grounding_confidence == "high"
     assert m.taxonomy == "tax-R-001"
     assert [e.text for e in m.evidence] == ["quote"]

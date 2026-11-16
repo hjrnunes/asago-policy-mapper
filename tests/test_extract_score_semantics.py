@@ -440,3 +440,315 @@ def test_retrieve_chunk_cross_encoder_score_null_untouched():
     assert by_id["R-002"].selected_by == "rank"
     assert by_id["R-001"].rerank_source is None
     assert by_id["R-001"].selected_by == "rank"
+
+
+# --- pipeline wiring (step 3) ---
+
+
+def _pipeline():
+    from asago_policy_mapper.extract import pipeline
+
+    return pipeline
+
+
+def test_determine_accepted_by_prefers_selected_by():
+    """determine_accepted_by returns the recorded label, falling back to the legacy rule."""
+    pl = _pipeline()
+    stamped = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="rank")
+    assert pl.determine_accepted_by(stamped, borderline_judged=[], use_cross_encoder=True, no_judge=False) == "rank"
+    stamped_qg = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="query_gen")
+    assert (
+        pl.determine_accepted_by(stamped_qg, borderline_judged=[], use_cross_encoder=True, no_judge=False)
+        == "query_gen"
+    )
+    # legacy fallback when no label was recorded
+    plain = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d")
+    assert pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=True, no_judge=False) == "threshold"
+    assert pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=False, no_judge=False) == "rrf"
+    # judge promotion still wins over the recorded label
+    judged = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="rank")
+    assert (
+        pl.determine_accepted_by(judged, borderline_judged=[judged], use_cross_encoder=True, no_judge=False)
+        == "llm_judge"
+    )
+    assert (
+        pl.determine_accepted_by(judged, borderline_judged=[judged], use_cross_encoder=True, no_judge=True)
+        == "auto_promoted"
+    )
+
+
+def test_build_risk_match_ce_measured_source():
+    """build_risk_match derives confidence and source from the candidate's stamps."""
+    pl = _pipeline()
+    c = ScoredCandidate(
+        risk_id="R-1", risk_name="n", risk_description="d", cross_encoder_score=0.7, rerank_source="cross_encoder"
+    )
+    m = pl.build_risk_match(c, taxonomy="t", accepted_by="rank", grounding_confidence="high", evidence=[])
+    assert m.confidence == 0.7
+    assert m.confidence_source == "cross_encoder"
+    assert m.scores.cross_encoder_score == 0.7
+
+
+def test_build_risk_match_never_reranked_is_null():
+    """A candidate no reranker scored builds a null-confidence match."""
+    pl = _pipeline()
+    c = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", rerank_source=None)
+    m = pl.build_risk_match(c, taxonomy="t", accepted_by="rank", grounding_confidence="high", evidence=[])
+    assert m.confidence is None
+    assert m.confidence_source == "none"
+    assert m.scores.cross_encoder_score is None
+
+
+def test_build_risk_match_colbert_source():
+    """A ColBERT-scored candidate carries colbert as its confidence source."""
+    pl = _pipeline()
+    c = ScoredCandidate(
+        risk_id="R-1", risk_name="n", risk_description="d", cross_encoder_score=0.6, rerank_source="colbert"
+    )
+    m = pl.build_risk_match(c, taxonomy="t", accepted_by="threshold", grounding_confidence="high", evidence=[])
+    assert m.confidence == 0.6
+    assert m.confidence_source == "colbert"
+    assert m.scores.cross_encoder_score == 0.6
+
+
+def test_build_risk_match_rrf_mode():
+    """Without the cross-encoder, confidence comes from the RRF score."""
+    pl = _pipeline()
+    c = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", rrf_score=0.04, selected_by="rrf")
+    m = pl.build_risk_match(
+        c, taxonomy="t", accepted_by="rrf", grounding_confidence="high", evidence=[], use_cross_encoder=False
+    )
+    assert m.confidence == 0.04
+    assert m.confidence_source == "rrf"
+
+
+def test_merge_query_candidates_stamps_query_gen():
+    """_merge_query_candidates labels every accepted candidate query_gen without mutating them."""
+    pl = _pipeline()
+    from asago_policy_mapper.extract.parse import Chunk
+
+    chunks = [Chunk(text="c0", source="a.pdf", index=0), Chunk(text="c1", source="a.pdf", index=1)]
+    candidates = [
+        ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", rrf_score=0.03),
+        ScoredCandidate(risk_id="R-2", risk_name="n", risk_description="d", rrf_score=0.02),
+    ]
+    chunk_results = [None, None]
+    qr = SimpleNamespace(query="q", chunk_indices=[0, 1], section="s")
+
+    pl._merge_query_candidates(chunk_results, chunks, qr, candidates)
+
+    assert all(c.selected_by == "query_gen" for cr in chunk_results for c in cr.accepted)
+    # the shared candidates were not mutated in place
+    assert all(c.selected_by is None for c in candidates)
+    # first-occurrence dedup keeps one R-1 per chunk
+    assert [c.risk_id for c in chunk_results[0].accepted] == ["R-1", "R-2"]
+
+
+def test_build_expansion_matches_null_confidence():
+    """Expansion matches carry null confidence and source none, not 0.0."""
+    pl = _pipeline()
+    grounded = {"R-9": ([EvidenceSpan(text="q", document="d.pdf", chunk_index=0)], "high")}
+    risk_lookup = {"R-9": {"name": "n", "description": "d"}}
+    index = SimpleNamespace(get_taxonomy=lambda rid: "t")
+
+    matches = pl._build_expansion_matches(grounded, index, risk_lookup)
+
+    assert matches[0].confidence is None
+    assert matches[0].confidence_source == "none"
+    assert matches[0].accepted_by == "expansion"
+    assert matches[0].scores.cross_encoder_score is None
+
+
+def test_variant_match_marks_inherited_scores():
+    """Variant matches copy parent scores with scores_inherited_from set."""
+    pl = _pipeline()
+    from tests.test_extract_variant_grounding import VARIANT_MAP, VARIANTS, _make_chunks, _make_parent_match
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                risk_id=VARIANTS[0]["risk_id"],
+                grounded=True,
+                confidence="high",
+                quotes=["biometric data"],
+            )
+        ]
+    )
+
+    # stamp the parent as measured: its 0.85 came from a cross-encoder
+    parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence_source": "cross_encoder"})
+
+    result = pl._run_variant_grounding(
+        [parent],
+        _make_chunks(["biometric data was processed."]),
+        VARIANT_MAP,
+        mock_client,
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    assert len(result) == 1
+    variant = result[0]
+    assert variant.scores_inherited_from is not None
+    assert "unauthorized-processing" in variant.scores_inherited_from
+    # parent scores copied
+    assert variant.scores.bm25_rank == 3
+    assert variant.scores.rrf_score == 0.04
+    # parent's measured score survives the copy when it was measured
+    assert variant.scores.cross_encoder_score == 0.85
+    assert variant.confidence == 0.85
+    assert variant.confidence_source == "cross_encoder"
+
+
+def test_variant_match_unmeasured_parent_is_null():
+    """A variant of a parent with no measurement inherits null confidence."""
+    pl = _pipeline()
+    from tests.test_extract_variant_grounding import VARIANT_MAP, VARIANTS, _make_chunks, _make_parent_match
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                risk_id=VARIANTS[0]["risk_id"],
+                grounded=True,
+                confidence="high",
+                quotes=["biometric data"],
+            )
+        ]
+    )
+
+    # parent with no measurement: query-gen style, null confidence and null score
+    parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence": None, "confidence_source": "none"})
+    parent = parent.model_copy(update={"scores": parent.scores.model_copy(update={"cross_encoder_score": None})})
+
+    result = pl._run_variant_grounding(
+        [parent],
+        _make_chunks(["biometric data was processed."]),
+        VARIANT_MAP,
+        mock_client,
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    variant = result[0]
+    assert variant.confidence is None
+    assert variant.confidence_source == "none"
+    assert variant.scores.cross_encoder_score is None
+    assert variant.scores_inherited_from is not None
+
+
+def test_variant_match_rrf_parent_keeps_ranking_confidence():
+    """A variant of an RRF-mode parent inherits the ranking score as confidence."""
+    pl = _pipeline()
+    from tests.test_extract_variant_grounding import VARIANT_MAP, VARIANTS, _make_chunks, _make_parent_match
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                risk_id=VARIANTS[0]["risk_id"],
+                grounded=True,
+                confidence="high",
+                quotes=["biometric data"],
+            )
+        ]
+    )
+
+    # parent accepted in RRF mode: its confidence is the ranking score
+    parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence_source": "rrf"})
+
+    result = pl._run_variant_grounding(
+        [parent],
+        _make_chunks(["biometric data was processed."]),
+        VARIANT_MAP,
+        mock_client,
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    variant = result[0]
+    assert variant.confidence == 0.04
+    assert variant.confidence_source == "rrf"
+    assert variant.scores_inherited_from is not None
+
+
+def test_variant_match_colbert_parent_keeps_source():
+    """A variant of a colbert-scored parent inherits the colbert source label."""
+    pl = _pipeline()
+    from tests.test_extract_variant_grounding import VARIANT_MAP, VARIANTS, _make_chunks, _make_parent_match
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                risk_id=VARIANTS[0]["risk_id"],
+                grounded=True,
+                confidence="high",
+                quotes=["biometric data"],
+            )
+        ]
+    )
+
+    # parent reranked by colbert: source label carries over to the variant
+    parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence_source": "colbert"})
+
+    result = pl._run_variant_grounding(
+        [parent],
+        _make_chunks(["biometric data was processed."]),
+        VARIANT_MAP,
+        mock_client,
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    variant = result[0]
+    assert variant.confidence == 0.85
+    assert variant.confidence_source == "colbert"
+    assert variant.scores.cross_encoder_score == 0.85
+
+
+def test_variant_match_rrf_parent_keeps_measured_scores():
+    """An RRF-selected parent that was still reranked keeps its measured scores.
+
+    With --colbert-model and no cross-encoder, selection follows RRF while the
+    ColBERT measurement stays in the score record; the variant must inherit
+    both: the ranking score as confidence and the measurement in scores.
+    """
+    pl = _pipeline()
+    from tests.test_extract_variant_grounding import VARIANT_MAP, VARIANTS, _make_chunks, _make_parent_match
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                risk_id=VARIANTS[0]["risk_id"],
+                grounded=True,
+                confidence="high",
+                quotes=["biometric data"],
+            )
+        ]
+    )
+
+    # parent selected by RRF but measured by a reranker
+    parent = _make_parent_match(chunk_index=0).model_copy(
+        update={"confidence_source": "rrf", "confidence": 0.04},
+    )
+
+    result = pl._run_variant_grounding(
+        [parent],
+        _make_chunks(["biometric data was processed."]),
+        VARIANT_MAP,
+        mock_client,
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    variant = result[0]
+    assert variant.confidence == 0.04
+    assert variant.confidence_source == "rrf"
+    # the measured reranker score survives the transfer verbatim
+    assert variant.scores.cross_encoder_score == 0.85
+    assert variant.scores.bm25_rank == 3
+    assert variant.scores.rrf_score == 0.04
+    assert variant.scores_inherited_from is not None
