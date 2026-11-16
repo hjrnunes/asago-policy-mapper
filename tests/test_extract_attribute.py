@@ -16,10 +16,12 @@ from llm_errors import (
 )
 
 from asago_policy_mapper.extract.attribute import (
+    _outcome_status,
     ground_and_extract_evidence,
     ground_risk_group,
     ground_variants,
     synthesize_causal_chain,
+    synthesize_causal_chain_outcome,
 )
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
@@ -1677,6 +1679,216 @@ def test_synthesize_causal_chain_records_call(mock_client):
     assert collector[0].duration_ms >= 0
 
 
+# ---------------------------------------------------------------------------
+# Tests for synthesize_causal_chain_outcome
+# ---------------------------------------------------------------------------
+
+
+def test_outcome_status_covers_all_reasons():
+    """_outcome_status keeps the three no-chain reasons apart."""
+    chain = _CausalChain(threat="t", threat_source="", vulnerability="", consequence="", impact="")
+
+    assert _outcome_status(chain, retry_exhausted=False) == "generated"
+    assert _outcome_status(None, retry_exhausted=False) == "empty_answer"
+    assert _outcome_status(None, retry_exhausted=True) == "validation_exhausted"
+    # Exhaustion wins even when a chain came back.
+    assert _outcome_status(chain, retry_exhausted=True) == "validation_exhausted"
+
+
+def test_generated_status_with_chain(mock_client):
+    mock_client.chat.completions.create.return_value = _CausalChains(
+        items=[
+            _CausalChain(
+                threat="Threat",
+                threat_source="Source",
+                vulnerability="Vuln",
+                consequence="Consequence",
+                impact="Impact",
+            ),
+        ]
+    )
+
+    risk = _make_risk_match(chunk_indices=[0, 2])
+    # First span unattributed: the record must skip it, not record None.
+    risk.evidence[0].chunk_index = None
+    chunk_texts = {0: "Text zero.", 2: "Text two."}
+    collector: list[LLMCallRecord] = []
+
+    outcome = synthesize_causal_chain_outcome(
+        risk_match=_make_risk_match(),
+        chunk_texts={0: "Some text.", 2: "More text."},
+        client=mock_client,
+        model="test-model",
+    )
+
+    assert outcome.status == "generated"
+    assert outcome.chain is not None
+    assert outcome.chain.threat == "Threat"
+    assert outcome.chain.impact == "Impact"
+
+
+def test_no_evidence_status(mock_client):
+    """A risk whose evidence points at no chunk in chunk_texts never calls the model."""
+    risk = _make_risk_match(chunk_indices=[0, 2])
+
+    outcome = synthesize_causal_chain_outcome(
+        risk_match=risk,
+        chunk_texts={5: "Some other chunk."},
+        client=mock_client,
+        model="test-model",
+    )
+
+    assert outcome.status == "no_evidence"
+    assert outcome.chain is None
+    mock_client.chat.completions.create.assert_not_called()
+
+
+def test_empty_answer_status(mock_client):
+    mock_client.chat.completions.create.return_value = _CausalChains(
+        items=[_CausalChain(threat="", threat_source="", vulnerability="", consequence="", impact="")]
+    )
+
+    outcome = synthesize_causal_chain_outcome(
+        risk_match=_make_risk_match(),
+        chunk_texts={0: "Some text.", 2: "More text."},
+        client=mock_client,
+        model="test-model",
+    )
+
+    assert outcome.status == "empty_answer"
+    assert outcome.chain is None
+
+
+def test_empty_items_list_is_empty_answer(mock_client):
+    mock_client.chat.completions.create.return_value = _CausalChains(items=[])
+
+    outcome = synthesize_causal_chain_outcome(
+        risk_match=_make_risk_match(),
+        chunk_texts={0: "Some text.", 2: "More text."},
+        client=mock_client,
+        model="test-model",
+    )
+
+    assert outcome.status == "empty_answer"
+    assert outcome.chain is None
+
+
+def test_validation_exhausted_status(mock_client):
+    mock_client.chat.completions.create.side_effect = validation_exhaustion(malformed_json_validation_error())
+
+    outcome = synthesize_causal_chain_outcome(
+        risk_match=_make_risk_match(),
+        chunk_texts={0: "Some text.", 2: "More text."},
+        client=mock_client,
+        model="test-model",
+    )
+
+    assert outcome.status == "validation_exhausted"
+    assert outcome.chain is None
+
+
+def test_outcome_records_call_like_legacy(mock_client):
+    mock_client.chat.completions.create.return_value = _CausalChains(
+        items=[
+            _CausalChain(
+                threat="Threat",
+                threat_source="Source",
+                vulnerability="Vuln",
+                consequence="Consequence",
+                impact="Impact",
+            ),
+        ]
+    )
+    collector: list[LLMCallRecord] = []
+
+    outcome = synthesize_causal_chain_outcome(
+        risk_match=_make_risk_match(),
+        chunk_texts={0: "Text.", 2: "More."},
+        client=mock_client,
+        model="test-model",
+        call_collector=collector,
+    )
+
+    assert outcome.status == "generated"
+    assert len(collector) == 1
+    assert collector[0].chunk_index == 0
+    assert collector[0].stage == "causal_synthesis"
+    assert collector[0].result_summary == "synthesized"
+
+
+def test_outcome_no_evidence_records_no_call(mock_client):
+    """The no-evidence short-circuit must not append a call record."""
+    collector: list[LLMCallRecord] = []
+
+    outcome = synthesize_causal_chain_outcome(
+        risk_match=_make_risk_match(chunk_indices=[0]),
+        chunk_texts={1: "Some other chunk."},
+        client=mock_client,
+        model="test-model",
+        call_collector=collector,
+    )
+
+    assert outcome.status == "no_evidence"
+    assert collector == []
+
+
+def test_legacy_wrapper_returns_none_as_before(mock_client):
+    """synthesize_causal_chain keeps its contract: returns the chain, or None."""
+    mock_client.chat.completions.create.return_value = _CausalChains(
+        items=[
+            _CausalChain(
+                threat="Threat",
+                threat_source="Source",
+                vulnerability="Vuln",
+                consequence="Consequence",
+                impact="Impact",
+            ),
+        ]
+    )
+
+    result = synthesize_causal_chain(
+        risk_match=_make_risk_match(),
+        chunk_texts={0: "Some text.", 2: "More text."},
+        client=mock_client,
+        model="test-model",
+    )
+
+    assert result is not None
+    assert result.threat == "Threat"
+
+    # The three no-chain reasons all come back as None from the wrapper.
+    mock_client.chat.completions.create.return_value = _CausalChains(
+        items=[_CausalChain(threat="", threat_source="", vulnerability="", consequence="", impact="")]
+    )
+    assert (
+        synthesize_causal_chain(
+            risk_match=_make_risk_match(),
+            chunk_texts={0: "Some text.", 2: "More text."},
+            client=mock_client,
+            model="test-model",
+        )
+        is None
+    )
+
+    result = synthesize_causal_chain(
+        risk_match=_make_risk_match(chunk_indices=[0]),
+        chunk_texts={5: "Some other chunk."},
+        client=mock_client,
+        model="test-model",
+    )
+    assert result is None
+
+    mock_client.chat.completions.create.side_effect = validation_exhaustion(malformed_json_validation_error())
+    assert (
+        synthesize_causal_chain(
+            risk_match=_make_risk_match(),
+            chunk_texts={0: "Some text.", 2: "More text."},
+            client=mock_client,
+            model="test-model",
+        )
+        is None
+    )
+
 def test_synthesize_causal_chain_records_attributed_chunk_after_unattributed(mock_client):
     """The causal record names the first attributed chunk, skipping None spans."""
     mock_client.chat.completions.create.return_value = _CausalChains(
@@ -1697,7 +1909,7 @@ def test_synthesize_causal_chain_records_attributed_chunk_after_unattributed(moc
     chunk_texts = {0: "Text zero.", 2: "Text two."}
     collector: list[LLMCallRecord] = []
 
-    synthesize_causal_chain(
+    chain = synthesize_causal_chain(
         risk_match=risk,
         chunk_texts=chunk_texts,
         client=mock_client,
@@ -1705,5 +1917,6 @@ def test_synthesize_causal_chain_records_attributed_chunk_after_unattributed(moc
         call_collector=collector,
     )
 
+    assert chain is not None
     assert len(collector) == 1
     assert collector[0].chunk_index == 2
