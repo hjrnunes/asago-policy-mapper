@@ -1178,6 +1178,12 @@ def test_run_causal_synthesis_generated_fields_not_overwritten_by_later_merge():
     assert risk.causal_provenance == {"threat": "generated", "vulnerability": "generated"}
 
 
+def _causal_plan(retrieval):
+    from asago_policy_mapper.extract.plan import resolve_plan
+
+    return resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+
+
 def test_run_causal_synthesis_stage_marks_disabled_when_synthesis_off():
     from asago_policy_mapper.llm import LLMConfig
 
@@ -1186,7 +1192,7 @@ def test_run_causal_synthesis_stage_marks_disabled_when_synthesis_off():
     retrieval = RetrievalConfig(query_gen=False, no_causal_synthesis=True)
     client = MagicMock()
 
-    result = _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, [], 4, {})
+    result = _run_causal_synthesis_stage(merged, chunks, client, config, _causal_plan(retrieval), [], 4, {})
 
     assert all(r.causal_status == "disabled" for r in result)
     client.chat.completions.create.assert_not_called()
@@ -1199,7 +1205,7 @@ def test_run_causal_synthesis_stage_marks_disabled_when_client_none():
     config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
     retrieval = RetrievalConfig(query_gen=False)
 
-    result = _run_causal_synthesis_stage(merged, chunks, None, config, retrieval, [], 4, {})
+    result = _run_causal_synthesis_stage(merged, chunks, None, config, _causal_plan(retrieval), [], 4, {})
 
     assert all(r.causal_status == "disabled" for r in result)
 
@@ -1216,7 +1222,9 @@ def test_run_causal_synthesis_stage_runs_synthesis_and_times_it():
 
     with patch("asago_policy_mapper.extract.pipeline._run_causal_synthesis", autospec=True) as run_synth:
         run_synth.return_value = merged
-        result = _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, collector, 7, timing)
+        result = _run_causal_synthesis_stage(
+            merged, chunks, client, config, _causal_plan(retrieval), collector, 7, timing
+        )
 
     run_synth.assert_called_once_with(merged, chunks, client, config, 7, collector)
     assert result is merged
@@ -1233,7 +1241,7 @@ def test_run_causal_synthesis_stage_end_to_end_generated():
     timing: dict[str, float] = {}
     collector: list[LLMCallRecord] = []
 
-    result = _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, collector, 4, timing)
+    result = _run_causal_synthesis_stage(merged, chunks, client, config, _causal_plan(retrieval), collector, 4, timing)
 
     assert result[0].causal_status == "generated"
     assert result[0].threat == "Threat"

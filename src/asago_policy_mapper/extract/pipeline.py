@@ -1565,9 +1565,14 @@ def _run_expansion_stage(
     return merged, _EMPTY_EXPANSION_STATS.copy()
 
 
-def _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, call_collector, max_workers, timing):
-    """Synthesize causal chains for each merged risk when a client is present."""
-    if not retrieval.no_causal_synthesis and client is not None:
+def _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing):
+    """Synthesize causal chains for each merged risk when the plan runs the stage.
+
+    The plan's truth table gates causal synthesis on grounding: an ungrounded
+    run has no verified evidence to synthesize from, so every match records
+    ``disabled`` instead.
+    """
+    if plan.causal_synthesis and client is not None:
         with timed(timing, "causal_synthesis_ms"):
             return _run_causal_synthesis(
                 merged,
@@ -1760,7 +1765,7 @@ def run_extraction(
         prefilter_drops=prefilter_drops or None,
     )
 
-    merged = _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, call_collector, max_workers, timing)
+    merged = _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing)
 
     total_stats = _build_retrieval_stats(
         chunk_results,
