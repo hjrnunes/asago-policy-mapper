@@ -752,3 +752,62 @@ def test_variant_match_rrf_parent_keeps_measured_scores():
     assert variant.scores.bm25_rank == 3
     assert variant.scores.rrf_score == 0.04
     assert variant.scores_inherited_from is not None
+
+
+def test_variant_stub_rrf_parent_keeps_scores_without_rerank_stamp():
+    """An RRF-mode parent transfers scores but never claims a reranker."""
+    from asago_policy_mapper.extract.pipeline import _variant_stub
+    from tests.test_extract_variant_grounding import VARIANTS, _make_parent_match
+
+    parent = _make_parent_match().model_copy(update={"confidence_source": "rrf"})
+    stub = _variant_stub(VARIANTS[0]["risk_id"], VARIANTS[0], parent)
+
+    assert stub.bm25_rank == 3
+    assert stub.rrf_score == 0.04
+    # the measured reranker score transfers for the record...
+    assert stub.cross_encoder_score == 0.85
+    # ...but the stub does not claim a reranker measured it for the variant,
+    # so confidence comes from the RRF ranking score in this mode
+    assert stub.rerank_source is None
+
+
+def test_variant_stub_unmeasured_parent_stays_unmeasured():
+    """An unmeasured parent's stub leaves rerank_source unset."""
+    from asago_policy_mapper.extract.pipeline import _variant_stub
+    from tests.test_extract_variant_grounding import VARIANTS, _make_parent_match
+
+    parent = _make_parent_match().model_copy(
+        update={
+            "confidence": None,
+            "confidence_source": "none",
+            "scores": _make_parent_match().scores.model_copy(update={"cross_encoder_score": None}),
+        }
+    )
+    stub = _variant_stub(VARIANTS[0]["risk_id"], VARIANTS[0], parent)
+
+    assert stub.rerank_source is None
+    assert stub.cross_encoder_score == 0.0
+
+
+def test_variant_stub_measured_parent_carries_source():
+    """A measured parent's stub carries the score and its reranker label."""
+    from asago_policy_mapper.extract.pipeline import _variant_stub
+    from tests.test_extract_variant_grounding import VARIANTS, _make_parent_match
+
+    parent = _make_parent_match().model_copy(update={"confidence_source": "cross_encoder"})
+    stub = _variant_stub(VARIANTS[0]["risk_id"], VARIANTS[0], parent)
+
+    assert stub.rerank_source == "cross_encoder"
+    assert stub.cross_encoder_score == 0.85
+
+
+def test_variant_stub_colbert_parent_carries_colbert():
+    """A colbert-measured parent's stub carries the colbert label."""
+    from asago_policy_mapper.extract.pipeline import _variant_stub
+    from tests.test_extract_variant_grounding import VARIANTS, _make_parent_match
+
+    parent = _make_parent_match().model_copy(update={"confidence_source": "colbert"})
+    stub = _variant_stub(VARIANTS[0]["risk_id"], VARIANTS[0], parent)
+
+    assert stub.rerank_source == "colbert"
+    assert stub.cross_encoder_score == 0.85
