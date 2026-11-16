@@ -1287,3 +1287,49 @@ figure rests on one pair of runs. The direct evidence for
 order-independence remains the permutation and reverse-completion tests;
 single live-run comparisons on this endpoint cannot separate a small
 determinism gain from noise.
+
+
+---
+
+## 2026-11-16: Score Sources and Truthful accepted_by Labels — Battery on gemma4
+
+**Description:** Measured the effect of score-source and label semantics
+(issue #150 part 2) on the full 27-policy `risk-selected` battery. The change
+makes every score say where it came from: `RiskMatch.confidence` becomes
+nullable with a `confidence_source` label (cross_encoder/colbert/rrf/none),
+never-calculated scores report null instead of 0.0, `accepted_by` records the
+label at selection time (rank/threshold/rrf/query_gen/llm_judge/
+auto_promoted/expansion), variant matches mark `scores_inherited_from`, and
+the result version bumps to 0.4. One lane run on the gemma4-oc-65k endpoint
+at temperature 0, compared against the two 150a deterministic-merge runs on
+the same endpoint and battery.
+
+**MLflow:** disabled (`--no-mlflow`; no server configured for this run).
+
+**Runs:** lane `extract-runs/risk-selected_20261116_011615`; 150a references
+`risk-selected_20261115_151106` (run 1) and `risk-selected_20261115_155449`
+(run 2) from /tmp/pm-uzfb1-150a.
+
+**Macro F1:** 150a run 1 0.657, 150a run 2 0.679, 150b 0.673 — inside the
+same-code band of the endpoint.
+
+**Per-policy |ΔF1|:** mean 0.029 vs run 1, 0.025 vs run 2; two policies
+exceed the 0.08 per-policy figure against one reference run each
+(cisco-supplier 0.089 vs run 1, st-johns 0.083 vs run 1) while sitting at
+0.041 and 0.025 against the other run — the same non-reproducible-excursion
+pattern the 150a entry documented for camden-borough-work (0.090) on this
+endpoint.
+
+**Kept-risk set (matched ids):** 86.6% overlap with 150a run 1, 86.3% with
+run 2, versus the 150a run1↔run2 same-code floor of 84.5% — the kept-risk set
+is unchanged within noise.
+
+**Output semantics spot-check (ars, first policy):** version 0.4;
+`accepted_by` {query_gen: 31, expansion: 6}; `confidence_source` {none: 37};
+37/37 confidences null, 0 measured-as-0.0 — no `confidence: 0.0` for
+never-calculated scores and no `threshold` label where no threshold ran,
+which is the issue's acceptance condition.
+
+**Conclusion:** The schema and label change costs no extraction quality;
+every metric sits inside the endpoint's same-code noise band.
+>>>>>>> 7ed2943 (docs(experiments): record score-source battery on gemma4)
