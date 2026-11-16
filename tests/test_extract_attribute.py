@@ -1708,12 +1708,6 @@ def test_generated_status_with_chain(mock_client):
         ]
     )
 
-    risk = _make_risk_match(chunk_indices=[0, 2])
-    # First span unattributed: the record must skip it, not record None.
-    risk.evidence[0].chunk_index = None
-    chunk_texts = {0: "Text zero.", 2: "Text two."}
-    collector: list[LLMCallRecord] = []
-
     outcome = synthesize_causal_chain_outcome(
         risk_match=_make_risk_match(),
         chunk_texts={0: "Some text.", 2: "More text."},
