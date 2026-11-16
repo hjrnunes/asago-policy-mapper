@@ -74,6 +74,8 @@ flowchart LR
 9. **Variant ground** — For collapsed parent risks that survived grounding, a specialized LLM call selects only the specifically evidenced variant sub-types
 10. **Merge** — Deduplicate across chunks, keep top-3 evidence spans
 11. **Expand** — Sibling expansion: found risks are expanded to parent siblings + cross-taxonomy mappings, then grounded against relevant document chunks (parallel)
+12. **Causal synthesis** — LLM synthesizes threat-source → threat → vulnerability → consequence → impact chains per matched risk (parallel; disable with `--no-causal-synthesis`). Each risk records why synthesis produced no chain (`causal_status`: `no_evidence`, `empty_answer`, `validation_exhausted`, or `disabled` when skipped), and each causal field records whether the LLM generated it or the built-in tables supplied it (`causal_provenance`)
+13. **Mitigations** — CLI post-processing: enriches results with mitigation actions and risk cross-maps from Nexus (not part of the extraction pipeline). Fills causal fields the synthesis left empty from the static YAML tables, marking them `catalog` in `causal_provenance`
 
 ### Two-Tier Evaluation
 
@@ -283,7 +285,7 @@ The result metadata also carries `metadata.run_plan`: the requested retrieval se
 
 For the Jev (TypeSafe System One) provider, `asago_policy_mapper.assessors.jev` provides `JevProbabilityEndpoint` and `JevProbabilityAssessor`: thin subclasses of the generic HTTP probability endpoint and assessor that translate the seam's `{context, cases}` onto Jev's `POST /v1/systemone` wire — the chunk context as `state`, one Noul question per case keyed by risk id, and each answer's `noul` probability read back as the score. The default `base_url` is `https://api.typesafe.ai`, the default `model` is `jev-latest`, and the default `api_key_env` is `POLICY_MAPPER_JEV_API_KEY`; every field stays overridable, and the key travels in the `Authorization: Bearer` header only, never in a request body or a log. A 200 response carrying an `error` object instead of `answers` marks every case as an error with the error text in the detail; ids in the answers that were not asked are recorded in `unmatched_ids` with the credential redacted, and the mapping declares its `fields_sent` (chunk context, question, criterion, risk name, risk description) so `metadata.prefilter` reports the actual exchange.
 
-Each risk records how it was accepted (`accepted_by`: `rank`, `threshold`, `rrf`, `query_gen`, `llm_judge`, `auto_promoted`, or `expansion`) and where its confidence came from (`confidence_source`: `cross_encoder`, `colbert`, `rrf`, or `none`). RRF values are ranking scores, not calibrated confidences; null confidence means the score was never calculated for that candidate.
+Each risk records how it was accepted (`accepted_by`: `rank`, `threshold`, `rrf`, `query_gen`, `llm_judge`, `auto_promoted`, or `expansion`), where its confidence came from (`confidence_source`: `cross_encoder`, `colbert`, `rrf`, or `none`), and why its causal chain is missing when it is (`causal_status`: `no_evidence`, `empty_answer`, `validation_exhausted`, or `disabled`). RRF values are ranking scores, not calibrated confidences; null confidence means the score was never calculated for that candidate. Each causal field carries a `causal_provenance` object (`{"source": "generated"}` from LLM synthesis or `{"source": "catalog", "risk_id": ...}` from the built-in tables, the ID naming the table entry used); a field with no entry was supplied by neither.
 
 ### Evaluate against ground truth
 

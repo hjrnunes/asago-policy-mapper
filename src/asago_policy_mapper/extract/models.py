@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, computed_field, field_validator, model_serializer, model_validator
+from typing_extensions import TypedDict
 
 
 def _reject_nan(value: float | None) -> float | None:
@@ -124,6 +125,27 @@ RERANKER_CONFIDENCE_SOURCES = frozenset({"cross_encoder", "colbert"})
 CONFIDENCE_FOLLOWS_MEASUREMENT = frozenset({"cross_encoder", "colbert", "none"})
 
 
+class CatalogCausalProvenance(TypedDict):
+    """A causal field the built-in YAML tables supplied.
+
+    ``risk_id`` is the ID of the table entry the value came from — the
+    risk's own ID for a direct fill, the cross-mapped ID when the fill
+    went through the risk crossmap.
+    """
+
+    source: Literal["catalog"]
+    risk_id: str
+
+
+class GeneratedCausalProvenance(TypedDict):
+    """A causal field LLM synthesis supplied."""
+
+    source: Literal["generated"]
+
+
+CausalProvenanceValue = CatalogCausalProvenance | GeneratedCausalProvenance
+
+
 class RiskMatch(BaseModel):
     risk_id: str
     risk_name: str
@@ -147,8 +169,8 @@ class RiskMatch(BaseModel):
     # CausalSynthesisStatus.
     causal_status: Literal["generated", "no_evidence", "empty_answer", "validation_exhausted", "disabled"] | None = None
     # Which source supplied each causal field: LLM synthesis or the built-in
-    # catalog tables.
-    causal_provenance: dict[str, Literal["generated", "catalog"]] = {}
+    # catalog tables. A catalog entry names the table's risk ID.
+    causal_provenance: dict[str, CausalProvenanceValue] = {}
 
     _reject_nan_confidence = field_validator("confidence")(_reject_nan)
 

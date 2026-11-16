@@ -430,14 +430,20 @@ def test_risk_match_causal_provenance_roundtrip():
         evidence=[],
         scores=RetrievalScores(bm25_rank=1, embedding_distance=0.2, cross_encoder_score=0.85, rrf_score=0.03),
         causal_status="generated",
-        causal_provenance={"threat": "generated", "impact": "catalog"},
+        causal_provenance={
+            "threat": {"source": "generated"},
+            "impact": {"source": "catalog", "risk_id": "atlas-hallucination"},
+        },
     )
     d = match.model_dump()
     assert d["causal_status"] == "generated"
-    assert d["causal_provenance"] == {"threat": "generated", "impact": "catalog"}
+    assert d["causal_provenance"] == {
+        "threat": {"source": "generated"},
+        "impact": {"source": "catalog", "risk_id": "atlas-hallucination"},
+    }
     restored = RiskMatch(**d)
     assert restored.causal_status == "generated"
-    assert restored.causal_provenance["impact"] == "catalog"
+    assert restored.causal_provenance["impact"] == {"source": "catalog", "risk_id": "atlas-hallucination"}
 
 
 def test_risk_match_causal_status_literal_values():

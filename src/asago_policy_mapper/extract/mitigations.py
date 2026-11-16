@@ -5,7 +5,7 @@ from pathlib import Path
 
 import yaml
 
-from asago_policy_mapper.extract.models import MitigationRef, RiskMatch
+from asago_policy_mapper.extract.models import CausalProvenanceValue, MitigationRef, RiskMatch
 
 logger = logging.getLogger(__name__)
 
@@ -140,14 +140,27 @@ def load_risk_consequences(
     return _load_risk_yaml(path or _DEFAULT_CONSEQUENCES_PATH, "Risk consequences")
 
 
-def _resolve_via_crossmap(risk_id, data_dict, crossmap):
-    result = data_dict.get(risk_id)
+def _resolve_via_crossmap(
+    risk_id: str,
+    data_dict: dict[str, dict[str, str]] | None,
+    crossmap: dict[str, set[str]] | None,
+) -> tuple[dict[str, str] | None, str | None]:
+    """Resolve the catalog entry for a risk, with the entry's own ID.
+
+    A direct hit wins; otherwise the first sorted crossmap ID with data
+    resolves. Returns ``(None, None)`` when nothing resolves.
+    """
+    if not data_dict:
+        return None, None
+    result: dict[str, str] | None = data_dict.get(risk_id)
     if not result and crossmap:
         for atlas_id in sorted(crossmap.get(risk_id, set())):
             result = data_dict.get(atlas_id)
             if result:
-                break
-    return result
+                return result, atlas_id
+    if result:
+        return result, risk_id
+    return None, None
 
 
 def _resolve_mitigations(risk_id: str, index: dict[str, list[MitigationRef]], risk_crossmap) -> list[MitigationRef]:
@@ -165,13 +178,36 @@ def _resolve_mitigations(risk_id: str, index: dict[str, list[MitigationRef]], ri
     return mitigations
 
 
-def _fill_causal_fields(risk, data_dict, fields: tuple[str, ...]) -> None:
-    """Fill the risk's causal fields from data_dict where they are None."""
+def _fill_causal_fields(
+    risk: RiskMatch,
+    data_dict: dict[str, str] | None,
+    catalog_risk_id: str | None,
+    fields: tuple[str, ...],
+) -> None:
+    """Fill the risk's causal fields from data_dict where they are None.
+
+    Marks each field the catalog actually supplied as ``catalog`` in
+    ``risk.causal_provenance``, naming the catalog entry's ``risk_id``; a
+    field that already carries a value (a generated one) keeps both the
+    value and its provenance.
+
+    The provenance map is assigned per fill rather than mutated:
+    ``model_copy()`` shares the dict between the copy and the original,
+    so in-place writes would leak catalog marks into the original.
+    """
     if not data_dict:
         return
+    # data_dict only resolves with an entry, so its ID is never None here.
+    assert catalog_risk_id is not None
+    marks: dict[str, CausalProvenanceValue] = {}
     for field in fields:
         if getattr(risk, field) is None:
-            setattr(risk, field, data_dict.get(field))
+            value = data_dict.get(field)
+            if value:
+                setattr(risk, field, value)
+                marks[field] = {"source": "catalog", "risk_id": catalog_risk_id}
+    if marks:
+        risk.causal_provenance = {**risk.causal_provenance, **marks}
 
 
 def enrich_with_mitigations(
@@ -191,9 +227,9 @@ def enrich_with_mitigations(
         risk.mitigations = mitigations
 
         if risk_threats:
-            threat_data = _resolve_via_crossmap(risk.risk_id, risk_threats, risk_crossmap)
-            _fill_causal_fields(risk, threat_data, ("threat", "threat_source", "vulnerability"))
+            threat_data, threat_catalog_id = _resolve_via_crossmap(risk.risk_id, risk_threats, risk_crossmap)
+            _fill_causal_fields(risk, threat_data, threat_catalog_id, ("threat", "threat_source", "vulnerability"))
 
         if risk_consequences:
-            cons_data = _resolve_via_crossmap(risk.risk_id, risk_consequences, risk_crossmap)
-            _fill_causal_fields(risk, cons_data, ("consequence", "impact"))
+            cons_data, cons_catalog_id = _resolve_via_crossmap(risk.risk_id, risk_consequences, risk_crossmap)
+            _fill_causal_fields(risk, cons_data, cons_catalog_id, ("consequence", "impact"))
