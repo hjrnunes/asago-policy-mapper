@@ -184,16 +184,20 @@ def test_pipeline_reverse_completion_same_quotes(two_parents, monkeypatch):
     )
 
     assert _quotes(forward) == _quotes(reverse)
-    # the deterministic evidence key picked chunk 1 for parent 1 and
-    # chunk 0 for parent 2; merged by risk id, both variants carry the
-    # quotes of the merged evidence — identical in both completion orders
     quotes = _quotes(forward)
     assert sorted(quotes) == sorted(v["risk_id"] for v in VARIANTS), "both variants survive with quotes"
     # every variant keeps at least one quote; a variant that lost all its
     # evidence in both runs would otherwise pass the id checks above
     assert all(quotes.values()), "each variant carries at least one quote"
+    # the deterministic evidence key picked chunk 1 for parent 1 and
+    # chunk 0 for parent 2; the merged evidence therefore carries quotes
+    # from both chunks, and the completion order changes neither pick
     all_quote_texts = [q for qs in quotes.values() for q in qs]
-    assert all("from chunk" in q for q in all_quote_texts)
+    assert sorted(q.rsplit(" ", 1)[-1] for q in all_quote_texts) == ["0", "0", "1", "1"]
+    assert all(q.startswith("quote for ") for q in all_quote_texts)
+    # every variant carries a quote from each grounded chunk
+    for quote_texts in quotes.values():
+        assert sorted(q.rsplit(" ", 1)[-1] for q in quote_texts) == ["0", "1"]
 
 
 def test_pipeline_reverse_completion_same_risk_set(two_parents, monkeypatch):
