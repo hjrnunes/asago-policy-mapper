@@ -175,8 +175,13 @@ def _build_threshold_examples_from_run(
 
     chunk_texts = {i: c.text for i, c in enumerate(chunks)}
 
-    # auto-accepted risks: threshold-crossing reranker scores or top-k rank
-    # selection (default runs select by rank, not by a threshold crossing)
+    # Auto-accepted risks only: threshold-crossing reranker scores or top-k
+    # rank selection (default runs select by rank, not by a threshold
+    # crossing). Query-gen accepts (query_gen) are deliberately excluded:
+    # they were never put to a reranker, so their confidence says nothing
+    # about the score range the judge must learn. LLM-judged, promoted and
+    # expansion accepts are excluded for the same reason — the judge never
+    # sees them in production.
     auto_accept_labels = {"threshold", "rank"}
     threshold_by_chunk: dict[int, list[dict]] = {}
     for r in ext["risks"]:
