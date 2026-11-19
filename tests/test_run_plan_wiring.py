@@ -969,6 +969,29 @@ def test_judge_contexts_built_only_for_borderline_chunks(mock_config, monkeypatc
     assert seen[0] == build_chunk_contexts(chunks, max_context_tokens=30)[0]
 
 
+def test_run_extraction_rejects_negative_rrf_min_score(mock_config, tmp_path):
+    """run_extraction refuses a negative --rrf-min-score, like the CLI.
+
+    The floor must never behave as a ceiling: a negative value would
+    accept every fused candidate on the no-cross-encoder path.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    doc = tmp_path / "p.md"
+    doc.write_text("AI policy text about data governance and risk management. Bias detection matters.")
+
+    retrieval = RetrievalConfig(query_gen=False, no_grounding=True, rrf_min_score=-0.01)
+    with pytest.raises(ValueError, match="--rrf-min-score must not be negative"):
+        pipeline.run_extraction(
+            documents=[doc],
+            client=None,
+            config=mock_config,
+            risks=[],
+            retrieval=retrieval,
+            ocr=False,
+        )
+
+
 def test_run_extraction_rejects_a_plan_that_mismatches_the_retrieval_settings(mock_config, tmp_path):
     """A caller-supplied plan must resolve from the same retrieval settings.
 
