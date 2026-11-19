@@ -250,7 +250,7 @@ def test_prefilter_off_is_noop(mock_config, tmp_path, monkeypatch):
     assert "prefilter" not in base.metadata
 
 
-def test_prefilter_records_wire_requests_when_assessor_batches(mock_config, tmp_path, monkeypatch):
+def test_prefilter_records_exchange_requests_when_assessor_batches(mock_config, tmp_path, monkeypatch):
     """A batching assessor's call record holds the requests it actually sent.
 
     The HTTP probability assessor splits at ``max_batch``, so a chunk with
@@ -309,7 +309,7 @@ def test_prefilter_records_wire_requests_when_assessor_batches(mock_config, tmp_
 
     assert len(result.decision_calls) >= 1
     request = result.decision_calls[0].request
-    # The wire-reported requests land in the record as a list of bodies,
+    # The exchange-reported requests land in the record as a list of bodies,
     # one per batch, with their boundaries preserved: every body carries
     # exactly its own case's id, in order, against the same context.
     assert isinstance(request, list)
@@ -1130,7 +1130,7 @@ def test_prefilter_drop_records_carry_full_provenance(mock_config, tmp_path, mon
 
 
 def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, monkeypatch):
-    """A wire-less assessor's record carries the body it would have sent.
+    """An assessor without an exchange record carries the body it would have sent.
 
     The keys and per-item fields pin the fallback shape: ``context`` and
     ``items`` with ``id``/``text`` per case, exactly as the probability
@@ -2232,7 +2232,7 @@ def test_prefilter_real_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
         sent_bodies.append(json.loads(request.content.decode("utf-8")))
         sent_headers.append(dict(request.headers))
         # Two items at 0.10 (dropped: at the threshold) and one at 0.9
-        # (kept: above it), in the endpoint's scores wire format.
+        # (kept: above it), in the endpoint's scores response shape.
         scores = [
             {"id": "R-001", "p": 0.10},
             {"id": "R-002", "p": 0.10},
