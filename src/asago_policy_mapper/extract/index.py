@@ -390,19 +390,6 @@ def _rerank_pairs(is_nli: bool, text: str, candidates: list[ScoredCandidate]) ->
     return [(f"{c.risk_name}: {c.risk_description}", text) for c in candidates]
 
 
-def _scored_candidates(candidates: list[ScoredCandidate], scores: np.ndarray, top_k: int) -> list[ScoredCandidate]:
-    """Attach scores to the top-k candidates, skipping non-finite ones."""
-    scored = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
-    results = []
-    for c, score in scored[:top_k]:
-        s = float(score)
-        if np.isnan(s) or np.isinf(s):
-            logger.warning("Skipping candidate %s with invalid score", c.risk_id)
-            continue
-        results.append(c.model_copy(update={"cross_encoder_score": s}))
-    return results
-
-
 def _measured_scores(candidates: list[ScoredCandidate], scores: np.ndarray) -> dict[str, float]:
     """Map every candidate id the reranker scored to its measured score.
 
