@@ -658,8 +658,8 @@ class RiskIndex:
         self._apply_sigmoid: bool = False
         self._score_normalizer = _make_score_normalizer(is_nli=False, apply_sigmoid=False)
         # Candidates the reranker could not score (no answer). Reset per run
-        # by constructing a fresh index; reported as rerank_unavailable.
-        self.unscored_count: int = 0
+        # by constructing a fresh index; reported as rerank_unscored.
+        self._unscored_count: int = 0
 
         if not risks:
             self._bi_encoder = None
@@ -736,9 +736,9 @@ class RiskIndex:
         return self._cross_encoder or self._remote_cross_encoder
 
     @property
-    def rerank_unavailable(self) -> int:
+    def rerank_unscored(self) -> int:
         """Candidates the reranker could not score, in chunk stats form."""
-        return self.unscored_count
+        return self._unscored_count
 
     @property
     def has_colbert(self) -> bool:
@@ -862,7 +862,7 @@ class RiskIndex:
         raw_scores = np.array(raw_scores)
         scores = self._score_normalizer(raw_scores)
         finite_scored, unscored = _partition_scored(candidates, scores)
-        self.unscored_count += len(unscored)
+        self._unscored_count += len(unscored)
         _reject_majority_unscored(unscored, len(candidates))
         return _select_scored(finite_scored, top_k) + _mark_unscored(unscored), _measured_scores(candidates, scores)
 

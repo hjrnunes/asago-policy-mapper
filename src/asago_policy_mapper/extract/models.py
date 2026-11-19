@@ -185,7 +185,7 @@ class ChunkSummary(BaseModel):
     borderline: int
     discarded: int
     bm25_rescued: int = 0
-    rerank_unavailable: int = 0
+    rerank_unscored: int = 0
     accepted_risk_ids: list[str] = []
 
 

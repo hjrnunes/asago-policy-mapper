@@ -464,9 +464,9 @@ def _stamp_accepted_by(candidates: list[ScoredCandidate], label: str) -> list[Sc
     return [c.model_copy(update={"accepted_by": label}) for c in candidates]
 
 
-def _count_unavailable(index) -> int:
+def _count_unscored(index) -> int:
     """Read the index's cumulative unscored count; 0 when the index has none."""
-    count = getattr(index, "rerank_unavailable", 0)
+    count = getattr(index, "rerank_unscored", 0)
     return count if isinstance(count, int) else 0
 
 
@@ -499,7 +499,7 @@ def retrieve_chunk(
 ) -> ChunkResult:
     chunk = chunks[chunk_index]
     padded = build_padded_text(chunks, chunk_index, context_sentences)
-    unscored_before = _count_unavailable(index)
+    unscored_before = _count_unscored(index)
     candidates = index.hybrid_search(
         padded,
         top_k=top_k,
@@ -507,7 +507,7 @@ def retrieve_chunk(
         rrf_min_score=rrf_min_score,
         rerank=use_cross_encoder,
     )
-    rerank_unavailable = max(_count_unavailable(index) - unscored_before, 0)
+    rerank_unscored = max(_count_unscored(index) - unscored_before, 0)
 
     if not use_cross_encoder:
         return ChunkResult(
@@ -524,7 +524,7 @@ def retrieve_chunk(
                 "borderline": 0,
                 "discarded": 0,
                 "bm25_rescued": 0,
-                "rerank_unavailable": rerank_unavailable,
+                "rerank_unscored": rerank_unscored,
             },
         )
 
@@ -564,6 +564,6 @@ def retrieve_chunk(
             "borderline": len(borderline),
             "discarded": len(discarded),
             "bm25_rescued": bm25_rescued,
-            "rerank_unavailable": rerank_unavailable,
+            "rerank_unscored": rerank_unscored,
         },
     )
