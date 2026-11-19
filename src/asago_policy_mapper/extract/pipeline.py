@@ -57,6 +57,11 @@ from asago_policy_mapper.llm import LLMConfig, StructuredOutputMode
 
 logger = logging.getLogger(__name__)
 
+
+class PipelineInvariantError(RuntimeError):
+    """A pipeline stage received state that earlier stages guarantee impossible."""
+
+
 _QUERY_GEN_MAX_CANDIDATES = 50
 
 _PREFILTER_FIELDS_SENT = ["chunk_context", "risk_name", "risk_description"]
@@ -186,11 +191,22 @@ def _ground_one(
 
 
 def determine_accepted_by(candidate, *, borderline_judged, use_cross_encoder, no_judge):
+    """Label how a candidate was accepted.
+
+    Judged borderline candidates take their judge label; every other
+    candidate carries the label stamped when it was selected. A candidate
+    with no stamp cannot reach here in production — retrieval and query
+    generation stamp every accepted candidate — so the missing stamp is an
+    invariant failure, not a fallback case.
+    """
     if candidate in borderline_judged:
         return "auto_promoted" if no_judge else "llm_judge"
-    if candidate.selected_by:
+    if candidate.selected_by is not None:
         return candidate.selected_by
-    return "threshold" if use_cross_encoder else "rrf"
+    raise PipelineInvariantError(
+        f"candidate {candidate.risk_id} reached acceptance without a selection label; "
+        "retrieval and query generation must stamp every accepted candidate"
+    )
 
 
 def _confidence_from_candidate(candidate, *, use_cross_encoder):
