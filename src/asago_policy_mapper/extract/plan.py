@@ -38,7 +38,7 @@ class RunPlan:
     order; ``needs_llm`` is true when any of them is present.
     """
 
-    acquisition: Literal["query_gen", "per_chunk"]
+    candidate_source: Literal["query_gen", "per_chunk"]
     # The reranker on the per-chunk path; query-generation searches stay
     # unreranked by default.
     rerank: Literal["cross_encoder", "colbert", "none"]
@@ -63,7 +63,7 @@ def resolve_plan(retrieval: RetrievalConfig, *, prefilter: bool, explicit: froze
     judge = _resolve_judge(retrieval)
     grounding = not retrieval.no_grounding
     return RunPlan(
-        acquisition="query_gen" if retrieval.query_gen else "per_chunk",
+        candidate_source="query_gen" if retrieval.query_gen else "per_chunk",
         rerank=_rerank_label(retrieval),
         judge=judge,
         grounding=grounding,
