@@ -224,9 +224,12 @@ def _error_detail(error: object, secret: str) -> str:
     comes from the endpoint, which also saw the credential in its
     Authorization header, so it is redacted against that secret first —
     replacing before truncating, so a secret straddling the cut is fully
-    replaced rather than partially kept. The detail lands in
-    ``NoAnswer.detail`` and so in the run output.
+    replaced rather than partially kept. An empty secret (no key
+    configured) is a no-op: there is nothing to replace. The detail
+    lands in ``NoAnswer.detail`` and so in the run output.
     """
-    if isinstance(error, str):
-        return error.replace(secret, _REDACTED)[:200]
-    return "endpoint returned an error object"
+    if not isinstance(error, str):
+        return "endpoint returned an error object"
+    if not secret:
+        return error[:200]
+    return error.replace(secret, _REDACTED)[:200]

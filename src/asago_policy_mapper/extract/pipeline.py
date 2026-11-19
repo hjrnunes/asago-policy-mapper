@@ -1194,8 +1194,23 @@ def _prefilter_metadata(prefilter: GroundingPrefilter) -> dict:
         "threshold": getattr(rule, "threshold", None),
         "endpoint_host": _assessor_endpoint_host(assessor),
         "sends_offsite": bool(getattr(assessor, "sends_offsite", False)),
-        "fields_sent": _PREFILTER_FIELDS_SENT.copy(),
+        "fields_sent": _prefilter_fields_sent(assessor),
     }
+
+
+def _prefilter_fields_sent(assessor) -> list[str]:
+    """The policy-text fields the assessor's request actually carries.
+
+    The default covers the seam's generic request: the chunk context plus
+    each case's name and description. A mapping that sends more (Jev also
+    sends the fixed question and the question's criterion inside each
+    question's instructions) names what it sends, so the metadata block
+    reports the real exchange rather than the generic shape.
+    """
+    fields = getattr(assessor, "fields_sent", None)
+    if fields is not None:
+        return list(fields)
+    return _PREFILTER_FIELDS_SENT.copy()
 
 
 def _run_matches_stage(

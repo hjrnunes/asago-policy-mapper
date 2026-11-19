@@ -552,11 +552,11 @@ def test_error_object_without_answers_is_error_not_missing():
     body = {"model": "jev-1.14.0", "error": "state exceeded the context window"}
 
     assessor = _assessor(lambda request: httpx.Response(200, json=body))
-    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001", "R-002"))
 
-    assert batch.outcomes["R-001"][0].reason == "error"
-    assert batch.outcomes["R-001"][0].detail == "state exceeded the context window"
-    assert batch.outcomes["R-002"][0].reason == "error"
+    assert batch.answers["R-001"][0].reason == "error"
+    assert batch.answers["R-001"][0].detail == "state exceeded the context window"
+    assert batch.answers["R-002"][0].reason == "error"
 
 
 
@@ -564,7 +564,7 @@ def test_error_object_without_answers_is_error_not_missing():
 def test_error_object_detail_redacts_an_echoed_key(monkeypatch):
     """An error string echoing the key is redacted, not recorded verbatim.
 
-    The detail lands in ``Unavailable.detail`` and so in the run output;
+    The detail lands in ``NoAnswer.detail`` and so in the run output;
     the endpoint saw the credential in its Authorization header and can
     echo it in the error text, so the detail gets the same replacement
     the recorded response does — applied before the length cut, so a
@@ -575,10 +575,10 @@ def test_error_object_detail_redacts_an_echoed_key(monkeypatch):
     body = {"model": "jev-1.14.0", "error": "auth failed for key secret-value-123"}
 
     assessor = _assessor(lambda request: httpx.Response(200, json=body))
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
 
-    assert batch.outcomes["R-001"][0].reason == "error"
-    assert batch.outcomes["R-001"][0].detail == "auth failed for key [redacted]"
+    assert batch.answers["R-001"][0].reason == "error"
+    assert batch.answers["R-001"][0].detail == "auth failed for key [redacted]"
 
 
 
@@ -598,9 +598,9 @@ def test_error_object_detail_redacts_before_truncating(monkeypatch):
     body = {"model": "jev-1.14.0", "error": f"{filler}...secret-value-123..."}
 
     assessor = _assessor(lambda request: httpx.Response(200, json=body))
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
 
-    detail = batch.outcomes["R-001"][0].detail
+    detail = batch.answers["R-001"][0].detail
     assert len(detail) == 200
     assert "secret-value-123" not in detail
 
@@ -615,15 +615,15 @@ def test_null_answers_key_treated_as_missing_not_invalid():
     bare null with no error is missing — never invalid.
     """
     assessor = _assessor(lambda request: httpx.Response(200, json={"model": "jev-1.14.0", "answers": None}))
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
-    assert batch.outcomes["R-001"][0].reason == "missing"
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
+    assert batch.answers["R-001"][0].reason == "missing"
 
     assessor = _assessor(
         lambda request: httpx.Response(200, json={"model": "jev-1.14.0", "answers": None, "error": "overloaded"})
     )
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
-    assert batch.outcomes["R-001"][0].reason == "error"
-    assert batch.outcomes["R-001"][0].detail == "overloaded"
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
+    assert batch.answers["R-001"][0].reason == "error"
+    assert batch.answers["R-001"][0].detail == "overloaded"
 
 
 
@@ -633,10 +633,10 @@ def test_error_object_non_string_collapses_to_a_stable_detail():
     body = {"model": "jev-1.14.0", "error": {"code": 429, "retry": True}}
 
     assessor = _assessor(lambda request: httpx.Response(200, json=body))
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
 
-    assert batch.outcomes["R-001"][0].reason == "error"
-    assert batch.outcomes["R-001"][0].detail == "endpoint returned an error object"
+    assert batch.answers["R-001"][0].reason == "error"
+    assert batch.answers["R-001"][0].detail == "endpoint returned an error object"
 
 
 
@@ -646,10 +646,55 @@ def test_error_object_null_collapses_to_a_stable_detail():
     body = {"model": "jev-1.14.0", "error": None}
 
     assessor = _assessor(lambda request: httpx.Response(200, json=body))
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
 
-    assert batch.outcomes["R-001"][0].reason == "error"
-    assert batch.outcomes["R-001"][0].detail == "endpoint returned an error object"
+    assert batch.answers["R-001"][0].reason == "error"
+    assert batch.answers["R-001"][0].detail == "endpoint returned an error object"
+
+
+
+def test_fields_sent_describes_the_jev_exchange():
+    """The mapping names the fields its request actually carries.
+
+    ``metadata.prefilter.fields_sent`` reports the real exchange, not the
+    generic shape: the Jev request embeds the fixed question and the
+    task's criterion inside each question's instructions, alongside the
+    chunk context and the case's name and description.
+    """
+    assessor = _assessor(lambda request: httpx.Response(200, json=_jev_body(("R-001", 0.5))))
+
+    assert assessor.fields_sent == (
+        "chunk_context",
+        "question",
+        "criterion",
+        "risk_name",
+        "risk_description",
+    )
+
+
+
+
+def test_metadata_fields_sent_uses_the_assessor_declaration():
+    """The pipeline reads the assessor's declaration for fields_sent.
+
+    A declared ``fields_sent`` attribute replaces the generic default in
+    the metadata block, so a run using the Jev mapping reports what the
+    Jev request sends.
+    """
+    from asago_policy_mapper.extract.pipeline import GroundingPrefilter, _prefilter_metadata
+    from asago_policy_mapper.extract.screening import DropThreshold
+
+    endpoint = _endpoint()
+    assessor = JevProbabilityAssessor(endpoint, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    block = _prefilter_metadata(GroundingPrefilter(assessor=assessor, rule=DropThreshold(assessor, 0.10)))
+
+    assert block["fields_sent"] == [
+        "chunk_context",
+        "question",
+        "criterion",
+        "risk_name",
+        "risk_description",
+    ]
 
 
 def test_wire_keeps_request_on_timeout_and_error():
