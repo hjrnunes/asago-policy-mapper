@@ -486,9 +486,10 @@ def _require_prefilter_api_key(endpoint, path: Path):
         try:
             host = urlsplit(endpoint.base_url).hostname
         except ValueError:
-            # A malformed URL cannot name a local host, so the key rule
-            # applies; the assessor's own parse reports the bad URL.
-            host = None
+            _fail_validation(
+                f"--prefilter-profile {path}: base_url {endpoint.base_url!r} is not a parseable "
+                f"URL; fix the profile before running"
+            )
     if _is_local_host(host):
         return
     if not os.environ.get(endpoint.api_key_env):

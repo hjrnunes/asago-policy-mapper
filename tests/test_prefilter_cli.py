@@ -1318,22 +1318,23 @@ def test_build_prefilter_jev_local_base_url_needs_no_key(tmp_path, monkeypatch):
 
 
 def test_build_prefilter_jev_malformed_base_url_fails_the_key_rule_cleanly(tmp_path, capsys, monkeypatch):
-    """A malformed base_url still yields a validation error, not a traceback.
+    """A malformed base_url yields a validation error, not a traceback.
 
     ``urlsplit`` raises ValueError on some malformed URLs (an IPv6
-    bracket, for example); the key rule must treat that as offsite (the
-    URL cannot name a local host) and let the message name the profile.
+    bracket, for example); the profile must fail at load naming the bad
+    URL — whether or not the key variable is set (the assessor's own
+    unguarded parse would otherwise crash with a raw traceback).
     """
     from asago_policy_mapper.cli import _build_prefilter
 
-    monkeypatch.delenv("POLICY_MAPPER_JEV_API_KEY", raising=False)
     profile = {"provider": "jev", "threshold": 0.02, "base_url": "http://[", "api_key_env": "JEV_KEY"}
     path = tmp_path / "badurl.yaml"
     path.write_text(yaml.safe_dump(profile))
     with pytest.raises(typer.Exit):
         _build_prefilter(path)
     err = capsys.readouterr().err
-    assert "JEV_KEY is not set" in err
+    assert "not a parseable URL" in err
+    assert "http://[" in err
     assert str(path) in err
 
 

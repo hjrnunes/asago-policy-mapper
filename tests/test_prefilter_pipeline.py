@@ -2101,9 +2101,8 @@ def test_prefilter_endpoint_host_ignores_non_string_base_url(mock_config, tmp_pa
 
     assessor = ScriptedAssessor({})
     assessor.endpoint = SimpleNamespace(base_url=12345)
-    # Offsite so the host derivation actually runs (an in-process or
-    # local assessor records no host by design).
-    assessor.offsite = True
+    # The scripted assessor is not in-process, so the host derivation runs;
+    # a non-string base_url must yield None, not a traceback.
     doc = tmp_path / "p.md"
     doc.write_text(DOC)
     result = run_extraction(
