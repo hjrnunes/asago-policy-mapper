@@ -1,4 +1,4 @@
-"""Re-entry tests for the opt-in pre-grounding filter (asago-uzfb1.7 step 3).
+"""Re-entry tests for the opt-in pre-grounding filter.
 
 Expansion behaviour does not change and there is no blacklist: a dropped
 candidate can come back through sibling expansion. The pipeline counts
@@ -60,7 +60,7 @@ class ScriptedAssessor:
 
 
 class ThresholdRule:
-    """DropThreshold semantics, independent of the screening implementation."""
+    """DropThreshold semantics, re-implemented here for independence from the screening code."""
 
     rule_id = "drop-threshold/1"
 

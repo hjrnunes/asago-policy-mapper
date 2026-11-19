@@ -3,12 +3,13 @@
 ## 2026-11-15: Prefilter Saved-Inputs Evaluation (mechanism check)
 
 **Description:** First evaluation run of the opt-in pre-grounding filter (GitHub #149 part 2), on frozen fixtures from
-149a's risk-selected battery: 576 chunk rows across 27 policies, 21,127 candidates, 7,234 grounded ids. The threshold
+the risk-selected battery: 576 chunk rows across 27 policies, 21,127 candidates, 7,234 grounded ids. The threshold
 was swept on a 14-policy tuning split and reported on a disjoint 13-policy held-out split, per
 `scripts/eval_prefilter.py`. All assessments ran through the replay assessor; no provider was contacted.
 
-**Outcomes source:** 149a's standin outcomes file, built from the fixtures' own grounding outcomes (grounded
-candidates p=0.95, everything else p=0.02). Until D1 lands, no real assessor outcomes exist. **These numbers are
+**Outcomes source:** the standin outcomes file, built from the fixtures' own grounding outcomes (grounded
+candidates p=0.95, everything else p=0.02). No real assessor outcomes exist yet — the live probability endpoint has
+not been swept. **These numbers are
 construction-perfect by design: they prove the evaluation mechanism (fixtures → threshold sweep on the tuning split →
 held-out report), not the filter's performance.**
 
@@ -25,7 +26,7 @@ candidate does. The tie-break (least recall loss, then most drops) therefore pic
 **Conclusion:** The mechanism works end to end: the fixture replay drives a real threshold sweep, the chosen threshold
 carries to the held-out split, and drop rate / recall loss / bypass rate / replay latency all report. The numbers
 themselves carry no performance signal — a real assessor sweep (the full battery, at least 3 baseline and 3 filtered
-runs) waits on D1, which also gates live runs for the prefilter.
+runs) remains future work, gated on live runs for the prefilter.
 
 ---
 
