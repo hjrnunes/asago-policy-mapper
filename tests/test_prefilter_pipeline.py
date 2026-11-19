@@ -2203,6 +2203,7 @@ def test_prefilter_assessor_exception_keeps_everything(mock_config, tmp_path, mo
     for risk in MOCK_RISKS:
         assert risk.id in grounded_ids
     # Nothing was dropped.
+    assert result.retrieval_stats.prefilter_dropped == 0
     assert [fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"] == []
     # The warning names the assessor, the chunk, the exception type and
     # the detail — and never the raw exception text verbatim.
@@ -2343,4 +2344,5 @@ def test_prefilter_rule_returning_no_decisions_keeps_everything(mock_config, tmp
     # The run completed and every candidate reached grounding (fail-open).
     for risk in MOCK_RISKS:
         assert risk.id in grounded_ids
+    assert result.retrieval_stats.prefilter_dropped == 0
     assert [fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"] == []

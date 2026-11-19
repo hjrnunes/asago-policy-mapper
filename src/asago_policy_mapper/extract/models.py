@@ -82,7 +82,24 @@ class RetrievalStats(BaseModel):
     llm_judged: int
     auto_promoted: int = 0
     grounding_filtered: int
+    # None means the pre-grounding filter did not run; the count is
+    # omitted then so a filter-off run serializes byte-identically to a
+    # pre-filter run.
+    prefilter_dropped: int | None = None
     timing_ms: dict[str, float] = {}
+
+    @model_serializer(mode="wrap")
+    def _omit_prefilter_dropped_when_off(self, handler) -> dict[str, Any]:
+        """Leave ``prefilter_dropped`` out unless the prefilter ran.
+
+        ``grounding_filtered`` counts only candidates grounding itself
+        rejected; the prefilter's drops are counted separately here and
+        never overlap with it.
+        """
+        data: dict[str, Any] = handler(self)
+        if data.get("prefilter_dropped") is None:
+            data.pop("prefilter_dropped", None)
+        return data
 
 
 class ChunkSummary(BaseModel):

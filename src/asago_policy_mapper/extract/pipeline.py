@@ -1284,11 +1284,17 @@ def _run_matches_stage(
     return all_matches, all_filtered, grounding_filtered
 
 
-def _build_retrieval_stats(chunk_results, chunks, timing, grounding_filtered, no_judge=False) -> RetrievalStats:
+def _build_retrieval_stats(
+    chunk_results, chunks, timing, grounding_filtered, no_judge=False, prefilter_dropped=None
+) -> RetrievalStats:
     """Aggregate per-chunk counters into the run's retrieval stats.
 
     Under --no-judge the borderline candidates are auto-promoted, not judged,
-    so their count moves from llm_judged to auto_promoted.
+    so their count moves from llm_judged to auto_promoted. ``prefilter_dropped``
+    counts the candidates the pre-grounding filter removed; ``grounding_filtered``
+    counts only what grounding itself rejected, so the two never overlap. Pass
+    ``None`` (the default) when the filter did not run: the field then stays
+    out of the serialized output.
     """
     judged = sum(len(cr.borderline_judged) for cr in chunk_results)
     return RetrievalStats(
@@ -1298,6 +1304,7 @@ def _build_retrieval_stats(chunk_results, chunks, timing, grounding_filtered, no
         llm_judged=0 if no_judge else judged,
         auto_promoted=judged if no_judge else 0,
         grounding_filtered=grounding_filtered,
+        prefilter_dropped=prefilter_dropped,
         timing_ms=timing,
     )
 
@@ -1547,7 +1554,14 @@ def run_extraction(
 
     merged = _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, call_collector, max_workers, timing)
 
-    total_stats = _build_retrieval_stats(chunk_results, chunks, timing, grounding_filtered, retrieval.no_judge)
+    total_stats = _build_retrieval_stats(
+        chunk_results,
+        chunks,
+        timing,
+        grounding_filtered,
+        retrieval.no_judge,
+        prefilter_dropped=len(prefilter_drops) if prefilter is not None else None,
+    )
 
     return ExtractionResult(
         risks=merged,
