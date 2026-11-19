@@ -659,6 +659,9 @@ class RiskIndex:
         self._score_normalizer = _make_score_normalizer(is_nli=False, apply_sigmoid=False)
         # Candidates the reranker could not score (no answer). Reset per run
         # by constructing a fresh index; reported as rerank_unscored.
+        # Single-threaded by construction: retrieval calls rerank
+        # sequentially (_run_retrieval loops chunks in order), so the +=
+        # in rerank needs no lock.
         self._unscored_count: int = 0
 
         if not risks:
