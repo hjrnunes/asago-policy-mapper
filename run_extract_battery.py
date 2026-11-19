@@ -191,6 +191,38 @@ def _build_extract_command(
     return cmd
 
 
+def _battery_run_plan(
+    *,
+    query_gen: bool,
+    no_judge: bool,
+    no_grounding: bool,
+    expand_siblings: bool,
+    colbert_model: str | None,
+    no_cross_encoder: bool,
+    rrf_min_score: float,
+):
+    """Resolve the run plan the battery's flags produce.
+
+    The retrieval settings mirror what the CLI derives from the same
+    flags: the cross-encoder flag is independent of ColBERT, which
+    replaces the reranker rather than removing it, so a ColBERT run with
+    the cross-encoder on still has its judge.
+    """
+    from asago_policy_mapper.extract.models import RetrievalConfig
+    from asago_policy_mapper.extract.plan import resolve_plan
+
+    retrieval = RetrievalConfig(
+        query_gen=query_gen,
+        no_judge=no_judge,
+        no_grounding=no_grounding,
+        expand_siblings=expand_siblings,
+        colbert_model=colbert_model,
+        use_cross_encoder=not no_cross_encoder,
+        rrf_min_score=rrf_min_score,
+    )
+    return resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+
+
 def run_one(
     policies: list[Path],
     name: str,
@@ -601,7 +633,16 @@ def main():
         print("Error: --rrf-min-score must not be negative: it is a floor, never a ceiling")
         sys.exit(1)
 
-    if args.no_judge and args.no_grounding and args.no_query_gen:
+    battery_plan = _battery_run_plan(
+        query_gen=not args.no_query_gen,
+        no_judge=args.no_judge,
+        no_grounding=args.no_grounding,
+        expand_siblings=args.expand_siblings,
+        colbert_model=args.colbert_model,
+        no_cross_encoder=args.no_cross_encoder,
+        rrf_min_score=args.rrf_min_score,
+    )
+    if not battery_plan.needs_llm:
         base_url = args.base_url or "unused"
         model = args.model or config.get("model") or os.environ.get("POLICY_MAPPER_MODEL") or "unused"
     else:
