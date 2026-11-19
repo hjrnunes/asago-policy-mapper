@@ -978,7 +978,7 @@ def _retrieve_chunk_result(chunks, i, index, retrieval) -> ChunkResult:
 def _run_retrieval(chunks, index, retrieval, query_results, fallback_chunk_indices, plan, timing) -> list[ChunkResult]:
     """Retrieve candidates per chunk: query-gen queries first, then per-chunk fallback.
 
-    The plan's acquisition mode picks the retrieval path: with query
+    The plan's candidate source picks the retrieval mode: with query
     generation, each query's candidates are unioned into every
     chunk the query covers (capped per chunk), and chunks without a query —
     plus fallback chunks — go through per-chunk retrieval. Without it,
@@ -987,7 +987,7 @@ def _run_retrieval(chunks, index, retrieval, query_results, fallback_chunk_indic
     with timed(timing, "retrieve_ms"):
         chunk_results: list[ChunkResult] = [None] * len(chunks)  # type: ignore[list-item]
 
-        if plan.acquisition == "query_gen":
+        if plan.candidate_source == "query_gen":
             for qr in query_results:
                 candidates = index.hybrid_search(
                     qr.query,
@@ -1376,7 +1376,7 @@ def _build_result_metadata(
     mode = getattr(client, "mode", None)
     if isinstance(mode, StructuredOutputMode):
         metadata["structured_output_mode"] = mode.value
-    if plan.acquisition == "query_gen":
+    if plan.candidate_source == "query_gen":
         metadata["query_gen_queries"] = [
             {"query": qr.query, "chunk_indices": qr.chunk_indices, "section": qr.section} for qr in query_results
         ]
@@ -1580,7 +1580,7 @@ def run_extraction(
     fallback_chunk_indices: set[int] = set()
     query_results: list = []
 
-    if plan.acquisition == "query_gen":
+    if plan.candidate_source == "query_gen":
         query_results, fallback_chunk_indices = _run_query_gen(
             chunks, client, config, call_collector, max_workers, timing
         )

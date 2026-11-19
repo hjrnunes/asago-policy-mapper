@@ -128,7 +128,7 @@ def test_plan_matrix(
     retrieval = _retrieval(*flags)
     plan = resolve_plan(retrieval, prefilter=prefilter, explicit=frozenset())
     grounding = not no_grounding
-    assert plan.acquisition == ("query_gen" if query_gen else "per_chunk")
+    assert plan.candidate_source == ("query_gen" if query_gen else "per_chunk")
     assert plan.rerank == ("cross_encoder" if use_cross_encoder else "none")
     assert plan.judge == expected_judge
     assert plan.grounding is grounding
@@ -187,7 +187,7 @@ def test_rerank_label_reflects_colbert():
     # scores stored in cross_encoder_score.
     retrieval = RetrievalConfig(colbert_model="colbert-ir", query_gen=False)
     plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset())
-    assert plan.acquisition == "per_chunk"
+    assert plan.candidate_source == "per_chunk"
     assert plan.rerank == "colbert"
     assert plan.judge == "llm"
 
