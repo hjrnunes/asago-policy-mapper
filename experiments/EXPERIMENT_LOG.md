@@ -1300,28 +1300,28 @@ nullable with a `confidence_source` label (cross_encoder/colbert/rrf/none),
 never-calculated scores report null instead of 0.0, `accepted_by` records the
 label at selection time (rank/threshold/rrf/query_gen/llm_judge/
 auto_promoted/expansion), variant matches mark `scores_inherited_from`, and
-the result version bumps to 0.4. One lane run on the gemma4-oc-65k endpoint
-at temperature 0, compared against the two 150a deterministic-merge runs on
-the same endpoint and battery.
+the result version bumps to 0.4. One run on the internal gemma serving
+endpoint at temperature 0, compared against the two deterministic-merge
+reference runs (#150 part 1) on the same endpoint and battery.
 
 **MLflow:** disabled (`--no-mlflow`; no server configured for this run).
 
-**Runs:** lane `extract-runs/risk-selected_20261116_011615`; 150a references
-`risk-selected_20261115_151106` (run 1) and `risk-selected_20261115_155449`
-(run 2) from /tmp/pm-uzfb1-150a.
+**Runs:** score-source run `extract-runs/risk-selected_20261116_011615`;
+deterministic-merge references `risk-selected_20261115_151106` (run 1) and
+`risk-selected_20261115_155449` (run 2).
 
-**Macro F1:** 150a run 1 0.657, 150a run 2 0.679, 150b 0.673 — inside the
-same-code band of the endpoint.
+**Macro F1:** reference run 1 0.657, reference run 2 0.679, score-source
+0.673 — inside the same-code band of the endpoint.
 
 **Per-policy |ΔF1|:** mean 0.029 vs run 1, 0.025 vs run 2; two policies
 exceed the 0.08 per-policy figure against one reference run each
 (cisco-supplier 0.089 vs run 1, st-johns 0.083 vs run 1) while sitting at
 0.041 and 0.025 against the other run — the same non-reproducible-excursion
-pattern the 150a entry documented for camden-borough-work (0.090) on this
-endpoint.
+pattern the deterministic-merge entry documented for camden-borough-work
+(0.090) on this endpoint.
 
-**Kept-risk set (matched ids):** 86.6% overlap with 150a run 1, 86.3% with
-run 2, versus the 150a run1↔run2 same-code floor of 84.5% — the kept-risk set
+**Kept-risk set (matched ids):** 86.6% overlap with reference run 1, 86.3%
+with run 2, versus the run1↔run2 same-code floor of 84.5% — the kept-risk set
 is unchanged within noise.
 
 **Output semantics spot-check (ars, first policy):** version 0.4;
