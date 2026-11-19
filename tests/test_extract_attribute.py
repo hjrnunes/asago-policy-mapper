@@ -1883,6 +1883,7 @@ def test_legacy_wrapper_returns_none_as_before(mock_client):
         is None
     )
 
+
 def test_synthesize_causal_chain_records_attributed_chunk_after_unattributed(mock_client):
     """The causal record names the first attributed chunk, skipping None spans."""
     mock_client.chat.completions.create.return_value = _CausalChains(
