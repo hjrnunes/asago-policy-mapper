@@ -1184,6 +1184,27 @@ def _causal_plan(retrieval):
     return resolve_plan(retrieval, prefilter=False, explicit=frozenset())
 
 
+def test_run_causal_synthesis_stage_marks_disabled_when_grounding_off():
+    """Grounding off forces causal synthesis off, whatever the causal flag says.
+
+    An ungrounded match carries no evidence, so there is nothing to
+    synthesize from: the plan's truth table gates causal synthesis on
+    grounding, and every match records ``disabled``.
+    """
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a", "atlas-b"])
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+    # Causal synthesis is NOT turned off here; grounding off alone must gate it.
+    retrieval = RetrievalConfig(query_gen=False, no_grounding=True)
+    client = MagicMock()
+
+    result = _run_causal_synthesis_stage(merged, chunks, client, config, _causal_plan(retrieval), [], 4, {})
+
+    assert all(r.causal_status == "disabled" for r in result)
+    client.chat.completions.create.assert_not_called()
+
+
 def test_run_causal_synthesis_stage_marks_disabled_when_synthesis_off():
     from asago_policy_mapper.llm import LLMConfig
 
