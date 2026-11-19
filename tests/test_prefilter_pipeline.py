@@ -908,7 +908,7 @@ def test_prefilter_cases_carry_name_and_description(mock_config, tmp_path, monke
 
 
 def test_prefilter_assessor_sees_the_probability_task(mock_config, tmp_path, monkeypatch):
-    """The assessor is asked the grounding-probability task, not the judge's."""
+    """The assessor is asked the grounding-likelihood question, not the judge's."""
     from asago_policy_mapper.extract import pipeline
 
     class _StubIndex:
@@ -941,8 +941,8 @@ def test_prefilter_assessor_sees_the_probability_task(mock_config, tmp_path, mon
     )
 
     task, _, _ = assessor.calls[0]
-    assert task is pipeline.PREFILTER_TASK
-    assert task.question_id == "grounding-probability"
+    assert task is pipeline.GROUNDING_LIKELIHOOD_QUESTION_V1
+    assert task.question_id == "grounding-likelihood"
     assert task.version == "1"
 
 
@@ -1177,7 +1177,7 @@ def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, mo
     assert call.request["items"][0]["text"] == f"{MOCK_RISKS[0].name}: {MOCK_RISKS[0].description}"
     # The decision log identifies the task, prompt, assessor and rule.
     log = call.decision
-    assert log.question_id == "grounding-probability"
+    assert log.question_id == "grounding-likelihood"
     assert log.question_version == "1"
     assert log.prompt_name == "prefilter"
     assert log.prompt_sha256 == ""

@@ -44,12 +44,12 @@ from asago_policy_mapper.extract.retrieve import (
     retrieve_chunk,
 )
 from asago_policy_mapper.extract.screening import (
+    GROUNDING_LIKELIHOOD_QUESTION_V1,
     AnswerBatch,
     Decision,
     DecisionCase,
     NoAnswer,
     ProbabilityAnswer,
-    Question,
     answer_payloads,
 )
 from asago_policy_mapper.llm import LLMConfig, StructuredOutputMode
@@ -57,19 +57,6 @@ from asago_policy_mapper.llm import LLMConfig, StructuredOutputMode
 logger = logging.getLogger(__name__)
 
 _QUERY_GEN_MAX_CANDIDATES = 50
-
-PREFILTER_TASK = Question(
-    question_id="grounding-probability",
-    version="1",
-    criterion=(
-        "A candidate risk is worth grounding when the policy passage "
-        "plausibly contains evidence for it: the passage names the risk or "
-        "its specific technical concept, describes its mitigation, "
-        "management or oversight, or establishes a governance framework "
-        "that inherently covers it."
-    ),
-)
-"""The pre-grounding filter's task: score grounding likelihood, not relevance."""
 
 _PREFILTER_FIELDS_SENT = ["chunk_context", "risk_name", "risk_description"]
 
@@ -1008,8 +995,8 @@ def _prefilter_decision_log(decisions: list[Decision], assessment, rule, assesso
         for d in decisions
     ]
     return DecisionLog(
-        question_id=PREFILTER_TASK.question_id,
-        question_version=PREFILTER_TASK.version,
+        question_id=GROUNDING_LIKELIHOOD_QUESTION_V1.question_id,
+        question_version=GROUNDING_LIKELIHOOD_QUESTION_V1.version,
         prompt_name="prefilter",
         prompt_sha256="",
         assessor_id=assessor_id,
@@ -1064,7 +1051,7 @@ def _prefilter_one_chunk(
     """
     cases = _prefilter_cases(cr, index)
     try:
-        assessment = prefilter.assessor.assess(PREFILTER_TASK, context, cases)
+        assessment = prefilter.assessor.assess(GROUNDING_LIKELIHOOD_QUESTION_V1, context, cases)
     except Exception as e:
         # Fail-open: the filter must never lose risks to a broken
         # assessor. Every case keeps, with the failure recorded the same
