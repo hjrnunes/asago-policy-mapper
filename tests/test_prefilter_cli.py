@@ -1,4 +1,4 @@
-"""CLI tests for the prefilter profile (asago-uzfb1.7 step 4).
+"""CLI tests for the prefilter profile.
 
 ``--prefilter-profile PATH`` loads a YAML file with the
 ``ProbabilityAnswerEndpoint`` fields plus ``threshold`` and turns it into the
@@ -98,7 +98,9 @@ def test_validate_allows_unset_prefilter_with_no_grounding(tmp_path):
         query_gen=False,
         prefilter_profile=None,
     )
-    assert _validate_extract_options(**kwargs) is False or True  # needs_llm either way; must not exit
+    # Must not exit; needs_llm is either way.
+    needs_llm = _validate_extract_options(**kwargs)
+    assert isinstance(needs_llm, bool)
 
 
 def test_extract_rejects_prefilter_profile_with_no_grounding_cli(tmp_path, profile_path):
@@ -492,7 +494,8 @@ def test_prefilter_validation_messages_name_the_field_and_path(tmp_path):
         ({"threshold": "x"}, "threshold must be a number"),
         ({"threshold": 1.5}, "threshold must be within [0, 1]"),
         ({"timeout_s": "x"}, "timeout_s must be a number"),
-        ({"timeout_s": -1.0}, "timeout_s must be at least 0.0"),
+        ({"timeout_s": -1.0}, "timeout_s must be greater than 0.0"),
+        ({"timeout_s": 0}, "timeout_s must be greater than 0.0"),
         ({"max_batch": "x"}, "max_batch must be an integer"),
         ({"max_batch": 16.0}, "max_batch must be an integer"),
         ({"max_batch": None}, "max_batch must not be null"),
@@ -521,21 +524,27 @@ def test_prefilter_threshold_boundaries_are_inclusive(tmp_path):
         assert prefilter.rule.threshold == edge
 
 
-def test_prefilter_minimum_boundaries_are_inclusive(tmp_path):
-    """timeout_s 0 and max_batch 1 are valid; the floors are inclusive."""
+def test_prefilter_minimum_boundaries(tmp_path):
+    """max_batch 1 is valid; timeout_s must be strictly positive.
+
+    A zero timeout fails every request, so 0 is rejected, not floored.
+    """
     from asago_policy_mapper.cli import _build_prefilter
 
-    for key, floor in (("timeout_s", 0), ("max_batch", 1)):
-        profile = dict(PROFILE)
-        profile[key] = floor
-        path = tmp_path / "floor.yaml"
-        path.write_text(yaml.safe_dump(profile))
-        prefilter = _build_prefilter(path)
-        assert prefilter is not None
-        if key == "timeout_s":
-            assert prefilter.assessor.endpoint.timeout_s == floor
-        else:
-            assert prefilter.assessor.endpoint.max_batch == floor
+    profile = dict(PROFILE)
+    profile["max_batch"] = 1
+    path = tmp_path / "floor.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    prefilter = _build_prefilter(path)
+    assert prefilter is not None
+    assert prefilter.assessor.endpoint.max_batch == 1
+
+    profile = dict(PROFILE)
+    profile["timeout_s"] = 0
+    path = tmp_path / "zero-timeout.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
 
 
 def test_missing_profile_and_bad_yaml_name_the_path(tmp_path, capsys):
@@ -671,3 +680,110 @@ def test_import_failure_messages_name_the_missing_stack(tmp_path, profile_path, 
     err = capsys.readouterr().err
     assert "needs the decision extra (httpx)" in err
     assert "uv sync --extra decision" in err
+
+
+# --- base_url shape ---
+
+
+def test_build_prefilter_rejects_schemeless_base_url(tmp_path, capsys):
+    """A base_url without a scheme fails at load, not on the first request."""
+    from asago_policy_mapper.cli import _build_prefilter
+
+    profile = dict(PROFILE)
+    profile["base_url"] = "localhost:8080"
+    path = tmp_path / "schemeless.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    assert "must be an http(s) URL with a host" in capsys.readouterr().err
+
+
+def test_build_prefilter_rejects_hostless_base_url(tmp_path, capsys):
+    """A base_url with a scheme but no host fails at load."""
+    from asago_policy_mapper.cli import _build_prefilter
+
+    profile = dict(PROFILE)
+    profile["base_url"] = "http://"
+    path = tmp_path / "hostless.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    assert "must be an http(s) URL with a host" in capsys.readouterr().err
+
+
+def test_build_prefilter_rejects_non_http_scheme(tmp_path, capsys, monkeypatch):
+    """A typo'd or non-http scheme fails at load, not by failing every request.
+
+    With fail-open, a scheme typo would otherwise disable the filter
+    silently for the whole run: every request errors, the rule bypasses,
+    and the run completes unfiltered.
+    """
+    from asago_policy_mapper.cli import _build_prefilter
+
+    monkeypatch.setenv("PROB_API_KEY", "test-key")  # offsite key present; the scheme is what fails
+    for bad in ("ftp://probability.example.com/v1", "htp://probability.example.com/v1"):
+        profile = dict(PROFILE)
+        profile["base_url"] = bad
+        path = tmp_path / "scheme.yaml"
+        path.write_text(yaml.safe_dump(profile))
+        with pytest.raises(typer.Exit):
+            _build_prefilter(path)
+        assert "must be an http(s) URL with a host" in capsys.readouterr().err
+
+
+def test_build_prefilter_rejects_malformed_base_url(tmp_path, capsys):
+    """A URL urlsplit cannot parse fails as a validation error, not a traceback."""
+    from asago_policy_mapper.cli import _build_prefilter
+
+    profile = dict(PROFILE)
+    profile["base_url"] = "http://[::1"  # unterminated IPv6 literal
+    path = tmp_path / "malformed.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    err = capsys.readouterr().err
+    assert "not a valid URL" in err
+    assert "Invalid IPv6" not in err  # the raw parser error, not a traceback
+
+
+# --- API key presence ---
+
+
+def test_build_prefilter_fails_offsite_without_key(monkeypatch, profile_path, capsys):
+    """An offsite endpoint with an unset key variable refuses to start."""
+    import asago_policy_mapper.cli as cli
+
+    monkeypatch.delenv("PROB_API_KEY", raising=False)
+    profile = dict(PROFILE)
+    profile["base_url"] = "https://probability.example.com/v1"
+    path = profile_path.parent / "offsite.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    with pytest.raises(typer.Exit):
+        cli._build_prefilter(path)
+    err = capsys.readouterr().err
+    assert "offsite" in err
+    assert "PROB_API_KEY is unset" in err
+
+
+def test_build_prefilter_allows_offsite_with_key(monkeypatch, profile_path):
+    """An offsite endpoint passes when the named variable is set."""
+    from asago_policy_mapper.cli import _build_prefilter
+
+    monkeypatch.setenv("PROB_API_KEY", "test-key")
+    profile = dict(PROFILE)
+    profile["base_url"] = "https://probability.example.com/v1"
+    path = profile_path.parent / "offsite.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    prefilter = _build_prefilter(path)
+    assert prefilter is not None
+    assert prefilter.assessor.endpoint.base_url == "https://probability.example.com/v1"
+
+
+def test_build_prefilter_allows_local_without_key(monkeypatch, profile_path):
+    """A local endpoint needs no key: replay and development setups stay keyless."""
+    from asago_policy_mapper.cli import _build_prefilter
+
+    monkeypatch.delenv("PROB_API_KEY", raising=False)
+    prefilter = _build_prefilter(profile_path)  # PROFILE points at localhost
+    assert prefilter is not None
+    assert prefilter.assessor.endpoint.base_url == "http://localhost:8080"
