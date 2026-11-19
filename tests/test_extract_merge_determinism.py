@@ -355,6 +355,7 @@ def test_merge_rejects_nan_confidence_in_any_position(order):
             risk_name="Risk R-NAN",
             risk_description="Description.",
             confidence=values[0],
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[_span("quote", 0)],

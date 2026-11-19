@@ -398,17 +398,46 @@ def _scored_candidates(candidates: list[ScoredCandidate], scores: np.ndarray, to
     return results
 
 
+def _measured_scores(candidates: list[ScoredCandidate], scores: np.ndarray) -> dict[str, float]:
+    """Map every candidate id the reranker scored to its measured score.
+
+    The rerank window can be larger than the top-k slice the pipeline keeps;
+    BM25 rescue re-admits sliced-out candidates, and their measured score
+    must survive that slice.
+    """
+    measured: dict[str, float] = {}
+    for c, score in zip(candidates, scores):
+        s = float(score)
+        if np.isnan(s) or np.isinf(s):
+            continue
+        measured[c.risk_id] = s
+    return measured
+
+
 def _rescue_and_merge_scores(
-    reranked: list[ScoredCandidate], rrf_candidates: list[ScoredCandidate], bm25_rescue_rank: int
+    reranked: list[ScoredCandidate],
+    rrf_candidates: list[ScoredCandidate],
+    bm25_rescue_rank: int,
+    measured_scores: dict[str, float] | None = None,
 ) -> list[ScoredCandidate]:
     if bm25_rescue_rank > 0:
+        measured = measured_scores or {}
         reranked_ids = {c.risk_id for c in reranked}
         for c in rrf_candidates:
             if c.risk_id not in reranked_ids and 0 < c.bm25_rank <= bm25_rescue_rank:
-                # The reranker never scored this candidate. The 0.0 default
-                # with no rerank_source marks "not calculated" here; the
-                # null is written at the RiskMatch boundary.
-                reranked.append(c.model_copy(update={"rerank_source": None}))
+                # The reranker scored this candidate — it was in the rerank
+                # window (rrf_candidates) — but it fell out of the top-k
+                # slice. Keep the measured score and stamp its source, the
+                # way the ColBERT path does.
+                score = measured.get(c.risk_id)
+                reranked.append(
+                    c.model_copy(
+                        update={
+                            "cross_encoder_score": score if score is not None else 0.0,
+                            "rerank_source": "cross_encoder" if score is not None else None,
+                        }
+                    )
+                )
 
     rrf_lookup = {c.risk_id: c for c in rrf_candidates}
     results = []
@@ -758,8 +787,21 @@ class RiskIndex:
         return results
 
     def rerank(self, text: str, candidates: list[ScoredCandidate], top_k: int = 50) -> list[ScoredCandidate]:
+        """Rerank candidates, keeping the top-k by measured score.
+
+        Every candidate in the window is measured; only the top-k slice is
+        returned. Callers that re-admit sliced-out candidates (BM25 rescue)
+        read the full measurement from ``_rerank_with_scores``.
+        """
+        reranked, _ = self._rerank_with_scores(text, candidates, top_k)
+        return reranked
+
+    def _rerank_with_scores(
+        self, text: str, candidates: list[ScoredCandidate], top_k: int = 50
+    ) -> tuple[list[ScoredCandidate], dict[str, float]]:
+        """Rerank and also return every measured score in the window."""
         if not candidates or (not self._cross_encoder and not self._remote_cross_encoder):
-            return []
+            return [], {}
         pairs = _rerank_pairs(self._is_nli, text, candidates)
         if self._remote_cross_encoder is not None:
             raw_scores = self._remote_cross_encoder.predict(pairs)
@@ -769,7 +811,8 @@ class RiskIndex:
         raw_scores = np.array(raw_scores)
         scores = self._score_normalizer(raw_scores)
         scored = _scored_candidates(candidates, scores, top_k)
-        return [c.model_copy(update={"rerank_source": "cross_encoder"}) for c in scored]
+        stamped = [c.model_copy(update={"rerank_source": "cross_encoder"}) for c in scored]
+        return stamped, _measured_scores(candidates, scores)
 
     def hybrid_search(
         self,
@@ -810,8 +853,8 @@ class RiskIndex:
             )
 
         if _should_rerank(rerank, rrf_min_score):
-            reranked = self.rerank(text, rrf_candidates, top_k=top_k)
-            return _rescue_and_merge_scores(reranked, rrf_candidates, bm25_rescue_rank)
+            reranked, measured = self._rerank_with_scores(text, rrf_candidates, top_k=top_k)
+            return _rescue_and_merge_scores(reranked, rrf_candidates, bm25_rescue_rank, measured)
         # RRF-floor mode skips the reranker; the candidate score stays at its
         # 0.0 default and rerank_source stays None. The null for "not
         # calculated" is written at the RiskMatch boundary.

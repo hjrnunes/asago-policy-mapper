@@ -10,6 +10,8 @@ tests here pin the model-level contract (step 1) and the setter behaviour
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from asago_policy_mapper.extract.merge import merge_matches
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
@@ -19,18 +21,20 @@ from asago_policy_mapper.extract.models import (
     RiskMatch,
     ScoredCandidate,
 )
+from asago_policy_mapper.extract.pipeline import PipelineInvariantError
 
 
 def _scores(ce=0.5, rrf=0.03, bm25=1, embed=0.2):
     return RetrievalScores(bm25_rank=bm25, embedding_distance=embed, cross_encoder_score=ce, rrf_score=rrf)
 
 
-def _match(risk_id, confidence, accepted_by="threshold", ce=0.5, evidence=None):
+def _match(risk_id, confidence, accepted_by="threshold", ce=0.5, evidence=None, source="cross_encoder"):
     return RiskMatch(
         risk_id=risk_id,
         risk_name=f"Risk {risk_id}",
         risk_description=f"Description of {risk_id}.",
         confidence=confidence,
+        confidence_source=source if confidence is not None else "none",
         grounding_confidence="high",
         accepted_by=accepted_by,
         evidence=evidence if evidence is not None else [EvidenceSpan(text="q", document="d.pdf", chunk_index=0)],
@@ -73,10 +77,31 @@ def test_measured_zero_is_preserved():
     assert m.scores.cross_encoder_score == 0.0
 
 
-def test_bm25_rescued_unreranked_is_null():
-    """A BM25-rescued candidate the reranker never saw has null confidence."""
-    m = _match("R-RESCUE", None, accepted_by="threshold", ce=None)
+def test_bm25_rescued_scored_candidate_keeps_confidence():
+    """A BM25-rescued candidate the reranker scored keeps its confidence.
+
+    In cross-encoder mode the reranker measures every candidate in the
+    rerank window, including ones later rescued by BM25 rank: their
+    confidence is the measured score, sourced to the reranker.
+    """
+    m = _match("R-RESCUE", 0.4, accepted_by="threshold", ce=0.4)
+    m = m.model_copy(update={"confidence_source": "cross_encoder"})
+    assert m.confidence == 0.4
+    assert m.confidence_source == "cross_encoder"
+    assert m.scores.cross_encoder_score == 0.4
+    # a missing BM25 rank still means "not rescued", it is not null
+    assert m.scores.bm25_rank == 1
+
+
+def test_never_reranked_candidate_is_null():
+    """A candidate no reranker saw has null confidence and no source.
+
+    Only candidates outside the rerank window stay unmeasured; the null is
+    the marker for "not calculated", never 0.0.
+    """
+    m = _match("R-UNSCORED", None, accepted_by="threshold", ce=None)
     assert m.confidence is None
+    assert m.confidence_source == "none"
     assert m.scores.cross_encoder_score is None
     # a missing BM25 rank still means "not rescued", it is not null
     assert m.scores.bm25_rank == 1
@@ -121,7 +146,7 @@ def test_merge_handles_null_confidence():
         # the representative is the numeric-confidence match (None is
         # lower than any number), so its own metadata survives the merge
         assert merged[0].accepted_by == "threshold"
-        assert merged[0].confidence_source == "none"
+        assert merged[0].confidence_source == "cross_encoder"
 
     both_none = [
         _match(
@@ -275,15 +300,21 @@ def test_rrf_only_candidates_have_no_rerank_source(monkeypatch):
     assert all(c.rerank_source is None for c in results)
 
 
-def test_bm25_rescued_candidate_keeps_null_score(monkeypatch):
-    """A BM25-rescued candidate the reranker never saw carries no rerank_source."""
+def test_bm25_rescued_candidate_keeps_measured_score(monkeypatch):
+    """A BM25-rescued candidate the reranker scored keeps its measured score.
+
+    The reranker measures every candidate in the rerank window; a scored
+    candidate can fall out of the top-k slice, and BM25 rescue re-admits it
+    by rank. Its measured cross-encoder score and rerank_source must
+    survive, the way the ColBERT path does.
+    """
     from asago_policy_mapper.extract import index as index_mod
 
-    class _OneSidedCrossEncoder:
-        """Scores only the pair it recognizes; the other gets dropped by top_k."""
+    class _TwoSidedCrossEncoder:
+        """Scores both pairs; top_k=1 keeps only the higher one."""
 
         def predict(self, pairs):
-            return [0.9 if "A" in p[0] else 0.0 for p in pairs]
+            return [0.9 if "A" in p[0] else 0.4 for p in pairs]
 
     risks = [
         SimpleNamespace(
@@ -295,16 +326,17 @@ def test_bm25_rescued_candidate_keeps_null_score(monkeypatch):
             isDefinedByTaxonomy="test-tax",
             isPartOf="",
         )
-        for rid, name in (("R-001", "A"), ("R-002", "B"), ("R-003", "C"))
+        for rid, name in (("R-001", "A"), ("R-003", "C"))
     ]
     with (
         patch.object(index_mod, "_load_bi_encoder", return_value=(None, None, None)),
-        patch.object(index_mod, "_load_cross_encoder", return_value=(_OneSidedCrossEncoder(), None, False, False)),
+        patch.object(index_mod, "_load_cross_encoder", return_value=(_TwoSidedCrossEncoder(), None, False, False)),
     ):
         idx = index_mod.RiskIndex(risks)
 
-    # BM25 returns two candidates; the reranker (top_k=1) keeps only R-001,
-    # so R-003 falls out of the rerank window and is rescued by BM25 rank.
+    # BM25 returns two candidates; the reranker scores both, but top_k=1
+    # keeps only R-001, so R-003 falls out of the slice and is rescued by
+    # BM25 rank — with its measured score.
     monkeypatch.setattr(
         idx,
         "search_bm25",
@@ -323,7 +355,66 @@ def test_bm25_rescued_candidate_keeps_null_score(monkeypatch):
 
     by_id = {c.risk_id: c for c in results}
     assert "R-003" in by_id
-    # rescued candidate was never reranked: no source stamp, BM25 rank kept
+    # rescued candidate was measured: score kept, source stamped, rank kept
+    assert by_id["R-003"].cross_encoder_score == 0.4
+    assert by_id["R-003"].rerank_source == "cross_encoder"
+    assert by_id["R-003"].bm25_rank == 2
+
+
+def test_bm25_rescued_invalid_measurement_is_null(monkeypatch):
+    """A rescued candidate whose only measurement was invalid stays null.
+
+    Every rescued candidate is in the rerank window and is measured, but
+    an invalid measurement (NaN or infinity) is no measurement: the score
+    is skipped, the candidate falls out of the top-k slice, and rescue
+    re-admits it unmeasured — rerank_source None, null at the boundary.
+    """
+    from asago_policy_mapper.extract import index as index_mod
+
+    class _NaNForThirdCrossEncoder:
+        def predict(self, pairs):
+            return [0.9 if "A" in p[0] else float("nan") for p in pairs]
+
+    risks = [
+        SimpleNamespace(
+            id=rid,
+            name=name,
+            description="desc",
+            concern="",
+            risk_type="",
+            isDefinedByTaxonomy="test-tax",
+            isPartOf="",
+        )
+        for rid, name in (("R-001", "A"), ("R-003", "C"))
+    ]
+    with (
+        patch.object(index_mod, "_load_bi_encoder", return_value=(None, None, None)),
+        patch.object(index_mod, "_load_cross_encoder", return_value=(_NaNForThirdCrossEncoder(), None, False, False)),
+    ):
+        idx = index_mod.RiskIndex(risks)
+
+    # Both candidates are in the rerank window; R-003's measurement is NaN
+    # (invalid), so it is skipped and falls out of the top_k=1 slice, then
+    # is rescued by BM25 rank — unmeasured.
+    monkeypatch.setattr(
+        idx,
+        "search_bm25",
+        lambda text, top_k=100: [
+            ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", bm25_rank=1),
+            ScoredCandidate(risk_id="R-003", risk_name="C", risk_description="c", bm25_rank=2),
+        ],
+    )
+    monkeypatch.setattr(
+        idx,
+        "search_semantic",
+        lambda text, top_k=100: [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a")],
+    )
+
+    results = idx.hybrid_search("text", top_k=1, bm25_rescue_rank=5)
+
+    by_id = {c.risk_id: c for c in results}
+    assert "R-003" in by_id
+    # invalid measurement: no score to keep, no source to stamp
     assert by_id["R-003"].rerank_source is None
     assert by_id["R-003"].bm25_rank == 2
 
@@ -452,7 +543,11 @@ def _pipeline():
 
 
 def test_determine_accepted_by_prefers_selected_by():
-    """determine_accepted_by returns the recorded label, falling back to the legacy rule."""
+    """determine_accepted_by returns the recorded label; missing labels raise.
+
+    Retrieval and query generation stamp every accepted candidate, so a
+    candidate with no stamp is an invariant failure, not a fallback case.
+    """
     pl = _pipeline()
     stamped = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="rank")
     assert pl.determine_accepted_by(stamped, borderline_judged=[], use_cross_encoder=True, no_judge=False) == "rank"
@@ -461,10 +556,12 @@ def test_determine_accepted_by_prefers_selected_by():
         pl.determine_accepted_by(stamped_qg, borderline_judged=[], use_cross_encoder=True, no_judge=False)
         == "query_gen"
     )
-    # legacy fallback when no label was recorded
+    # an unstamped candidate is an invariant failure, not a fallback
     plain = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d")
-    assert pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=True, no_judge=False) == "threshold"
-    assert pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=False, no_judge=False) == "rrf"
+    with pytest.raises(PipelineInvariantError):
+        pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=True, no_judge=False)
+    with pytest.raises(PipelineInvariantError):
+        pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=False, no_judge=False)
     # judge promotion still wins over the recorded label
     judged = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="rank")
     assert (
