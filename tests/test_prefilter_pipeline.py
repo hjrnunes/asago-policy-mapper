@@ -1134,7 +1134,8 @@ def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, mo
 
     The keys and per-item fields pin the fallback shape: ``context`` and
     ``items`` with ``id``/``text`` per case, exactly as the probability
-    task's request format defines them.
+    task's request format defines them, plus ``synthesized: true`` — the
+    body was built for the record, not sent anywhere.
     """
     from asago_policy_mapper.extract import pipeline
 
@@ -1170,7 +1171,8 @@ def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, mo
     assert call.stage == "prefilter"
     assert call.chunk_index == 0
     assert isinstance(call.request, dict)
-    assert set(call.request) == {"context", "items"}
+    assert set(call.request) == {"context", "items", "synthesized"}
+    assert call.request["synthesized"] is True
     assert [i["id"] for i in call.request["items"]] == [r.id for r in MOCK_RISKS]
     assert call.request["items"][0]["text"] == f"{MOCK_RISKS[0].name}: {MOCK_RISKS[0].description}"
     # The decision log identifies the task, prompt, assessor and rule.

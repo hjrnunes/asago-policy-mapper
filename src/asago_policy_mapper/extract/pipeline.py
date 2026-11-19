@@ -975,14 +975,16 @@ def _prefilter_cases(cr: ChunkResult, index) -> list[DecisionCase]:
 
 
 def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> dict | list:
-    """The exact request the prefilter sent; no credentials.
+    """The request the prefilter sent; no credentials.
 
     Assessors that batch (the HTTP probability assessor splits at
     ``max_batch``) record every request body they actually sent, with the
     batch boundaries preserved; assessors that send nothing (replay)
-    record the single body the exchange shape describes, so a run's
-    ``decision_calls`` still show what would have left the machine. The
-    key travels in a header, so no body ever carries a credential.
+    record the single body the request shape describes, so a run's
+    ``decision_calls`` still show what would have left the machine. A
+    built-not-sent body carries ``synthesized: true`` so a reader can
+    tell the two apart. The key travels in a header, so no body ever
+    carries a credential.
     """
     exchange = getattr(assessment, "exchange", None)
     if isinstance(exchange, dict) and isinstance(exchange.get("requests"), list):
@@ -990,6 +992,7 @@ def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> d
     return {
         "context": context,
         "items": [{"id": c.risk_id, "text": f"{c.name}: {c.description}"} for c in cases],
+        "synthesized": True,
     }
 
 
