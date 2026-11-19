@@ -115,18 +115,17 @@ class TestLlmStage:
 class TestIncidentCarriesThreadStage:
     def test_incident_carries_thread_stage(self):
         """record_incident uses the calling thread's stage, not another worker's."""
-        tracker = TokenTracker()
-        tracker.set_stage("expansion_grounding")
 
-        def record(stage: str, error: RuntimeError) -> None:
+        def record(tracker: TokenTracker, stage: str, error: RuntimeError) -> None:
             with llm_stage(stage):
                 try:
                     raise error
                 except RuntimeError:
                     tracker.record_incident("validation_exhausted", str(error))
 
-        t1 = threading.Thread(target=record, args=("judge", RuntimeError("judge error")))
-        t2 = threading.Thread(target=record, args=("causal_synthesis", RuntimeError("causal error")))
+        tracker = TokenTracker()
+        t1 = threading.Thread(target=record, args=(tracker, "judge", RuntimeError("judge error")))
+        t2 = threading.Thread(target=record, args=(tracker, "causal_synthesis", RuntimeError("causal error")))
         t1.start()
         t2.start()
         t1.join()
@@ -138,21 +137,25 @@ class TestIncidentCarriesThreadStage:
             "causal error": "causal_synthesis",
         }
 
-    def test_incident_falls_back_to_set_stage(self):
-        """Without a thread stage, an incident keeps the explicit set_stage value."""
+    def test_incident_outside_stage_has_no_stage(self):
+        """An incident recorded outside any stage carries no stage key."""
         tracker = TokenTracker()
-        tracker.set_stage("grounding")
         tracker.record_incident("context_overflow", "reduced max_tokens")
-        assert tracker.incidents[0]["stage"] == "grounding"
+        assert "stage" not in tracker.incidents[0]
 
     def test_track_completion_uses_thread_stage(self):
-        """_track_completion routes usage to the thread-local stage, not set_stage's."""
+        """_track_completion routes usage to the calling thread's stage only."""
         tracker = TokenTracker()
-        tracker.set_stage("expansion_grounding")
         with llm_stage("grounding"):
             _track_completion(tracker, SimpleNamespace(usage=_usage()))
         assert tracker.per_stage["grounding"]["calls"] == 1
-        assert "expansion_grounding" not in tracker.per_stage
+
+    def test_track_completion_outside_stage_totals_only(self):
+        """Usage recorded outside a stage still totals, without a per-stage bucket."""
+        tracker = TokenTracker()
+        _track_completion(tracker, SimpleNamespace(usage=_usage()))
+        assert tracker.calls == 1
+        assert tracker.per_stage == {}
 
 
 class TestCallSiteStages:

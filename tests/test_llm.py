@@ -30,6 +30,7 @@ from asago_policy_mapper.llm import (
     _wrap_with_tracking,
     budget_max_tokens,
     create_client,
+    llm_stage,
 )
 
 # ---------------------------------------------------------------------------
@@ -185,21 +186,14 @@ class TestTokenTracker:
 
     def test_record_incident_includes_stage(self):
         tracker = TokenTracker()
-        tracker.set_stage("grounding")
-        tracker.record_incident("error", "something broke")
+        with llm_stage("grounding"):
+            tracker.record_incident("error", "something broke")
         assert tracker.incidents[0]["stage"] == "grounding"
 
     def test_record_incident_no_stage(self):
         tracker = TokenTracker()
         tracker.record_incident("error", "no stage set")
         assert "stage" not in tracker.incidents[0]
-
-    def test_set_stage(self):
-        tracker = TokenTracker()
-        tracker.set_stage("judge")
-        assert tracker._current_stage == "judge"
-        tracker.set_stage(None)
-        assert tracker._current_stage is None
 
 
 # ---------------------------------------------------------------------------
