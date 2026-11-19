@@ -1449,14 +1449,21 @@ def _assessor_endpoint_host(assessor) -> str | None:
 
 
 def _prefilter_metadata(prefilter: GroundingPrefilter) -> dict:
-    """The metadata.prefilter block recorded when the filter is on."""
+    """The metadata.prefilter block recorded when the filter is on.
+
+    An in-process assessor (``in_process = True``) reports no endpoint
+    host at all: it has no URL, and a configured placeholder must not
+    surface as a hostname that suggests one. An HTTP assessor keeps its
+    host whether the endpoint is local or offsite.
+    """
     assessor = prefilter.assessor
     rule = prefilter.rule
+    in_process = bool(getattr(assessor, "in_process", False))
     return {
         "assessor_id": getattr(assessor, "assessor_id", ""),
         "rule_id": getattr(rule, "rule_id", ""),
         "threshold": getattr(rule, "threshold", None),
-        "endpoint_host": _assessor_endpoint_host(assessor),
+        "endpoint_host": None if in_process else _assessor_endpoint_host(assessor),
         "sends_offsite": bool(getattr(assessor, "sends_offsite", False)),
         "fields_sent": _prefilter_fields_sent(assessor),
     }

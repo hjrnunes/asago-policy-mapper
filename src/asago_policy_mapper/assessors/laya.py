@@ -107,6 +107,8 @@ class LayaProbabilityAssessor(BinaryAssessor):
     """
 
     emits = frozenset({Probability})
+    in_process = True
+    """Marks the assessor as in-process: no URL, no endpoint host."""
 
     def __init__(self, endpoint: LayaProbabilityEndpoint, agent=None):
         try:

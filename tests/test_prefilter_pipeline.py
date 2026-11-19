@@ -1996,6 +1996,85 @@ def test_prefilter_offsite_without_endpoint_is_none_host(mock_config, tmp_path, 
     assert result.metadata["prefilter"]["endpoint_host"] is None
 
 
+def test_prefilter_in_process_assessor_records_no_endpoint_host(mock_config, tmp_path, monkeypatch):
+    """An in-process assessor with a placeholder URL records no host.
+
+    The local arm runs in process: its configured placeholder URL must
+    not surface as an endpoint host (a ``base_url`` override must not
+    make an in-process run look like it talks to a remote endpoint).
+    """
+
+    class InProcessAssessor(ScriptedAssessor):
+        """In-process, carrying the placeholder endpoint shape."""
+
+        offsite = False
+        in_process = True
+
+        def __init__(self, script):
+            super().__init__(script)
+            from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+            self.endpoint = ProbabilityEndpoint(
+                base_url="http://localhost/laya", model="local", api_key_env="LOCAL_KEY"
+            )
+
+    result = _run_extraction_with_assessor(InProcessAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    block = result.metadata["prefilter"]
+    assert block["endpoint_host"] is None
+    assert block["offsite"] is False
+
+
+def test_prefilter_offsite_assessor_records_its_endpoint_host(mock_config, tmp_path, monkeypatch):
+    """An offsite assessor still records its endpoint host."""
+
+    class OffsiteAssessor(ScriptedAssessor):
+        """Offsite with a real remote endpoint."""
+
+        offsite = True
+
+        def __init__(self, script):
+            super().__init__(script)
+            from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+            self.endpoint = ProbabilityEndpoint(
+                base_url="https://api.example.invalid/v1", model="remote", api_key_env="REMOTE_KEY"
+            )
+
+    result = _run_extraction_with_assessor(OffsiteAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    block = result.metadata["prefilter"]
+    assert block["endpoint_host"] == "api.example.invalid"
+    assert block["offsite"] is True
+
+
+def test_prefilter_local_http_assessor_records_its_endpoint_host(mock_config, tmp_path, monkeypatch):
+    """A local (not offsite) HTTP assessor records its endpoint host.
+
+    Only in-process assessors drop the host: an HTTP assessor pointed at
+    a loopback endpoint still names where it sent requests.
+    """
+
+    class LocalHttpAssessor(ScriptedAssessor):
+        """An HTTP assessor at a loopback endpoint."""
+
+        offsite = False
+
+        def __init__(self, script):
+            super().__init__(script)
+            from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+            self.endpoint = ProbabilityEndpoint(
+                base_url="http://127.0.0.1:9100/v1", model="local-http", api_key_env="LOCAL_KEY"
+            )
+
+    result = _run_extraction_with_assessor(LocalHttpAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    block = result.metadata["prefilter"]
+    assert block["endpoint_host"] == "127.0.0.1"
+    assert block["offsite"] is False
+
+
 def test_prefilter_endpoint_host_ignores_non_string_base_url(mock_config, tmp_path, monkeypatch):
     """A non-string base_url yields a None host, not a traceback.
 
@@ -2022,6 +2101,9 @@ def test_prefilter_endpoint_host_ignores_non_string_base_url(mock_config, tmp_pa
 
     assessor = ScriptedAssessor({})
     assessor.endpoint = SimpleNamespace(base_url=12345)
+    # Offsite so the host derivation actually runs (an in-process or
+    # local assessor records no host by design).
+    assessor.offsite = True
     doc = tmp_path / "p.md"
     doc.write_text(DOC)
     result = run_extraction(
