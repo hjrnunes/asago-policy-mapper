@@ -894,6 +894,81 @@ def test_judge_context_budget_does_not_change_grounding_context(mock_config, tmp
     assert judge_contexts[0] != expected[0]
 
 
+def test_judge_contexts_built_only_for_borderline_chunks(mock_config, monkeypatch):
+    """A judge-only budget builds contexts only where the judge runs.
+
+    Chunks with no borderline candidate never reach the judge, so the run
+    builds no judge context for them. Chunks with a borderline candidate
+    still get the full neighbor expansion (against all chunks), so their
+    contexts match a full build's.
+    """
+    from asago_policy_mapper.extract import pipeline
+    from asago_policy_mapper.extract.parse import Chunk
+    from asago_policy_mapper.extract.retrieve import ChunkResult
+
+    built = {}
+
+    def fake_build_chunk_contexts(chunks, max_context_tokens=1024, only=None):
+        built["only"] = only
+        # The real builder returns a parallel list; record and delegate.
+        from asago_policy_mapper.extract.retrieve import build_chunk_contexts as real_build
+
+        return real_build(chunks, max_context_tokens=max_context_tokens, only=only)
+
+    monkeypatch.setattr(pipeline, "build_chunk_contexts", fake_build_chunk_contexts)
+
+    seen = {}
+
+    def fake_judge_one(i, cr, client, model, call_collector, judge_prompt, max_batch_size, context_text):
+        seen[i] = context_text
+        return i, []
+
+    monkeypatch.setattr(pipeline, "_judge_one", fake_judge_one)
+
+    chunks = [
+        Chunk(text="first chunk words " * 20, source="p.md", index=0),
+        Chunk(text="second chunk words " * 20, source="p.md", index=1),
+    ]
+    borderline = [ScoredCandidate(risk_id="R-001", risk_name="n", risk_description="d", cross_encoder_score=0.5)]
+    chunk_results = [
+        ChunkResult(
+            chunk_index=0,
+            source="p.md",
+            page=None,
+            section=None,
+            accepted=[],
+            borderline=borderline,
+            borderline_judged=[],
+            stats={},
+        ),
+        ChunkResult(
+            chunk_index=1,
+            source="p.md",
+            page=None,
+            section=None,
+            accepted=[],
+            borderline=[],
+            borderline_judged=[],
+            stats={},
+        ),
+    ]
+    retrieval = RetrievalConfig(query_gen=False, judge_context_tokens=30)
+    plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+
+    pipeline._run_judge(
+        chunk_results, chunks, MagicMock(), mock_config, retrieval, [], plan, chunk_contexts=["g0", "g1"]
+    )
+
+    # Only chunk 0 has borderline candidates, so only its index is built.
+    assert built["only"] == {0}
+    assert list(seen) == [0]
+    # The built context matches a full build for the same index (neighbor
+    # expansion resolves against the full chunk list).
+    from asago_policy_mapper.extract.retrieve import build_chunk_contexts
+
+    assert seen[0] == build_chunk_contexts(chunks, max_context_tokens=30)[0]
+
+
 def test_run_extraction_rejects_a_plan_that_mismatches_the_retrieval_settings(mock_config, tmp_path):
     """A caller-supplied plan must resolve from the same retrieval settings.
 
