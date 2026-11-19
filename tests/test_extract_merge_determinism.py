@@ -12,6 +12,7 @@ selects; the output sorts by (-confidence, risk_id).
 import itertools
 
 import pytest
+from pydantic import ValidationError
 
 from asago_policy_mapper.extract.merge import merge_matches
 from asago_policy_mapper.extract.models import (
@@ -311,3 +312,47 @@ def test_merge_characterization_highest_confidence_wins():
         assert merged[0].grounding_confidence == "from-high"
         assert merged[0].evidence[0].text == "from low"
         assert merged[0].evidence[0].cross_encoder_score == 0.99
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
+def test_merge_rejects_nan_confidence_in_any_position(order):
+    """NaN confidence fails validation in every input position.
+
+    NaN compares unequal to everything, so a NaN reaching max() or sort()
+    makes the winner depend on input order. The models reject NaN
+    confidence at construction instead, which keeps the ordering total;
+    the rejection itself must not depend on where the NaN sits.
+    """
+    confidences = [0.5, float("nan"), 0.7]
+    values = [confidences[i] for i in order]
+
+    with pytest.raises(ValidationError, match="must not be NaN"):
+        RiskMatch(
+            risk_id="R-NAN",
+            risk_name="Risk R-NAN",
+            risk_description="Description.",
+            confidence=values[0],
+            grounding_confidence="high",
+            accepted_by="threshold",
+            evidence=[_span("quote", 0)],
+            scores=_scores(0.5),
+        )
+        _match("R-NAN", values[1], [_span("quote", 1)])
+        _match("R-NAN", values[2], [_span("quote", 2)])
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
+def test_merge_rejects_nan_evidence_score_in_any_position(order):
+    """NaN cross-encoder scores fail validation in every input position.
+
+    Evidence ordering starts at the cross-encoder score, so a NaN span
+    score would make the surviving evidence order depend on input order;
+    the models reject NaN scores at construction instead.
+    """
+    scores = [0.9, float("nan"), 0.5]
+    values = [scores[i] for i in order]
+
+    with pytest.raises(ValidationError, match="must not be NaN"):
+        _span("nan quote", 0, score=values[0])
+        _span("nan quote", 1, score=values[1])
+        _span("nan quote", 2, score=values[2])

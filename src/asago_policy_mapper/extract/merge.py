@@ -27,7 +27,9 @@ def _best_match_key(m: RiskMatch) -> tuple:
     the lowest chunk index, then the lexicographically largest tuple of
     evidence texts. The serialization tail makes the order total, so ties
     past those components still pick a fixed representative. A match
-    without evidence ranks last on the chunk component.
+    without evidence ranks last on the chunk component. The models reject
+    NaN confidence and scores at construction, so every comparison here is
+    between real numbers and the order is total.
     """
     min_chunk = min((e.chunk_index for e in m.evidence), default=math.inf)
     return (m.confidence, -min_chunk, tuple(e.text for e in m.evidence), _tiebreak_key(m))
