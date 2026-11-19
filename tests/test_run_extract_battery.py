@@ -5,9 +5,30 @@ the flags it passes (never a redundant or warning-triggering one) and when
 it decides a run needs no LLM endpoint at all.
 """
 
+import sys
 from pathlib import Path
 
-from run_extract_battery import _battery_run_plan, _build_extract_command
+import pytest
+
+# The mutmut sandbox and the sandbox-isolation canary copy tests/ without
+# the repository root, where run_extract_battery.py lives. Fall back to the
+# enclosing checkout's root so ordinary mutmut runs keep collecting this
+# module, which covers the battery's plan-based endpoint decision. Skip
+# only when the script exists nowhere, as in the canary's scratch copy.
+# Appending (not inserting) keeps any path mutmut itself puts ahead, such
+# as mutants/src, in charge of imports.
+for _root in (
+    Path(__file__).resolve().parent.parent,
+    Path(__file__).resolve().parent.parent.parent,
+):
+    if (_root / "run_extract_battery.py").is_file():
+        if str(_root) not in sys.path:
+            sys.path.append(str(_root))
+        break
+else:
+    pytest.skip("run_extract_battery.py is not present in this checkout", allow_module_level=True)
+
+from run_extract_battery import _battery_run_plan, _build_extract_command  # noqa: E402
 
 
 def _command(**overrides) -> list[str]:
