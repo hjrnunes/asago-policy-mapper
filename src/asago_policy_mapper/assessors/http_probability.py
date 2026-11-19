@@ -247,11 +247,11 @@ class HttpProbabilityAssessor:
                 self._mark_all(cases, "error", detail=_redact_text(f"JSON: {error}", secret)),
                 [],
             )
-        answers, unmatched = self._answers_from_payload(payload, cases)
+        answers, unmatched = self._answers_from_payload(payload, cases, secret)
         return self._exchange(request_body, payload, secret), answers, unmatched
 
     def _answers_from_payload(
-        self, payload: object, cases: Sequence[DecisionCase]
+        self, payload: object, cases: Sequence[DecisionCase], secret: str
     ) -> tuple[dict[str, Answer], list[str]]:
         if not isinstance(payload, dict):
             return self._mark_all(cases, "error"), []

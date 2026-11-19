@@ -33,7 +33,6 @@ HTTP errors, which the base maps to ``NoAnswer("error")``, fail-open.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -95,8 +94,8 @@ class JevProbabilityAssessor(HttpProbabilityAssessor):
 
     #: What the Jev request carries beyond the generic shape: each
     #: question's instructions embed the fixed question text and the
-    #: task's criterion (the ``BinaryTask`` proposition — the grounding
-    #: criterion) alongside the case's name and description.
+    #: question's criterion (the ``Question`` grounding criterion) alongside
+    #: the case's name and description.
     fields_sent = ("chunk_context", "question", "criterion", "risk_name", "risk_description")
 
     def __init__(self, endpoint: ProbabilityEndpoint, transport=None):
@@ -156,7 +155,7 @@ class JevProbabilityAssessor(HttpProbabilityAssessor):
         }
 
     def _answers_from_payload(
-        self, payload: object, cases: Sequence[DecisionCase]
+        self, payload: object, cases: Sequence[DecisionCase], secret: str
     ) -> tuple[dict[str, Answer], list[str]]:
         """Read Jev's answers object into answers, keyed by risk id.
 
@@ -165,6 +164,11 @@ class JevProbabilityAssessor(HttpProbabilityAssessor):
         Noul (wrong or missing ``type``, unreadable ``noul``) is invalid;
         a case whose question the response omitted is missing; ids outside
         the batch go to ``unmatched``.
+
+        ``secret`` is the credential captured once per ``assess`` call;
+        every redaction in the batch uses that captured value, so
+        redaction stays anchored to the secret that was actually sent
+        even when the environment changes mid-call.
         """
         if not isinstance(payload, dict):
             return self._mark_all(cases, "error"), []
@@ -176,7 +180,7 @@ class JevProbabilityAssessor(HttpProbabilityAssessor):
             # null answers key mean the same thing (the null-equals-
             # missing reading the generic adapter takes).
             if "error" in payload:
-                detail = _error_detail(payload["error"], self._secret())
+                detail = _error_detail(payload["error"], secret)
                 return {c.risk_id: NoAnswer("error", detail) for c in cases}, []
             return self._mark_all(cases, "missing"), []
         if not isinstance(answers, dict):
@@ -200,10 +204,6 @@ class JevProbabilityAssessor(HttpProbabilityAssessor):
         answers_out.update(missing)
         return answers_out, unmatched
 
-    def _secret(self) -> str:
-        """The configured credential, or an empty string (a no-op walk)."""
-        return os.environ.get(self.endpoint.api_key_env) or ""
-
 
 def _noul_probability(answer: object) -> float | None:
     """Read a Noul answer's probability, or None when it cannot be read.
@@ -224,9 +224,12 @@ def _error_detail(error: object, secret: str) -> str:
     comes from the endpoint, which also saw the credential in its
     Authorization header, so it is redacted against that secret first —
     replacing before truncating, so a secret straddling the cut is fully
-    replaced rather than partially kept. The detail lands in
-    ``NoAnswer.detail`` and so in the run output.
+    replaced rather than partially kept. An empty secret (no key
+    configured) is a no-op: there is nothing to replace. The detail
+    lands in ``NoAnswer.detail`` and so in the run output.
     """
-    if isinstance(error, str):
-        return error.replace(secret, _REDACTED)[:200]
-    return "endpoint returned an error object"
+    if not isinstance(error, str):
+        return "endpoint returned an error object"
+    if not secret:
+        return error[:200]
+    return error.replace(secret, _REDACTED)[:200]
