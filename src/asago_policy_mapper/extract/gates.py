@@ -66,7 +66,9 @@ class ThresholdDrop:
             )
         if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
             raise TypeError(f"ThresholdDrop threshold must be a number; got {threshold!r}")
-        if math.isnan(float(threshold)) or not 0.0 <= float(threshold) <= 1.0:
+        if not 0.0 <= threshold <= 1.0:
+            # Value comparison first, so a huge int compares by value instead of
+            # overflowing float(); NaN fails the comparison and lands here too.
             raise ValueError(f"ThresholdDrop threshold must be in [0, 1]; got {threshold!r}")
         self.assessor = assessor
         self.threshold = threshold

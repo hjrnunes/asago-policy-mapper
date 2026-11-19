@@ -8,7 +8,8 @@ to splits by the fixed lists below, so the threshold is chosen on
 different policies than the ones it is reported on. All assessments run
 through the replay assessor, so no provider is contacted; latency
 percentiles come from the ``latency_ms`` the answers recorder stored with
-each answer (the provider's own round-trip), not from replay lookup time.
+each answer (the recorded assessment cost per row), and are null when the
+answers file carries none.
 
 Threshold choice: the sweep picks the threshold with the least recall
 loss on the tuning split, breaking ties by the most drops, then the
@@ -89,19 +90,29 @@ def _effective_p(outcomes: tuple) -> float | None:
     """Reduce one candidate's stored outcomes to the probability the rule sees.
 
     Mirrors ThresholdDrop: an Unavailable anywhere bypasses (None marks
-    that), otherwise the maximum probability decides (any high one keeps).
+    that), a NaN probability cannot be compared and bypasses the same way
+    (the rule keeps it with bypass:invalid), otherwise the maximum
+    probability decides (any high one keeps).
     """
     probabilities = [o.p for o in outcomes if isinstance(o, Probability)]
     if any(isinstance(o, Unavailable) for o in outcomes) or not probabilities:
         return None
+    if any(math.isnan(p) for p in probabilities):
+        return None
     return max(probabilities)
 
 
-def _assess_rows(rows: list[dict], assessor: ReplayAssessor) -> list[tuple[dict, dict[str, float | None], float]]:
+_AssessedRow = tuple[dict, dict[str, float | None], float | None]
+"""One assessed fixture row: the row, per-candidate effective p, recorded latency."""
+
+
+def _assess_rows(rows: list[dict], assessor: ReplayAssessor) -> list[_AssessedRow]:
     """Assess every row through the assessor's public API.
 
     Returns one entry per row: the row itself, each candidate's effective
-    probability (None for bypass), and the row's recorded latency.
+    probability (None for bypass), and the row's recorded assessment cost
+    (None when the answers file carried no latency for it, in which case
+    the report omits that row from the latency percentiles).
     """
     assessed = []
     for row in rows:
@@ -110,7 +121,7 @@ def _assess_rows(rows: list[dict], assessor: ReplayAssessor) -> list[tuple[dict,
         ]
         batch = assessor.assess(RISK_RELEVANCE_V1, row["context"], cases)
         effective = {case.risk_id: _effective_p(batch.outcomes.get(case.risk_id, ())) for case in cases}
-        assessed.append((row, effective, batch.latency_ms))
+        assessed.append((row, effective, batch.latency_ms if assessor.last_recorded else None))
     return assessed
 
 
@@ -201,11 +212,13 @@ def main(argv: list[str] | None = None) -> int:
         help="recall-loss budget for the chosen threshold (default: none; pick least recall loss)",
     )
     args = parser.parse_args(argv)
+    if args.max_recall_loss is not None and (math.isnan(args.max_recall_loss) or args.max_recall_loss < 0):
+        parser.error(f"--max-recall-loss must be a non-negative number; got {args.max_recall_loss!r}")
 
     rows = [json.loads(line) for line in args.fixtures.read_text().splitlines() if line.strip()]
     try:
         assessor = ReplayAssessor(args.answers)
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
 
@@ -219,10 +232,10 @@ def main(argv: list[str] | None = None) -> int:
     sweep = [threshold_metrics(tuning_assessed, t) for t in SWEEP_THRESHOLDS]
     chosen = choose_threshold(sweep, args.max_recall_loss)
     held_metrics = threshold_metrics(held_assessed, chosen["threshold"])
-    latencies = [latency for _row, _effective, latency in held_assessed]
-    held_metrics["latency_p50_ms"] = percentile(latencies, 0.5)
-    held_metrics["latency_p95_ms"] = percentile(latencies, 0.95)
-    held_metrics["latency_recorded"] = bool(latencies) and assessor.recorded_latencies
+    latencies = [latency for _row, _effective, latency in held_assessed if latency is not None]
+    held_metrics["latency_p50_ms"] = percentile(latencies, 0.5) if latencies else None
+    held_metrics["latency_p95_ms"] = percentile(latencies, 0.95) if latencies else None
+    held_metrics["latency_recorded"] = bool(latencies)
 
     report = {
         "tuning_policies": sorted(TUNING_POLICIES),

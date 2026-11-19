@@ -192,6 +192,7 @@ def test_record_answers_script_runs(tmp_path):
         )
     finally:
         server.shutdown()
+        server.server_close()
 
     assert completed.returncode == 0, completed.stderr
     assert answers.exists()

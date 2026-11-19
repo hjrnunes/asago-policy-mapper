@@ -136,9 +136,80 @@ def test_replay_properties(tmp_path):
     assert "replay" in assessor.assessor_id
 
 
+def test_replay_serves_recorded_latency(tmp_path):
+    """A row with latency_ms serves that latency back, not the lookup time."""
+    context = "ctx"
+    key = _sha256(context)
+    rows = [
+        {"context_sha256": key, "risk_id": "R-001", "p": 0.5, "latency_ms": 120.0},
+        {"context_sha256": key, "risk_id": "R-002", "p": 0.5, "latency_ms": 80.0},
+    ]
+    path = tmp_path / "outcomes.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    assessor = ReplayAssessor(path)
+    batch = assessor.assess(TASK, context, _cases("R-001", "R-002"))
+
+    assert batch.latency_ms == 120.0  # the max the batch's rows carry
+    assert assessor.last_recorded is True
+
+
+def test_replay_invalid_latencies_are_treated_as_absent(tmp_path):
+    """NaN, negative, huge and boolean latency values do not poison the reported latency."""
+    context = "ctx"
+    key = _sha256(context)
+    raws = [
+        '{"context_sha256": "%s", "risk_id": "R-001", "p": 0.5, "latency_ms": NaN}',
+        '{"context_sha256": "%s", "risk_id": "R-002", "p": 0.5, "latency_ms": -5}',
+        '{"context_sha256": "%s", "risk_id": "R-003", "p": 0.5, "latency_ms": ' + "1" + "0" * 400 + "}",
+        '{"context_sha256": "%s", "risk_id": "R-004", "p": 0.5, "latency_ms": true}',
+        '{"context_sha256": "%s", "risk_id": "R-005", "p": 0.5}',
+    ]
+    path = tmp_path / "outcomes.jsonl"
+    path.write_text("\n".join(r % key for r in raws) + "\n")
+
+    assessor = ReplayAssessor(path)
+    for rid in ("R-001", "R-002", "R-003", "R-004", "R-005"):
+        assessor.assess(TASK, context, _cases(rid))
+        assert assessor.last_recorded is False, rid
+    # The rows themselves still load: only the latency is discarded.
+    assert assessor.malformed_lines == 0
+
+
+def test_replay_duplicate_rows_keep_the_max_latency(tmp_path):
+    """Two rows for one key with different latencies serve the maximum, not the last."""
+    context = "ctx"
+    key = _sha256(context)
+    rows = [
+        {"context_sha256": key, "risk_id": "R-001", "p": 0.5, "latency_ms": 80.0},
+        {"context_sha256": key, "risk_id": "R-001", "p": 0.5, "latency_ms": 120.0},
+    ]
+    path = tmp_path / "outcomes.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    assessor = ReplayAssessor(path)
+    batch = assessor.assess(TASK, context, _cases("R-001"))
+
+    assert batch.latency_ms == 120.0
+
+
+def test_replay_unavailable_detail_round_trips(tmp_path):
+    """A stored detail on an unavailable row serves back with the reason."""
+    context = "ctx"
+    key = _sha256(context)
+    rows = [{"context_sha256": key, "risk_id": "R-001", "unavailable": "error", "detail": "HTTP 503"}]
+    path = tmp_path / "outcomes.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    assessor = ReplayAssessor(path)
+    batch = assessor.assess(TASK, context, _cases("R-001"))
+
+    assert batch.outcomes["R-001"] == (Unavailable("error", "HTTP 503"),)
+
+
 def test_replay_missing_file_is_an_error(tmp_path):
-    """A missing answers file raises ValueError instead of answering missing for everything."""
-    with pytest.raises(ValueError, match="answers file not found"):
+    """A missing answers file raises FileNotFoundError instead of answering missing for everything."""
+    with pytest.raises(FileNotFoundError, match="answers file not found"):
         ReplayAssessor(tmp_path / "absent.jsonl")
 
 

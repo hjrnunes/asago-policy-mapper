@@ -48,6 +48,8 @@ def record_answers(rows: Sequence[dict], assessor) -> list[dict]:
             unavailable = next((o for o in outcomes if isinstance(o, Unavailable)), None)
             if unavailable is not None:
                 answer["unavailable"] = unavailable.reason
+                if unavailable.detail:
+                    answer["detail"] = unavailable.detail
             elif probability is not None:
                 answer["p"] = probability.p
             else:

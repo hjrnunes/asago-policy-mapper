@@ -211,6 +211,15 @@ def test_effective_p_reduces_like_the_rule():
     assert _effective_p([]) is None
 
 
+def test_effective_p_treats_nan_like_the_rule():
+    """A NaN probability bypasses in the metrics, mirroring the rule's bypass:invalid."""
+    from asago_policy_mapper.extract.decide import Probability
+    from scripts.eval_prefilter import _effective_p
+
+    assert _effective_p([Probability(float("nan"))]) is None
+    assert _effective_p([Probability(0.01), Probability(float("nan"))]) is None
+
+
 def test_duplicate_probabilities_use_max_not_last(tmp_path):
     """A candidate stored with 0.90 then 0.02 keeps at threshold 0.10, like the rule."""
     from asago_policy_mapper.assessors.replay import ReplayAssessor
@@ -341,8 +350,10 @@ def test_eval_script_runs_end_to_end(tmp_path):
     assert held["grounded_dropped"] == 0
     assert held["recall_loss"] == 0.0
     assert held["drop_rate"] == 1 / 3
-    # Hand-written answers carry no recorded latency.
+    # Hand-written answers carry no recorded latency: the fields are null.
     assert held["latency_recorded"] is False
+    assert held["latency_p50_ms"] is None
+    assert held["latency_p95_ms"] is None
 
 
 def test_eval_script_rejects_empty_split(tmp_path):
@@ -387,6 +398,31 @@ def test_eval_script_rejects_missing_answers_file(tmp_path):
 
     assert completed.returncode == 1
     assert "answers file not found" in completed.stderr
+
+
+def test_eval_script_rejects_bad_recall_budget(tmp_path):
+    """A negative or NaN recall-loss budget exits non-zero at parse time."""
+    from scripts.eval_prefilter import HELD_OUT_POLICIES, TUNING_POLICIES
+
+    tune_policy = sorted(TUNING_POLICIES)[0]
+    hold_policy = sorted(HELD_OUT_POLICIES)[0]
+    rows = [
+        _fixture_row(tune_policy, 0, "ctx-t", [_candidate("R-1")], []),
+        _fixture_row(hold_policy, 0, "ctx-h", [_candidate("R-2")], []),
+    ]
+    fixtures = tmp_path / "fixtures.jsonl"
+    fixtures.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    outcomes = tmp_path / "outcomes.jsonl"
+    outcomes.write_text(json.dumps({"context_sha256": _sha("ctx-t"), "risk_id": "R-1", "p": 0.5}) + "\n")
+
+    for bad in ("-0.5", "nan"):
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), str(fixtures), str(outcomes), "--max-recall-loss", bad],
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode != 0, bad
+        assert "must be a non-negative number" in completed.stderr, bad
 
 
 def test_eval_script_rejects_empty_answers_file(tmp_path):
@@ -442,8 +478,8 @@ def test_eval_main_in_process(tmp_path, capsys):
     assert payload["chosen_threshold"] in {m["threshold"] for m in payload["sweep"]}
     held = payload["held_out"]
     assert held["candidates"] == 1
-    assert held["latency_p50_ms"] >= 0.0
-    assert held["latency_p95_ms"] >= held["latency_p50_ms"]
+    assert held["latency_p50_ms"] is None
+    assert held["latency_p95_ms"] is None
     assert held["latency_recorded"] is False
     out = capsys.readouterr().out
     assert "chosen_threshold" in out

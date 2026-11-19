@@ -271,6 +271,12 @@ def test_nan_threshold_is_rejected():
             rule_cls(_ProbabilityAssessor({}), threshold=bad)
 
 
+def test_huge_integer_threshold_is_rejected():
+    """A JSON-sized huge int threshold fails by value comparison, not OverflowError."""
+    with pytest.raises(ValueError, match=r"must be in \[0, 1\]"):
+        ThresholdDrop(_ProbabilityAssessor({}), threshold=10**400)
+
+
 def test_boolean_threshold_is_rejected():
     """A boolean threshold raises TypeError, not a silent True == 1."""
     with pytest.raises(TypeError, match="must be a number"):
