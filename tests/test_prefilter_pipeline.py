@@ -2031,8 +2031,20 @@ def test_prefilter_one_chunk_copy_keeps_page_and_section():
         page=7,
         section="Data Governance",
         accepted=[
-            ScoredCandidate(risk_id="R-001", risk_name="Model Bias", risk_description="d", cross_encoder_score=0.9),
-            ScoredCandidate(risk_id="R-002", risk_name="Data Poisoning", risk_description="d", cross_encoder_score=0.8),
+            ScoredCandidate(
+                risk_id="R-001",
+                risk_name="Model Bias",
+                risk_description="d",
+                cross_encoder_score=0.9,
+                selected_by="rank",
+            ),
+            ScoredCandidate(
+                risk_id="R-002",
+                risk_name="Data Poisoning",
+                risk_description="d",
+                cross_encoder_score=0.8,
+                selected_by="rank",
+            ),
         ],
         borderline=[],
         borderline_judged=[],

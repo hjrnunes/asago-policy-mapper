@@ -25,6 +25,7 @@ from asago_policy_mapper.extract.models import (
     _RiskEvidenceList,
 )
 from asago_policy_mapper.extract.pipeline import (
+    PipelineInvariantError,
     _build_result_metadata,
     _build_retrieval_stats,
     _cap_accepted_candidates,
@@ -687,26 +688,21 @@ def test_determine_accepted_by_auto_promoted():
     assert result == "auto_promoted"
 
 
-def test_determine_accepted_by_threshold():
-    c = _candidate()
-    result = determine_accepted_by(
-        c,
-        borderline_judged=[],
-        use_cross_encoder=True,
-        no_judge=False,
-    )
-    assert result == "threshold"
+def test_determine_accepted_by_unstamped_candidate_raises():
+    """An unstamped candidate is an invariant failure, not a fallback.
 
-
-def test_determine_accepted_by_rrf():
+    Retrieval and query generation stamp every accepted candidate with its
+    selection label; a candidate without one never occurs in production.
+    """
     c = _candidate()
-    result = determine_accepted_by(
-        c,
-        borderline_judged=[],
-        use_cross_encoder=False,
-        no_judge=False,
-    )
-    assert result == "rrf"
+    c = c.model_copy(update={"selected_by": None})
+    with pytest.raises(PipelineInvariantError):
+        determine_accepted_by(
+            c,
+            borderline_judged=[],
+            use_cross_encoder=True,
+            no_judge=False,
+        )
 
 
 @pytest.mark.slow
@@ -769,7 +765,14 @@ def test_build_risk_match_rrf_mode():
     assert m.confidence == c.rrf_score
 
 
-def test_build_risk_match_expansion_confidence_null():
+def test_build_risk_match_stamped_candidate_keeps_measured_confidence():
+    """A reranker-stamped candidate keeps its measured score as confidence.
+
+    The accepted_by label does not change the confidence derivation: only
+    the candidate's stamps decide. An expansion stub that was never
+    measured (rerank_source None) is the null case, covered in
+    test_extract_score_semantics.
+    """
     c = _candidate()
     m = build_risk_match(
         c,
@@ -778,7 +781,6 @@ def test_build_risk_match_expansion_confidence_null():
         grounding_confidence="high",
         evidence=[],
     )
-    # an expansion stub was never measured: null confidence, source none
     assert m.confidence == c.cross_encoder_score
     assert m.confidence_source == "cross_encoder"
 
@@ -926,6 +928,7 @@ def test_run_causal_synthesis_populates_fields():
             risk_name="AI Bias",
             risk_description="Systematic bias.",
             confidence=0.85,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[
@@ -978,6 +981,7 @@ def test_run_causal_synthesis_skips_empty_results():
             risk_name="AI Bias",
             risk_description="Bias.",
             confidence=0.85,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="expansion",
             evidence=[
@@ -1010,6 +1014,7 @@ def _causal_risk_and_chunks(risk_ids):
             risk_name=f"Name {risk_id}",
             risk_description="Description.",
             confidence=0.85,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[EvidenceSpan(text="q", document="doc.pdf", chunk_index=0)],

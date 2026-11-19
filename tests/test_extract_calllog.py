@@ -221,7 +221,13 @@ def _grounding_chunk_results(count):
             page=None,
             section=None,
             accepted=[
-                ScoredCandidate(risk_id=f"R-{i:03d}", risk_name="R", risk_description="d", cross_encoder_score=0.9)
+                ScoredCandidate(
+                    risk_id=f"R-{i:03d}",
+                    risk_name="R",
+                    risk_description="d",
+                    cross_encoder_score=0.9,
+                    selected_by="threshold",
+                )
             ],
             borderline=[],
             borderline_judged=[],

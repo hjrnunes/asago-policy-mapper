@@ -10,6 +10,8 @@ tests here pin the model-level contract (step 1) and the setter behaviour
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from asago_policy_mapper.extract.merge import merge_matches
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
@@ -542,7 +544,7 @@ def _pipeline():
 
 
 def test_determine_accepted_by_prefers_selected_by():
-    """determine_accepted_by returns the recorded label, falling back to the legacy rule."""
+    """determine_accepted_by returns the recorded label; a missing label raises."""
     pl = _pipeline()
     stamped = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="rank")
     assert pl.determine_accepted_by(stamped, borderline_judged=[], use_cross_encoder=True, no_judge=False) == "rank"
@@ -551,10 +553,10 @@ def test_determine_accepted_by_prefers_selected_by():
         pl.determine_accepted_by(stamped_qg, borderline_judged=[], use_cross_encoder=True, no_judge=False)
         == "query_gen"
     )
-    # legacy fallback when no label was recorded
+    # an unstamped candidate is an invariant failure, not a fallback
     plain = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d")
-    assert pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=True, no_judge=False) == "threshold"
-    assert pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=False, no_judge=False) == "rrf"
+    with pytest.raises(pl.PipelineInvariantError):
+        pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=True, no_judge=False)
     # judge promotion still wins over the recorded label
     judged = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="rank")
     assert (
