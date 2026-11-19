@@ -102,8 +102,17 @@ class HttpProbabilityAssessor:
 
     def assess(self, question: Question, context: str, cases: Sequence[DecisionCase]) -> AnswerBatch:
         if not cases:
+<<<<<<< HEAD
             return AnswerBatch(answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []})
         answers: dict[str, tuple[Answer, ...]] = {}
+=======
+            # Built inline: a shared dict would let one caller's append leak
+            # into the next empty batch's wire.
+            return AssessmentBatch(
+                outcomes={}, unmatched_ids=(), latency_ms=0.0, wire={"requests": [], "responses": []}
+            )
+        outcomes: dict[str, tuple[Outcome, ...]] = {}
+>>>>>>> 6dac31f (fix(assessors): build the empty-batch wire per call)
         unmatched: list[str] = []
         exchanges: list[dict] = []
         latency_ms = 0.0

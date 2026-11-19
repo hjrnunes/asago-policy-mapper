@@ -1,8 +1,8 @@
 """Tests that the decision extra stays lazy: the default install never imports it.
 
 Note: importing ``asago_policy_mapper.assessors.http_probability`` pulls in
-``extract.decide`` through the package's eager ``extract/__init__``, which
-imports the pipeline and, transitively, ``openai`` (which bundles httpx).
+``extract.screening`` through the package's lazy ``extract/__init__``, which
+can import the pipeline and, transitively, ``openai`` (which bundles httpx).
 That chain predates this lane and is not ours to change. What this lane
 owns is that the assessor module itself never imports httpx at module
 level: the import sits inside the constructor, so the module's own import

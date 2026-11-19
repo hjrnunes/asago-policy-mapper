@@ -578,6 +578,19 @@ def test_empty_cases_return_empty_batch():
     assert batch.exchange == {"requests": [], "responses": []}
 
 
+def test_empty_batch_wire_is_not_shared_between_results():
+    """Appending to one empty batch's wire leaves the next empty batch clean."""
+    assessor = _assessor(lambda request: httpx.Response(200, json=_scores_body()))
+
+    first = assessor.assess(TASK, "context", [])
+    first.wire["requests"].append("not a real request")
+    first.wire["responses"].append("not a real response")
+
+    second = assessor.assess(TASK, "context", [])
+
+    assert second.wire == {"requests": [], "responses": []}
+
+
 def test_scores_after_unmatched_row_still_apply():
     """A non-dict row in the scores list is skipped, and later rows still score."""
     body = {"scores": ["garbage", {"id": "R-001", "p": 0.6}]}
