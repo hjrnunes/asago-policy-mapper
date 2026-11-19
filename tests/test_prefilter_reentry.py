@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from asago_policy_mapper.extract.models import RetrievalConfig, ScoredCandidate
-from asago_policy_mapper.extract.pipeline import Prefilter, run_extraction
+from asago_policy_mapper.extract.pipeline import GroundingPrefilter, run_extraction
 from asago_policy_mapper.extract.screening import (
     Answer,
     AnswerBatch,
@@ -237,7 +237,7 @@ def test_prefilter_reentry_counted(mock_config, tmp_path, monkeypatch):
 
     with_filter = run_extraction(
         **args,
-        prefilter=Prefilter(
+        prefilter=GroundingPrefilter(
             assessor=ScriptedAssessor({"unauthorized-processing": ProbabilityAnswer(0.02)}), rule=ThresholdRule()
         ),
     )
@@ -282,7 +282,7 @@ def test_prefilter_reentry_absent_without_drops(mock_config, tmp_path, monkeypat
         config=mock_config,
         risks=VARIANT_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=ScriptedAssessor({}), rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=ScriptedAssessor({}), rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -330,7 +330,9 @@ def test_prefilter_reentry_zero_when_nothing_reproposed(mock_config, tmp_path, m
         config=mock_config,
         risks=plain_risks,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=ScriptedAssessor({"R-001": ProbabilityAnswer(0.01)}), rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(
+            assessor=ScriptedAssessor({"R-001": ProbabilityAnswer(0.01)}), rule=ThresholdRule()
+        ),
         ocr=False,
     )
 
@@ -403,7 +405,7 @@ def test_prefilter_reentry_parents_zero_when_expansion_empty(mock_config, tmp_pa
         config=mock_config,
         risks=variant_risks,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(
+        prefilter=GroundingPrefilter(
             assessor=ScriptedAssessor({"unauthorized-processing": ProbabilityAnswer(0.01)}), rule=ThresholdRule()
         ),
         ocr=False,

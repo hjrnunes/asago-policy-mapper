@@ -2,7 +2,7 @@
 
 ``--prefilter-profile PATH`` loads a YAML file with the
 ``ProbabilityAnswerEndpoint`` fields plus ``threshold`` and turns it into the
-pipeline's ``Prefilter``. The API key comes from the environment
+pipeline's ``GroundingPrefilter``. The API key comes from the environment
 variable the profile names, never from the profile itself. The option's
 own environment variable is ``POLICY_MAPPER_PREFILTER_PROFILE``.
 Validation fails when the profile is combined with ``--no-grounding``.
@@ -227,7 +227,7 @@ def test_build_prefilter_rejects_non_mapping(tmp_path):
 
 
 def test_extract_passes_prefilter_to_pipeline(tmp_path, profile_path, monkeypatch):
-    """The extract command builds the Prefilter and hands it to run_extraction."""
+    """The extract command builds the GroundingPrefilter and hands it to run_extraction."""
     from unittest.mock import patch
 
     from asago_policy_mapper.extract import pipeline
