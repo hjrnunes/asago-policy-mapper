@@ -70,6 +70,17 @@ class EvidenceSpan(BaseModel):
     cross_encoder_score: float = 0.0
     verification: Literal["verified", "normalized", "not_found"] | None = None
     found_chunk_index: int | None = None
+    # Length of the quote in characters, recorded so consumers can weigh
+    # short verified quotes (a one-word quote verifies trivially) without
+    # re-deriving it from the serialized text. Constructed spans fill it
+    # automatically when not set explicitly.
+    text_length: int | None = None
+
+    @model_validator(mode="after")
+    def _fill_text_length(self) -> "EvidenceSpan":
+        if self.text_length is None:
+            self.text_length = len(self.text)
+        return self
 
     _reject_nan_score = field_validator("cross_encoder_score")(_reject_nan)
 

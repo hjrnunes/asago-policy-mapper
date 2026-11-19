@@ -1171,6 +1171,49 @@ def test_group_quote_uses_actual_document():
     assert e.section == "Security"
 
 
+def test_evidence_span_records_quote_length():
+    """Each span records its quote's character length.
+
+    A one-character quote verifies trivially, so the length travels with
+    the span for consumers that weigh short verified quotes. The length
+    fills automatically at construction and at deserialization.
+    """
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["race"],
+            ),
+        ]
+    )
+
+    chunks = _make_meta_chunks([("Monitoring for race bias in outcomes.", "a.md", 1, "One")])
+    risks = [
+        {"risk_id": "R-001", "risk_name": "Bias", "risk_description": "Model bias risk."},
+    ]
+
+    result = ground_risk_group(
+        chunks=chunks,
+        chunk_indices=[0],
+        risks=risks,
+        client=mock_client,
+        model="test-model",
+        document="a.md",
+    )
+
+    evidence, _ = result["R-001"]
+    assert evidence[0].text_length == len("race")
+    assert evidence[0].verification == "verified"
+
+    # Deserialized spans fill the length too, so serialized output never
+    # carries a stale zero.
+    restored = EvidenceSpan.model_validate(evidence[0].model_dump())
+    assert restored.text_length == len("race")
+
+
 def test_group_quote_normalized_match_finds_chunk():
     """A group quote matching only after normalization still finds its chunk."""
     mock_client = MagicMock()
