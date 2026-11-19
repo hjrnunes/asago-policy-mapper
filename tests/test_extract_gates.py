@@ -6,6 +6,8 @@ keeps the candidate with a bypass reason, so a broken provider never
 silently loses risks.
 """
 
+import pytest
+
 from asago_policy_mapper.extract.decide import (
     AssessmentBatch,
     Categorical,
@@ -259,3 +261,43 @@ def test_unavailable_outcome_dominates_keeps():
 
     assert decisions[0].keep is True
     assert decisions[0].reason == "bypass:timeout"
+
+
+def test_nan_threshold_is_rejected():
+    """A NaN or out-of-range threshold raises ValueError at construction."""
+    rule_cls = ThresholdDrop
+    for bad in (float("nan"), -0.1, 1.1, float("inf")):
+        with pytest.raises(ValueError, match=r"must be in \[0, 1\]"):
+            rule_cls(_ProbabilityAssessor({}), threshold=bad)
+
+
+def test_boolean_threshold_is_rejected():
+    """A boolean threshold raises TypeError, not a silent True == 1."""
+    with pytest.raises(TypeError, match="must be a number"):
+        ThresholdDrop(_ProbabilityAssessor({}), threshold=True)
+
+
+def test_nan_probability_keeps_with_invalid_reason():
+    """A NaN probability cannot be compared, so the case keeps deterministically.
+
+    Without this, max() over a NaN is order-dependent and the same batch
+    could keep or drop depending on outcome order.
+    """
+    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    batch = _batch({"R-001": (Probability(float("nan")),), "R-002": (Probability(0.01), Probability(float("nan")))})
+
+    decisions = rule.decide(_cases("R-001", "R-002"), batch)
+
+    for decision in decisions:
+        assert decision.keep is True
+        assert decision.reason == "bypass:invalid"
+
+
+def test_keep_reason_uses_repr():
+    """A kept probability that :g formatting would round keeps its exact value."""
+    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    batch = _batch({"R-001": (Probability(0.10000001),)})
+    decisions = rule.decide(_cases("R-001"), batch)
+
+    assert decisions[0].keep is True
+    assert decisions[0].reason == "p=0.10000001"
