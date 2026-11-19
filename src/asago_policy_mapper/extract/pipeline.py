@@ -476,8 +476,8 @@ def _run_judge(
                 cr.borderline_judged = list(cr.borderline)
                 cr.accepted.extend(cr.borderline)
     elif plan.judge == "llm":
-        judge_contexts = _judge_contexts(chunks, retrieval, chunk_contexts)
         if judge_tasks:
+            judge_contexts = _judge_contexts(chunks, retrieval, chunk_contexts, judge_tasks)
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
                     pool.submit(
@@ -499,14 +499,17 @@ def _run_judge(
                     chunk_results[idx].accepted.extend(judged)
 
 
-def _judge_contexts(chunks, retrieval, chunk_contexts):
+def _judge_contexts(chunks, retrieval, chunk_contexts, judge_tasks):
     """Pick the context list the judge reads.
 
     A positive ``judge_context_tokens`` builds judge-only contexts with
-    that budget; the grounding and prefilter contexts are untouched.
+    that budget, and only for the chunks that have borderline candidates
+    to judge; the grounding and prefilter contexts are untouched. Chunks
+    with nothing to judge get an empty string, which no judge task reads.
     """
     if retrieval.judge_context_tokens > 0:
-        return build_chunk_contexts(chunks, max_context_tokens=retrieval.judge_context_tokens)
+        indexes = {i for i, _cr in judge_tasks}
+        return build_chunk_contexts(chunks, max_context_tokens=retrieval.judge_context_tokens, only=indexes)
     return chunk_contexts
 
 
