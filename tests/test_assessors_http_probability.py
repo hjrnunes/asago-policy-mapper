@@ -774,6 +774,22 @@ def test_redaction_walks_lists_and_dicts(monkeypatch):
     assert dumped.count("[redacted]") == 2
 
 
+def test_redaction_covers_dict_keys(monkeypatch):
+    """An endpoint that echoes the credential as a dict KEY gets that key redacted too."""
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"secret-value-123": "value", "scores": [{"id": "R-001", "p": 0.5}]})
+
+    assessor = _assessor(handler)
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+
+    dumped = json.dumps(batch.wire)
+    assert "secret-value-123" not in dumped
+    assert "[redacted]" in dumped
+    assert _p_value(batch.outcomes["R-001"][0]) == 0.5
+
+
 def test_unmatched_row_after_invalid_id_is_still_unmatched():
     """Skipping an invalid id's later rows does not skip later unmatched rows."""
     body = {

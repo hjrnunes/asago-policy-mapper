@@ -283,14 +283,16 @@ def _reduce_scores(scores: Sequence[object], case_ids: frozenset[str]) -> tuple[
 def _redact(value: object, secret: str) -> object:
     """Replace every occurrence of ``secret`` in a decoded response with a marker.
 
-    An empty secret (no key configured) returns the value unchanged.
+    An empty secret (no key configured) returns the value unchanged. The
+    walk covers dict keys as well as values, because an endpoint can echo
+    the credential back as a key.
     """
     if not secret:
         return value
     if isinstance(value, str):
         return value.replace(secret, _REDACTED)
     if isinstance(value, dict):
-        return {key: _redact(item, secret) for key, item in value.items()}
+        return {_redact(key, secret): _redact(item, secret) for key, item in value.items()}
     if isinstance(value, list):
         return [_redact(item, secret) for item in value]
     return value
