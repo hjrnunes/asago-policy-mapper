@@ -10,11 +10,28 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from asago_policy_mapper.extract.attribute import ground_and_extract_evidence
-from asago_policy_mapper.extract.models import ScoredCandidate, _JudgeVerdict, _JudgeVerdicts
+from asago_policy_mapper.extract.attribute import (
+    ground_and_extract_evidence,
+    ground_risk_group,
+    ground_variants,
+    synthesize_causal_chain,
+)
+from asago_policy_mapper.extract.models import (
+    EvidenceSpan,
+    RetrievalScores,
+    RiskMatch,
+    ScoredCandidate,
+    _CausalChain,
+    _CausalChains,
+    _JudgeVerdict,
+    _JudgeVerdicts,
+    _RiskEvidence,
+    _RiskEvidenceList,
+)
 from asago_policy_mapper.extract.querygen import ChunkGroup, generate_queries
 from asago_policy_mapper.extract.retrieve import judge_borderline
 from asago_policy_mapper.llm import (
+    STAGES,
     LLMConfig,
     TokenTracker,
     _track_completion,
@@ -79,10 +96,10 @@ class TestLlmStage:
 
     def test_llm_stage_restores_previous_stage_on_exit(self):
         assert current_llm_stage() is None
-        with llm_stage("outer"):
-            with llm_stage("inner"):
-                assert current_llm_stage() == "inner"
-            assert current_llm_stage() == "outer"
+        with llm_stage("grounding"):
+            with llm_stage("expansion_grounding"):
+                assert current_llm_stage() == "expansion_grounding"
+            assert current_llm_stage() == "grounding"
         assert current_llm_stage() is None
 
     def test_current_llm_stage_outside_context_is_none(self):
@@ -166,8 +183,6 @@ class TestCallSiteStages:
 
     def test_ground_and_extract_evidence_sets_grounding_stage(self):
         client, tracker = self._tracked_client()
-        from asago_policy_mapper.extract.models import _RiskEvidence, _RiskEvidenceList
-
         client.create_with_completion.return_value = (
             _RiskEvidenceList(
                 items=[_RiskEvidence(risk_id="R-001", grounded=True, confidence="high", quotes=["text"])]
@@ -188,22 +203,101 @@ class TestCallSiteStages:
 
     def test_generate_queries_sets_query_gen_stage(self):
         client, tracker = self._tracked_client()
-        from types import SimpleNamespace as NS
-
         client.create_with_completion.return_value = (
-            NS(queries=["q1"]),
+            SimpleNamespace(queries=["q1"]),
             SimpleNamespace(usage=_usage()),
         )
-        chunks = [NS(text="some text", source="doc.md", page=None, section=None, index=0)]
+        chunks = [SimpleNamespace(text="some text", source="doc.md", page=None, section=None, index=0)]
         generate_queries(chunks, [ChunkGroup(chunk_indices=[0], section=None)], client, "test-model")
         assert "query_gen" in tracker.per_stage
 
+    def test_ground_variants_sets_variant_grounding_stage(self):
+        client, tracker = self._tracked_client()
+        client.create_with_completion.return_value = (
+            _RiskEvidenceList(items=[_RiskEvidence(risk_id="R---a", grounded=True, confidence="low", quotes=["text"])]),
+            SimpleNamespace(usage=_usage()),
+        )
+        ground_variants(
+            chunk_text="text",
+            parent_id="R",
+            parent_name="Parent",
+            parent_description="d",
+            variants=[{"risk_id": "R---a", "name": "A", "description": "d"}],
+            client=client,
+            model="test-model",
+            document="doc.pdf",
+            chunk_index=0,
+        )
+        assert "variant_grounding" in tracker.per_stage
 
-class TestStageNamesMatchSpec:
-    @pytest.mark.parametrize(
-        "stage",
-        ["query_gen", "judge", "grounding", "variant_grounding", "expansion_grounding", "causal_synthesis"],
-    )
+    def test_ground_risk_group_sets_expansion_grounding_stage(self):
+        client, tracker = self._tracked_client()
+        client.create_with_completion.return_value = (
+            _RiskEvidenceList(
+                items=[_RiskEvidence(risk_id="R-001", grounded=True, confidence="high", quotes=["text"])]
+            ),
+            SimpleNamespace(usage=_usage()),
+        )
+        chunks = [SimpleNamespace(text="some text")]
+        ground_risk_group(
+            chunks=chunks,
+            chunk_indices=[0],
+            risks=[{"risk_id": "R-001", "risk_name": "Bias", "risk_description": "d"}],
+            client=client,
+            model="test-model",
+            document="doc.pdf",
+        )
+        assert "expansion_grounding" in tracker.per_stage
+
+    def test_synthesize_causal_chain_sets_causal_synthesis_stage(self):
+        client, tracker = self._tracked_client()
+        client.create_with_completion.return_value = (
+            _CausalChains(
+                items=[_CausalChain(threat="t", threat_source="ts", vulnerability="v", consequence="c", impact="i")]
+            ),
+            SimpleNamespace(usage=_usage()),
+        )
+        risk_match = RiskMatch(
+            risk_id="R-001",
+            risk_name="Bias",
+            risk_description="d",
+            taxonomy="t",
+            confidence=0.9,
+            grounding_confidence="high",
+            accepted_by="threshold",
+            evidence=[EvidenceSpan(text="text", document="doc.pdf", chunk_index=0)],
+            scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.05),
+        )
+        synthesize_causal_chain(risk_match, {0: "text"}, client, "test-model")
+        assert "causal_synthesis" in tracker.per_stage
+
+
+class TestStageNames:
+    def test_stages_constant_is_the_spec_set(self):
+        """STAGES holds exactly the six pipeline stages, so the constant can drift nowhere."""
+        assert STAGES == (
+            "query_gen",
+            "judge",
+            "grounding",
+            "variant_grounding",
+            "expansion_grounding",
+            "causal_synthesis",
+        )
+
+    @pytest.mark.parametrize("stage", STAGES)
     def test_spec_stage_names_are_accepted(self, stage):
         with llm_stage(stage):
             assert current_llm_stage() == stage
+
+    def test_unknown_stage_name_is_rejected(self):
+        with pytest.raises(ValueError, match="unknown stage"):
+            with llm_stage("grounding-legacy"):
+                pass
+        assert current_llm_stage() is None
+
+    def test_rejection_restores_previous_stage(self):
+        with llm_stage("judge"):
+            with pytest.raises(ValueError):
+                with llm_stage("not-a-stage"):
+                    pass
+            assert current_llm_stage() == "judge"

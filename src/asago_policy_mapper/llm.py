@@ -161,6 +161,18 @@ class LLMConfig:
 
 _stage_local = threading.local()
 
+# The pipeline stages a worker can mark its calls with. llm_stage rejects
+# names outside this tuple, so a typo or an unregistered stage fails loudly
+# instead of silently splitting token usage into a wrong bucket.
+STAGES = (
+    "query_gen",
+    "judge",
+    "grounding",
+    "variant_grounding",
+    "expansion_grounding",
+    "causal_synthesis",
+)
+
 
 def current_llm_stage() -> str | None:
     """Return the calling thread's pipeline stage, or None outside one."""
@@ -175,8 +187,12 @@ def llm_stage(name: str):
     worker's token usage and incidents attribute to the call site that
     made the call, never to a concurrently running one. Set the stage
     inside the worker, around the ``client.chat.completions.create``
-    call; nesting restores the previous stage on exit.
+    call; nesting restores the previous stage on exit. The name must be
+    one of ``STAGES``; anything else raises ``ValueError`` before the
+    stage is set, and the previous stage stays intact.
     """
+    if name not in STAGES:
+        raise ValueError(f"unknown stage {name!r}: expected one of {', '.join(STAGES)}")
     previous = current_llm_stage()
     _stage_local.stage = name
     try:
