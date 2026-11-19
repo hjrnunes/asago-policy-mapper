@@ -1,4 +1,4 @@
-"""Pipeline tests for the opt-in pre-grounding filter (asago-uzfb1.7 step 2).
+"""Pipeline tests for the opt-in pre-grounding filter.
 
 The filter runs once per chunk over ``cr.accepted`` after the judge, uses
 exactly the grounding context (``chunk_contexts[i]``), and builds
@@ -9,6 +9,7 @@ sent with ``is_variant_parent=True``; a dropped parent never reaches
 variant grounding.
 """
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -1771,8 +1772,8 @@ def test_prefilter_assessor_without_optional_attributes_records_defaults(mock_co
     monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _EmptyIndex())
     monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
 
-    # No assessor_id, no offsite, no endpoint: the metadata defaults apply.
-    bare = SimpleNamespace(assess=lambda task, context, cases: None, emits=frozenset())
+    # No assessor_id, no sends_offsite, no endpoint: the metadata defaults apply.
+    bare = SimpleNamespace(assess=lambda question, context, cases: None, answer_types=frozenset())
     doc = tmp_path / "p.md"
     doc.write_text(DOC)
     result = run_extraction(
@@ -2050,3 +2051,150 @@ def test_prefilter_stage_matching_context_is_passed_verbatim():
     # The None chunk is skipped (no context asked), and position 1 gets
     # its own context verbatim.
     assert seen == ["chunk-one-context"]
+
+
+# --- fail-open on assessor exceptions ---
+
+
+def test_prefilter_assessor_exception_keeps_everything(mock_config, tmp_path, monkeypatch, caplog):
+    """An assess() that raises keeps all candidates and records the failure.
+
+    The filter must never lose risks to a broken assessor: the exception
+    becomes a ``NoAnswer("error", ...)`` answer per case, which the
+    keep-on-no-answer rule keeps, and a warning carries the
+    assessor id, chunk index and error out of the run. The recorded
+    detail is redacted against the endpoint's key, the same discipline
+    the assessor applies to its exchange responses.
+    """
+    import logging
+    from types import SimpleNamespace as _NS
+
+    from asago_policy_mapper.extract import pipeline
+
+    monkeypatch.setenv("PROB_API_KEY", "sentinel-secret-key")
+
+    class ExplodingAssessor(ScriptedAssessor):
+        def __init__(self, script):
+            super().__init__(script, assessor_id="http-probability/test")
+            self.endpoint = _NS(api_key_env="PROB_API_KEY")
+
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            raise RuntimeError("request failed with key sentinel-secret-key in it")
+
+    grounded_ids: list[str] = []
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    def fake_ground(
+        chunk_text,
+        candidates,
+        client,
+        model,
+        document,
+        chunk_index,
+        page=None,
+        section=None,
+        call_collector=None,
+        max_batch_size=0,
+    ):
+        grounded_ids.extend(c.risk_id for c in candidates)
+        return {c.risk_id: ([], "medium") for c in candidates}
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", fake_ground)
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    with caplog.at_level(logging.WARNING, logger="asago_policy_mapper.extract.pipeline"):
+        result = run_extraction(
+            documents=[doc],
+            client=MagicMock(),
+            config=mock_config,
+            risks=MOCK_RISKS,
+            retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+            prefilter=Prefilter(assessor=ExplodingAssessor({}), rule=ThresholdRule()),
+            ocr=False,
+        )
+
+    # Every candidate still reached grounding (fail-open, not fail-closed).
+    for risk in MOCK_RISKS:
+        assert risk.id in grounded_ids
+    # Nothing was dropped.
+    assert [fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"] == []
+    # The warning names the assessor, the chunk and the error.
+    warnings = [
+        r for r in caplog.records if r.levelno == logging.WARNING and "request failed with key" in r.getMessage()
+    ]
+    assert warnings, f"no warning recorded in {caplog.records}"
+    message = warnings[0].getMessage()
+    assert "http-probability/test" in message
+    assert "chunk 0" in message
+    # The decision log records the failure the same way an unanswered
+    # case is recorded: every item keeps with a no_answer reason, and the
+    # detail carries no credential — the exception message is redacted
+    # against the endpoint's key.
+    decision = result.decision_calls[0].decision
+    assert len(decision.items) == len(MOCK_RISKS)
+    assert all(item.keep for item in decision.items)
+    assert all(item.reason == "no_answer:error" for item in decision.items)
+    serialized = json.dumps(result.model_dump())
+    assert "sentinel-secret-key" not in serialized
+    detail = decision.items[0].answers[0]["detail"]
+    assert "sentinel-secret-key" not in detail
+    assert "[redacted]" in detail
+
+
+def test_prefilter_assessor_exception_survives_serialization(mock_config, tmp_path, monkeypatch):
+    """The failure-built batch round-trips through the result model."""
+
+    class ExplodingAssessor(ScriptedAssessor):
+        def assess(self, question, context, cases):
+            raise RuntimeError("boom")
+
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=ExplodingAssessor({}), rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    data = result.model_dump()
+    assert data["decision_calls"]
+    restored = result.model_validate(data)
+    assert restored.decision_calls[0].decision.items
+    assert all(item.keep for item in restored.decision_calls[0].decision.items)

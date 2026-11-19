@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -43,8 +44,10 @@ from asago_policy_mapper.extract.retrieve import (
     retrieve_chunk,
 )
 from asago_policy_mapper.extract.screening import (
+    AnswerBatch,
     Decision,
     DecisionCase,
+    NoAnswer,
     ProbabilityAnswer,
     Question,
     answer_payloads,
@@ -1057,7 +1060,33 @@ def _prefilter_one_chunk(
     shrinks, and only on the copy.
     """
     cases = _prefilter_cases(cr, index)
-    assessment = prefilter.assessor.assess(PREFILTER_TASK, context, cases)
+    try:
+        assessment = prefilter.assessor.assess(PREFILTER_TASK, context, cases)
+    except Exception as e:
+        # Fail-open: the filter must never lose risks to a broken
+        # assessor. Every case keeps, with the failure recorded the same
+        # way an unanswered case is. The detail is redacted against
+        # the endpoint's key the same way the assessor redacts its exchange
+        # responses, so an exception message quoting a credential never
+        # reaches the serialized result.
+        from asago_policy_mapper.assessors.http_probability import _redact
+
+        api_key_env = getattr(getattr(prefilter.assessor, "endpoint", None), "api_key_env", None)
+        secret = os.environ.get(api_key_env, "") if api_key_env else ""
+        logger.warning(
+            "Prefilter assessor %s failed on chunk %s; keeping all candidates: %s",
+            getattr(prefilter.assessor, "assessor_id", "<unknown>"),
+            cr.chunk_index,
+            e,
+        )
+        redacted = _redact(str(e), secret)
+        detail = redacted if isinstance(redacted, str) else str(e)
+        assessment = AnswerBatch(
+            answers={c.risk_id: (NoAnswer("error", detail),) for c in cases},
+            unmatched_ids=(),
+            latency_ms=0.0,
+            exchange=None,
+        )
     decisions = prefilter.rule.decide(cases, assessment)
     keep_ids = {d.risk_id for d in decisions if d.keep}
     decision_by_id = {d.risk_id: d for d in decisions}
