@@ -404,16 +404,32 @@ def _build_provider_prefilter(provider: str, profile: dict, path: Path):
     the overrides and the threshold. The remaining keys validate with the
     same rules as the generic profile (minus the required base_url/model/
     api_key_env, which defaults fill), and unknown keys still fail loudly.
+    The laya arm accepts only the fields it uses: it runs in process, so
+    URL, credential and timeout fields would be silently ignored.
     """
     from asago_policy_mapper.extract.gates import ThresholdDrop
     from asago_policy_mapper.extract.pipeline import Prefilter
 
-    _validate_prefilter_numeric(profile, "timeout_s", path, minimum=0.0)
+    _LAYA_UNSUPPORTED_FIELDS = ("base_url", "api_key_env", "timeout_s")
+    if provider == "laya":
+        ignored = [key for key in _LAYA_UNSUPPORTED_FIELDS if key in profile]
+        if ignored:
+            _fail_validation(
+                f"--prefilter-profile {path}: provider 'laya' runs in process and accepts none of "
+                f"{', '.join(_LAYA_UNSUPPORTED_FIELDS)}; remove {', '.join(sorted(ignored))}"
+            )
+    else:
+        _validate_prefilter_numeric(profile, "timeout_s", path, minimum=0.0)
     _validate_prefilter_numeric(profile, "max_batch", path, minimum=1.0)
     threshold = _validate_prefilter_threshold(profile.pop("threshold", None), path)
-    for key in ("base_url", "model", "api_key_env"):
-        if key in profile:
-            _validate_prefilter_strings(profile, (key,), path)
+    if provider != "laya":
+        for key in ("base_url", "model", "api_key_env"):
+            if key in profile:
+                _validate_prefilter_strings(profile, (key,), path)
+    elif "model" in profile:
+        # The laya arm uses the model field (the checkpoint id) but none
+        # of the other endpoint fields.
+        _validate_prefilter_strings(profile, ("model",), path)
 
     if provider == "jev":
         from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
@@ -422,6 +438,7 @@ def _build_provider_prefilter(provider: str, profile: dict, path: Path):
             endpoint = JevProbabilityEndpoint(**profile)
         except TypeError as e:
             _fail_validation(f"--prefilter-profile {path} has invalid fields: {e}")
+        _require_prefilter_api_key(endpoint, path)
         try:
             assessor: object = JevProbabilityAssessor(endpoint)
         except ImportError as e:
@@ -440,14 +457,45 @@ def _build_provider_prefilter(provider: str, profile: dict, path: Path):
             assessor = LayaProbabilityAssessor(laya_endpoint)
         except ImportError as e:
             _fail_validation(f"--prefilter-profile provider 'laya' needs laya-mlx installed: {e}")
-        except OSError as e:
-            # Checkpoint-load failures (typo'd model, offline with no cache)
-            # raise huggingface_hub errors that subclass OSError.
+        except (OSError, ValueError, RuntimeError) as e:
+            # Checkpoint-load failures raise huggingface_hub errors that
+            # subclass OSError (typo'd model, offline with no cache) or
+            # ValueError/RuntimeError from a corrupt checkpoint config.
             _fail_validation(
                 f"--prefilter-profile provider 'laya' could not load checkpoint {laya_endpoint.model!r}: {e}"
             )
     rule = ThresholdDrop(assessor, threshold)
     return Prefilter(assessor=assessor, rule=rule)
+
+
+def _require_prefilter_api_key(endpoint, path: Path):
+    """Fail at load when an offsite endpoint names an unset credential.
+
+    Sending policy text offsite without authentication cannot work: every
+    batch would fail and the filter would silently keep everything. The
+    key itself is read from the named environment variable at runtime,
+    never from the profile.
+    """
+    import os
+    from urllib.parse import urlsplit
+
+    from asago_policy_mapper.assessors.http_probability import _is_local_host
+
+    host = None
+    if isinstance(endpoint.base_url, str):
+        try:
+            host = urlsplit(endpoint.base_url).hostname
+        except ValueError:
+            # A malformed URL cannot name a local host, so the key rule
+            # applies; the assessor's own parse reports the bad URL.
+            host = None
+    if _is_local_host(host):
+        return
+    if not os.environ.get(endpoint.api_key_env):
+        _fail_validation(
+            f"--prefilter-profile {path}: {endpoint.api_key_env} is not set, but the endpoint "
+            f"at {endpoint.base_url} is offsite; set the variable before running"
+        )
 
 
 def _build_retrieval_config(
