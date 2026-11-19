@@ -719,24 +719,32 @@ class _RecordingTracker:
     calls = 3
 
 
-def _summary_plan(no_judge, no_grounding, no_cross_encoder):
+def _summary_plan(no_judge, no_grounding, no_cross_encoder, colbert_model=None):
     retrieval = RetrievalConfig(
-        query_gen=False, no_judge=no_judge, no_grounding=no_grounding, use_cross_encoder=not no_cross_encoder
+        query_gen=False,
+        no_judge=no_judge,
+        no_grounding=no_grounding,
+        use_cross_encoder=not no_cross_encoder,
+        colbert_model=colbert_model,
     )
     return resolve_plan(retrieval, prefilter=False, explicit=frozenset())
 
 
 @pytest.mark.parametrize(
-    "no_judge,no_grounding,no_cross_encoder,expected_summary",
+    "no_judge,no_grounding,no_cross_encoder,colbert_model,expected_summary",
     [
-        (True, True, False, "  3 auto-accepted (IR-only, no LLM stages)"),
-        (False, True, False, "  3 auto-accepted, 1 LLM-judged (no grounding)"),
-        (False, False, True, "  3 RRF-accepted, 2 grounding-filtered (no cross-encoder)"),
-        (False, False, False, "  3 auto-accepted, 1 LLM-judged, 2 grounding-filtered"),
+        (True, True, False, None, "  3 auto-accepted (IR-only, no LLM stages)"),
+        (False, True, False, None, "  3 auto-accepted, 1 LLM-judged (no grounding)"),
+        (False, False, True, None, "  3 auto-accepted, 2 grounding-filtered (no cross-encoder)"),
+        (False, False, False, None, "  3 auto-accepted, 1 LLM-judged, 2 grounding-filtered"),
+        # ColBERT replaces the cross-encoder, so the rerank label is
+        # "colbert", not "none": the branch must key on the judge mode,
+        # not the reranker, to land on the no-judge line.
+        (False, False, True, "colbert-ir", "  3 auto-accepted, 2 grounding-filtered (no cross-encoder)"),
     ],
 )
 def test_write_extraction_outputs_summary_lines(
-    tmp_path, capsys, no_judge, no_grounding, no_cross_encoder, expected_summary
+    tmp_path, capsys, no_judge, no_grounding, no_cross_encoder, colbert_model, expected_summary
 ):
     from asago_policy_mapper.cli import _write_extraction_outputs
 
@@ -748,7 +756,7 @@ def test_write_extraction_outputs_summary_lines(
         result_data,
         tmp_path,
         output_format="json",
-        plan=_summary_plan(no_judge, no_grounding, no_cross_encoder),
+        plan=_summary_plan(no_judge, no_grounding, no_cross_encoder, colbert_model),
         tracker=_RecordingTracker(),
     )
 
