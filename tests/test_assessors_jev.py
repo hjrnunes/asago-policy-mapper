@@ -636,6 +636,48 @@ def test_error_object_null_collapses_to_a_stable_detail():
     assert batch.answers["R-001"][0].detail == "endpoint returned an error object"
 
 
+def test_fields_sent_describes_the_jev_exchange():
+    """The mapping names the fields its request actually carries.
+
+    ``metadata.prefilter.fields_sent`` reports the real exchange, not the
+    generic shape: the Jev request embeds the fixed question and the
+    task's criterion inside each question's instructions, alongside the
+    chunk context and the case's name and description.
+    """
+    assessor = _assessor(lambda request: httpx.Response(200, json=_jev_body(("R-001", 0.5))))
+
+    assert assessor.fields_sent == (
+        "chunk_context",
+        "question",
+        "criterion",
+        "risk_name",
+        "risk_description",
+    )
+
+
+def test_metadata_fields_sent_uses_the_assessor_declaration():
+    """The pipeline reads the assessor's declaration for fields_sent.
+
+    A declared ``fields_sent`` attribute replaces the generic default in
+    the metadata block, so a run using the Jev mapping reports what the
+    Jev request sends.
+    """
+    from asago_policy_mapper.extract.pipeline import GroundingPrefilter, _prefilter_metadata
+    from asago_policy_mapper.extract.screening import DropThreshold
+
+    endpoint = _endpoint()
+    assessor = JevProbabilityAssessor(endpoint, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    block = _prefilter_metadata(GroundingPrefilter(assessor=assessor, rule=DropThreshold(assessor, 0.10)))
+
+    assert block["fields_sent"] == [
+        "chunk_context",
+        "question",
+        "criterion",
+        "risk_name",
+        "risk_description",
+    ]
+
+
 def test_wire_keeps_request_on_timeout_and_error():
     """Timeout and error batches still record the exact Jev request body in the wire."""
     endpoint = _endpoint(timeout_s=0.05)
