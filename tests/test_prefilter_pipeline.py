@@ -2132,6 +2132,7 @@ def test_prefilter_assessor_exception_keeps_everything(mock_config, tmp_path, mo
     for risk in MOCK_RISKS:
         assert risk.id in grounded_ids
     # Nothing was dropped.
+    assert result.retrieval_stats.prefilter_dropped == 0
     assert [fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"] == []
     # The warning names the assessor, the chunk and the error.
     warnings = [
