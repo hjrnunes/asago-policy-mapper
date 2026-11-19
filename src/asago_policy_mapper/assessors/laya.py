@@ -29,11 +29,11 @@ forward pass's question count (and so per-pass latency), not to buy state
 room.
 
 **Dependency.** laya-mlx is installed ad hoc into the venv
-(``VIRTUAL_ENV=<venv> uv pip install laya-mlx``) and never enters
-``pyproject.toml`` or ``uv.lock`` — the mutmut precedent. It is imported
-lazily inside the constructor (like httpx in the HTTP adapters), so
-imports of this module never require the install; ``uv sync`` removes it,
-so reinstall after syncing.
+(``VIRTUAL_ENV=<venv> UV_NO_CONFIG=1 uv pip install laya-mlx``) and never
+enters ``pyproject.toml`` or ``uv.lock`` — the mutmut precedent. It is
+imported lazily inside the constructor (like httpx in the HTTP adapters),
+so imports of this module never require the install; ``uv sync`` removes
+it, so reinstall after syncing.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint, _as_float
+from asago_policy_mapper.assessors.replay import context_sha256
 from asago_policy_mapper.extract.decide import (
     AssessmentBatch,
     BinaryAssessor,
@@ -75,7 +76,7 @@ not shrink with fewer questions per pass."""
 
 _LAYA_INSTALL_HINT = (
     "laya-mlx is an ad-hoc, out-of-band install (never in pyproject/uv.lock); "
-    "reinstall with: VIRTUAL_ENV=<venv> uv pip install laya-mlx"
+    "reinstall with: VIRTUAL_ENV=<venv> UV_NO_CONFIG=1 uv pip install laya-mlx"
 )
 
 
@@ -125,7 +126,11 @@ class LayaProbabilityAssessor(BinaryAssessor):
 
     def assess(self, task: BinaryTask, context: str, cases: Sequence[DecisionCase]) -> AssessmentBatch:
         if not cases:
-            return AssessmentBatch(outcomes={}, unmatched_ids=(), latency_ms=0.0, wire=_EMPTY_WIRE.copy())
+            # Built inline, never shared: a caller mutating one result's
+            # lists must not change what a later assessment records.
+            return AssessmentBatch(
+                outcomes={}, unmatched_ids=(), latency_ms=0.0, wire={"requests": [], "responses": []}
+            )
         outcomes: dict[str, tuple[Outcome, ...]] = {}
         unmatched: list[str] = []
         wires: list[dict] = []
@@ -174,17 +179,27 @@ class LayaProbabilityAssessor(BinaryAssessor):
         self, task: BinaryTask, context: str, cases: Sequence[DecisionCase]
     ) -> tuple[dict, dict[str, Outcome], list[str]]:
         questions = {c.risk_id: self._question(task, c) for c in cases}
+        # The state is not recorded verbatim (it is the whole chunk context);
+        # its digest and length let a run match the recorded request against
+        # the grounding context it filtered, the same key replay uses.
         request_body = {
             "model": self.endpoint.model,
+            "state_sha256": context_sha256(context),
             "state_chars": len(context),
+            "summary": True,
             "questions": questions,
         }
         try:
             result = self._agent.predict(context, questions)
         except (KeyboardInterrupt, SystemExit):
             raise
-        except Exception:
-            return {"request": request_body, "response": None}, self._mark_all(cases, "error"), []
+        except Exception as e:
+            error_record = {"error": "error", "status": None, "detail": str(e)}
+            return (
+                {"request": request_body, "response": error_record},
+                self._mark_all(cases, "error", detail=str(e)),
+                [],
+            )
         outcomes, unmatched = self._outcomes_from_result(result, cases)
         return {"request": request_body, "response": result}, outcomes, unmatched
 
@@ -230,8 +245,8 @@ class LayaProbabilityAssessor(BinaryAssessor):
         outcomes.update(missing)
         return outcomes, unmatched
 
-    def _mark_all(self, cases: Sequence[DecisionCase], reason) -> dict[str, Outcome]:
-        return {c.risk_id: Unavailable(reason) for c in cases}
+    def _mark_all(self, cases: Sequence[DecisionCase], reason, detail: str = "") -> dict[str, Outcome]:
+        return {c.risk_id: Unavailable(reason, detail) for c in cases}
 
 
 def _noul_probability(answer: object) -> float | None:
@@ -243,7 +258,3 @@ def _noul_probability(answer: object) -> float | None:
     if not isinstance(answer, dict) or answer.get("type") != "noul":
         return None
     return _as_float(answer.get("noul"))
-
-
-_EMPTY_WIRE: dict = {"requests": [], "responses": []}
-"""Wire for an assessment with no cases: nothing was asked or answered."""

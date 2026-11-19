@@ -360,6 +360,25 @@ def test_out_of_range_noul_is_invalid(monkeypatch):
     batch = assessor.assess(TASK, "context", _cases("R-001"))
 
     assert batch.outcomes["R-001"][0].reason == "invalid"
+    # Readability outcomes carry no detail unless there is one to carry.
+    assert batch.outcomes["R-001"][0].detail == ""
+
+
+def test_result_without_answers_marks_missing_with_empty_detail(monkeypatch):
+    """A result with no answers key marks every case missing, detail empty.
+
+    ``_mark_all`` defaults its detail to the empty string: readability
+    outcomes say only their reason unless there is a detail to carry.
+    """
+    agent = _StubAgent([{"model": "laya-rl-agent"}])
+    assessor = _assessor(agent, monkeypatch)
+
+    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+
+    assert batch.outcomes["R-001"][0].reason == "missing"
+    assert batch.outcomes["R-001"][0].detail == ""
+    assert batch.outcomes["R-002"][0].reason == "missing"
+    assert batch.outcomes["R-002"][0].detail == ""
 
 
 def test_boolean_and_non_numeric_noul_are_invalid(monkeypatch):
@@ -489,6 +508,8 @@ def test_non_dict_answers_is_invalid(monkeypatch):
 
 def test_wire_records_request_answers_and_usage(monkeypatch):
     """The wire record carries the request shape, the answers and the full usage block."""
+    from asago_policy_mapper.assessors.replay import context_sha256
+
     result = _laya_result(("R-001", 0.7), truncated=True, dropped=263)
     agent = _StubAgent([result])
     assessor = _assessor(agent, monkeypatch)
@@ -497,7 +518,11 @@ def test_wire_records_request_answers_and_usage(monkeypatch):
 
     request = batch.wire["requests"][0]
     assert request["model"] == "aac6fef/laya-multilingual-mlx"
+    # The state travels as a digest, never verbatim: the request record
+    # identifies the grounding context without copying its whole text.
+    assert request["state_sha256"] == context_sha256("policy context")
     assert request["state_chars"] == len("policy context")
+    assert request["summary"] is True
     assert request["questions"]["R-001"]["type"] == "noul"
     response = batch.wire["responses"][0]
     assert response["answers"]["R-001"]["noul"] == 0.7
@@ -506,14 +531,30 @@ def test_wire_records_request_answers_and_usage(monkeypatch):
 
 
 def test_wire_keeps_request_on_error(monkeypatch):
-    """A failed predict still records what would have been asked."""
+    """A failed predict records the request and an explicit error object.
+
+    A persisted ``null`` response says nothing; the error object carries
+    the reason and the exception text so a run can explain its bypasses.
+    """
     agent = _StubAgent(error=RuntimeError("boom"))
     assessor = _assessor(agent, monkeypatch)
 
     batch = assessor.assess(TASK, "context", _cases("R-001"))
 
     assert batch.wire["requests"][0]["questions"]["R-001"]["type"] == "noul"
-    assert batch.wire["responses"] == [None]
+    assert batch.wire["responses"] == [{"error": "error", "status": None, "detail": "boom"}]
+
+
+def test_unavailable_error_carries_the_exception_text(monkeypatch):
+    """A laya exception lands in Unavailable.detail, not just the reason."""
+    agent = _StubAgent(error=RuntimeError("weight load failed"))
+    assessor = _assessor(agent, monkeypatch)
+
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+
+    outcome = batch.outcomes["R-001"][0]
+    assert outcome.reason == "error"
+    assert outcome.detail == "weight load failed"
 
 
 def test_wire_accumulates_across_batches(monkeypatch):
@@ -602,8 +643,16 @@ def test_live_laya_smoke():
 
     Skipped unless laya-mlx is installed (it never is in CI: the package
     is an out-of-band install). Downloads the checkpoint on first ever
-    run; later runs use the local cache.
+    run; later runs use the local cache. The response must also serialize
+    as plain JSON: a run persists it in ``decision_calls`` verbatim, so a
+    numpy scalar (or anything JSON-hostile) surfacing in the recorded
+    response would break the run's output write. A source read of
+    laya-mlx (v0.7.2 e2bfb94, byte-identical to v0.7.0 in the relevant
+    function) shows predict() builds its output with Python builtins, so
+    this is a guard, not a known bug.
     """
+    import json
+
     pytest.importorskip("laya_mlx")
     from asago_policy_mapper.assessors.laya import LayaProbabilityAssessor, LayaProbabilityEndpoint
 
@@ -621,3 +670,5 @@ def test_live_laya_smoke():
     outcome = batch.outcomes["smoke-1"][0]
     assert isinstance(outcome, Probability), f"live laya returned {outcome!r}"
     assert 0.0 <= outcome.p <= 1.0
+    # The recorded response must survive the run's JSON output write.
+    json.dumps(batch.wire["responses"])
