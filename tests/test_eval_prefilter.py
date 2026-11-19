@@ -342,7 +342,7 @@ def test_eval_script_rejects_empty_split(tmp_path):
     fixtures = tmp_path / "fixtures.jsonl"
     fixtures.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     outcomes = tmp_path / "outcomes.jsonl"
-    outcomes.write_text("")
+    outcomes.write_text(json.dumps({"context_sha256": _sha("ctx"), "risk_id": "R-1", "p": 0.5}) + "\n")
 
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), str(fixtures), str(outcomes)],
@@ -352,6 +352,54 @@ def test_eval_script_rejects_empty_split(tmp_path):
 
     assert completed.returncode == 1
     assert "both splits must be non-empty" in completed.stderr
+
+
+def test_eval_script_rejects_missing_answers_file(tmp_path):
+    """A missing answers file exits non-zero with a clean error, not a traceback."""
+    from scripts.eval_prefilter import HELD_OUT_POLICIES, TUNING_POLICIES
+
+    tune_policy = sorted(TUNING_POLICIES)[0]
+    hold_policy = sorted(HELD_OUT_POLICIES)[0]
+    rows = [
+        _fixture_row(tune_policy, 0, "ctx-t", [_candidate("R-1")], []),
+        _fixture_row(hold_policy, 0, "ctx-h", [_candidate("R-2")], []),
+    ]
+    fixtures = tmp_path / "fixtures.jsonl"
+    fixtures.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), str(fixtures), str(tmp_path / "absent.jsonl")],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    assert "answers file not found" in completed.stderr
+
+
+def test_eval_script_rejects_empty_answers_file(tmp_path):
+    """An empty answers file exits non-zero with a clean error."""
+    from scripts.eval_prefilter import HELD_OUT_POLICIES, TUNING_POLICIES
+
+    tune_policy = sorted(TUNING_POLICIES)[0]
+    hold_policy = sorted(HELD_OUT_POLICIES)[0]
+    rows = [
+        _fixture_row(tune_policy, 0, "ctx-t", [_candidate("R-1")], []),
+        _fixture_row(hold_policy, 0, "ctx-h", [_candidate("R-2")], []),
+    ]
+    fixtures = tmp_path / "fixtures.jsonl"
+    fixtures.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    outcomes = tmp_path / "outcomes.jsonl"
+    outcomes.write_text("")
+
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), str(fixtures), str(outcomes)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    assert "no usable rows" in completed.stderr
 
 
 def test_eval_main_in_process(tmp_path, capsys):

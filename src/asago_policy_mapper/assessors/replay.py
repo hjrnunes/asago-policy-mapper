@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -53,7 +54,10 @@ class ReplayAssessor:
 
     Emits ``Probability`` for rows with a valid ``p`` and ``Unavailable``
     for rows carrying an ``unavailable`` reason or for keys with no row at
-    all. The file is read once, at construction.
+    all. The file is read once, at construction. A missing or empty file
+    raises ``ValueError``: an evaluation with nothing to replay would
+    silently mark every candidate missing. Unusable lines are counted in
+    ``malformed_lines`` and reported, not skipped quietly.
     """
 
     emits = frozenset({Probability, Unavailable})
@@ -62,6 +66,7 @@ class ReplayAssessor:
         self.path = Path(path)
         self.assessor_id = f"replay:{self.path.name}"
         self.offsite = False
+        self.malformed_lines = 0
         self._outcomes = self._load()
 
     def assess(self, task: BinaryTask, context: str, cases: Sequence[DecisionCase]) -> AssessmentBatch:
@@ -82,7 +87,7 @@ class ReplayAssessor:
     def _load(self) -> dict[tuple[str, str], list[Outcome]]:
         rows: dict[tuple[str, str], list[Outcome]] = {}
         if not self.path.exists():
-            return rows
+            raise ValueError(f"answers file not found: {self.path}")
         with open(self.path, encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
@@ -91,10 +96,19 @@ class ReplayAssessor:
                 try:
                     raw = json.loads(line)
                 except ValueError:
+                    self.malformed_lines += 1
                     continue
                 parsed = _parse_row(raw)
                 if parsed is None:
+                    self.malformed_lines += 1
                     continue
                 key, risk_id, outcome = parsed
                 rows.setdefault((key, risk_id), []).append(outcome)
+        if not rows:
+            raise ValueError(f"answers file has no usable rows: {self.path}")
+        if self.malformed_lines:
+            print(
+                f"Warning: {self.malformed_lines} malformed line(s) skipped in {self.path}",
+                file=sys.stderr,
+            )
         return rows

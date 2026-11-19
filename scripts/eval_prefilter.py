@@ -188,7 +188,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     rows = [json.loads(line) for line in args.fixtures.read_text().splitlines() if line.strip()]
-    assessor = ReplayAssessor(args.outcomes)
+    try:
+        assessor = ReplayAssessor(args.outcomes)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
     outcomes, unavailable = _outcome_lookups(assessor)
 
     tuning, held_out = split_rows(rows, TUNING_POLICIES, HELD_OUT_POLICIES)

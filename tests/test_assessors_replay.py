@@ -7,6 +7,8 @@ provider.
 
 import json
 
+import pytest
+
 from asago_policy_mapper.assessors.replay import ReplayAssessor
 from asago_policy_mapper.extract.decide import (
     BinaryTask,
@@ -124,7 +126,9 @@ def test_replay_reads_only_once(tmp_path):
 
 def test_replay_properties(tmp_path):
     """The replay assessor is local, offline, and emits Probability and Unavailable."""
-    assessor = ReplayAssessor(tmp_path / "absent.jsonl")
+    path = tmp_path / "o.jsonl"
+    path.write_text(json.dumps({"context_sha256": _sha256("c"), "risk_id": "R-001", "p": 0.5}) + "\n")
+    assessor = ReplayAssessor(path)
 
     assert assessor.offsite is False
     assert Probability in assessor.emits
@@ -132,27 +136,34 @@ def test_replay_properties(tmp_path):
     assert "replay" in assessor.assessor_id
 
 
-def test_replay_empty_or_missing_file(tmp_path):
-    """A missing file and an empty file both serve every candidate as missing."""
-    assessor = ReplayAssessor(tmp_path / "absent.jsonl")
+def test_replay_missing_file_is_an_error(tmp_path):
+    """A missing answers file raises ValueError instead of answering missing for everything."""
+    with pytest.raises(ValueError, match="answers file not found"):
+        ReplayAssessor(tmp_path / "absent.jsonl")
 
-    batch = assessor.assess(TASK, "ctx", _cases("R-001"))
 
-    assert batch.outcomes["R-001"] == (Unavailable("missing"),)
-
+def test_replay_empty_file_is_an_error(tmp_path):
+    """An empty answers file raises ValueError: nothing to replay."""
     empty = tmp_path / "empty.jsonl"
     empty.write_text("")
-    assessor = ReplayAssessor(empty)
 
-    batch = assessor.assess(TASK, "ctx", _cases("R-001"))
+    with pytest.raises(ValueError, match="no usable rows"):
+        ReplayAssessor(empty)
 
-    assert batch.outcomes["R-001"] == (Unavailable("missing"),)
+
+def test_replay_all_malformed_file_is_an_error(tmp_path):
+    """A file whose every line is unusable raises ValueError, same as an empty file."""
+    path = tmp_path / "bad.jsonl"
+    path.write_text("not json\n" + json.dumps({"no": "keys"}) + "\n")
+
+    with pytest.raises(ValueError, match="no usable rows"):
+        ReplayAssessor(path)
 
 
 def test_replay_wire_is_none(tmp_path):
     """Replay makes no wire request; wire stays None like other offline assessors."""
     path = tmp_path / "outcomes.jsonl"
-    path.write_text("")
+    path.write_text(json.dumps({"context_sha256": _sha256("ctx"), "risk_id": "R-001", "p": 0.5}) + "\n")
 
     assessor = ReplayAssessor(path)
     batch = assessor.assess(TASK, "ctx", _cases("R-001"))
@@ -160,8 +171,8 @@ def test_replay_wire_is_none(tmp_path):
     assert batch.wire is None
 
 
-def test_replay_bad_rows_are_skipped_not_fatal(tmp_path):
-    """Unparseable lines and unusable rows are skipped; good rows still load."""
+def test_replay_bad_rows_are_counted_not_fatal(tmp_path, capsys):
+    """Unparseable lines and unusable rows are counted and reported; good rows still load."""
     context = "ctx"
     key = _sha256(context)
     lines = [
@@ -184,6 +195,8 @@ def test_replay_bad_rows_are_skipped_not_fatal(tmp_path):
     assert batch.outcomes["R-001"] == (Probability(0.5),)
     for rid in ("R-003", "R-004", "R-005"):
         assert batch.outcomes[rid] == (Unavailable("missing"),), rid
+    assert assessor.malformed_lines == 7  # every unusable line; blank lines excluded
+    assert "malformed line" in capsys.readouterr().err
 
 
 def test_replay_out_of_range_p_is_skipped(tmp_path):
@@ -239,6 +252,7 @@ def test_replay_unavailable_never_falls_through_to_p(tmp_path):
         {"context_sha256": key, "risk_id": "R-001", "unavailable": "kaput", "p": 0.9},
         {"context_sha256": key, "risk_id": "R-002", "unavailable": 42, "p": 0.9},
         {"context_sha256": key, "risk_id": "R-003", "unavailable": None, "p": 0.9},
+        {"context_sha256": key, "risk_id": "R-004", "p": 0.5},  # keeps the file usable
     ]
     path = tmp_path / "outcomes.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
@@ -287,7 +301,7 @@ def test_replay_latency_is_milliseconds(monkeypatch, tmp_path):
 
     monkeypatch.setattr(module, "time", _Clock())
     path = tmp_path / "o.jsonl"
-    path.write_text("")
+    path.write_text(json.dumps({"context_sha256": _sha256("ctx"), "risk_id": "R-001", "p": 0.5}) + "\n")
 
     assessor = ReplayAssessor(path)
     batch = assessor.assess(TASK, "ctx", _cases("R-001"))
