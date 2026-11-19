@@ -271,7 +271,7 @@ def test_transport_error_is_unavailable():
 
 
 def test_http_error_status_is_unavailable():
-    """A non-2xx status becomes NoAnswer("error")."""
+    """A non-2xx status becomes NoAnswer("error") carrying the HTTP status."""
     assessor = _assessor(lambda request: httpx.Response(500, json={"error": "boom"}))
 
     batch = assessor.assess(QUESTION, "context", _cases("R-001"))
@@ -279,6 +279,37 @@ def test_http_error_status_is_unavailable():
     answer = batch.answers["R-001"][0]
     assert isinstance(answer, NoAnswer)
     assert answer.reason == "error"
+    assert answer.detail == "HTTP 500"
+
+
+def test_http_error_detail_names_the_json_failure():
+    """A 200 whose body is not JSON becomes NoAnswer("error") with a JSON detail."""
+    assessor = _assessor(
+        lambda request: httpx.Response(200, content=b"not json", headers={"Content-Type": "application/json"})
+    )
+
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+
+    answer = batch.answers["R-001"][0]
+    assert isinstance(answer, NoAnswer)
+    assert answer.reason == "error"
+    assert answer.detail.startswith("JSON:")
+
+
+def test_transport_error_detail_names_the_failure():
+    """A transport error keeps the exception text in NoAnswer.detail."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    assessor = HttpProbabilityAssessor(_endpoint(), transport=httpx.MockTransport(handler))
+
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+
+    answer = batch.answers["R-001"][0]
+    assert isinstance(answer, NoAnswer)
+    assert answer.reason == "error"
+    assert "connection refused" in answer.detail
 
 
 def test_keyboard_interrupt_is_not_caught():

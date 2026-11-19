@@ -102,17 +102,12 @@ class HttpProbabilityAssessor:
 
     def assess(self, question: Question, context: str, cases: Sequence[DecisionCase]) -> AnswerBatch:
         if not cases:
-<<<<<<< HEAD
-            return AnswerBatch(answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []})
-        answers: dict[str, tuple[Answer, ...]] = {}
-=======
             # Built inline: a shared dict would let one caller's append leak
-            # into the next empty batch's wire.
-            return AssessmentBatch(
-                outcomes={}, unmatched_ids=(), latency_ms=0.0, wire={"requests": [], "responses": []}
+            # into the next empty batch's exchange.
+            return AnswerBatch(
+                answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []}
             )
-        outcomes: dict[str, tuple[Outcome, ...]] = {}
->>>>>>> 6dac31f (fix(assessors): build the empty-batch wire per call)
+        answers: dict[str, tuple[Answer, ...]] = {}
         unmatched: list[str] = []
         exchanges: list[dict] = []
         latency_ms = 0.0
@@ -172,14 +167,17 @@ class HttpProbabilityAssessor:
             return self._exchange(request_body, None), self._mark_all(cases, "timeout"), []
         except (KeyboardInterrupt, SystemExit):
             raise
-        except (httpx.HTTPError, OSError):
-            return self._exchange(request_body, None), self._mark_all(cases, "error"), []
+        except (httpx.HTTPError, OSError) as error:
+            return self._exchange(request_body, None), self._mark_all(cases, "error", detail=str(error)), []
 
         try:
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPStatusError, ValueError):
-            return self._exchange(request_body, None), self._mark_all(cases, "error"), []
+        except httpx.HTTPStatusError as error:
+            detail = f"HTTP {error.response.status_code}"
+            return self._exchange(request_body, None), self._mark_all(cases, "error", detail=detail), []
+        except ValueError as error:
+            return self._exchange(request_body, None), self._mark_all(cases, "error", detail=f"JSON: {error}"), []
         answers, unmatched = self._answers_from_payload(payload, cases)
         return self._exchange(request_body, payload), answers, unmatched
 
@@ -208,8 +206,10 @@ class HttpProbabilityAssessor:
         secret = os.environ.get(self.endpoint.api_key_env) or ""
         return {"request": request_body, "response": _redact(response_payload, secret)}
 
-    def _mark_all(self, cases: Sequence[DecisionCase], reason: _NoAnswerReason) -> dict[str, Answer]:
-        return {c.risk_id: NoAnswer(reason) for c in cases}
+    def _mark_all(
+        self, cases: Sequence[DecisionCase], reason: _NoAnswerReason, detail: str = ""
+    ) -> dict[str, Answer]:
+        return {c.risk_id: NoAnswer(reason, detail) for c in cases}
 
 
 def _valid_probability(value: object) -> bool:
