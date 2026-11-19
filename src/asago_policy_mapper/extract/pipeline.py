@@ -216,22 +216,20 @@ def _ground_one(
     return cr, merged
 
 
-def determine_accepted_by(candidate, *, borderline_judged, use_cross_encoder, no_judge):
+def determine_accepted_by(candidate):
     """Label how a candidate was accepted.
 
-    Judged borderline candidates take their judge label; every other
-    candidate carries the label stamped when it was selected. A candidate
-    with no stamp cannot reach here in production — retrieval and query
-    generation stamp every accepted candidate — so the missing stamp is an
-    invariant failure, not a fallback case.
+    The label is stamped where the acceptance happens: retrieval and query
+    generation stamp selection labels, and the judge stamps
+    ``llm_judge``/``auto_promoted`` when it promotes a borderline candidate.
+    A candidate with no stamp cannot reach here in production, so the
+    missing stamp is an invariant failure, not a fallback case.
     """
-    if candidate in borderline_judged:
-        return "auto_promoted" if no_judge else "llm_judge"
-    if candidate.selected_by is not None:
-        return candidate.selected_by
+    if candidate.accepted_by is not None:
+        return candidate.accepted_by
     raise PipelineInvariantError(
         f"candidate {candidate.risk_id} reached acceptance without a selection label; "
-        "retrieval and query generation must stamp every accepted candidate"
+        "retrieval, query generation and the judge must stamp every accepted candidate"
     )
 
 
@@ -285,12 +283,7 @@ def _collect_ungrounded(chunk_results, index, retrieval):
     matches = []
     for cr in chunk_results:
         for candidate in cr.accepted:
-            accepted_by = determine_accepted_by(
-                candidate,
-                borderline_judged=cr.borderline_judged,
-                use_cross_encoder=retrieval.use_cross_encoder,
-                no_judge=retrieval.no_judge,
-            )
+            accepted_by = determine_accepted_by(candidate)
             matches.append(
                 build_risk_match(
                     candidate,
@@ -360,12 +353,7 @@ def _run_grounding(
                 total_grounded += len(grounded)
                 grounded_ids = set(grounded.keys())
                 for candidate in cr.accepted:
-                    accepted_by = determine_accepted_by(
-                        candidate,
-                        borderline_judged=cr.borderline_judged,
-                        use_cross_encoder=retrieval.use_cross_encoder,
-                        no_judge=retrieval.no_judge,
-                    )
+                    accepted_by = determine_accepted_by(candidate)
                     rid = candidate.risk_id
                     if rid in grounded_ids:
                         evidence, confidence = grounded[rid]
@@ -579,8 +567,10 @@ def _run_judge(
     if plan.judge == "auto_promote":
         for cr in chunk_results:
             if cr.borderline:
-                cr.borderline_judged = list(cr.borderline)
-                cr.accepted.extend(cr.borderline)
+                # Promotion is an acceptance: stamp it the moment it
+                # happens, the way retrieval stamps selection labels.
+                cr.borderline_judged = [c.model_copy(update={"accepted_by": "auto_promoted"}) for c in cr.borderline]
+                cr.accepted.extend(cr.borderline_judged)
     elif plan.judge == "llm":
         if judge_tasks:
             judge_contexts = _judge_contexts(chunks, retrieval, chunk_contexts, judge_tasks)
@@ -604,8 +594,12 @@ def _run_judge(
                 }
                 for future in as_completed(futures):
                     idx, judged = future.result()
-                    chunk_results[idx].borderline_judged = judged
-                    chunk_results[idx].accepted.extend(judged)
+                    # Promotion is an acceptance: the label stamps when it
+                    # happens, so determine_accepted_by needs no ambient
+                    # state to rebuild it.
+                    stamped = [c.model_copy(update={"accepted_by": "llm_judge"}) for c in judged]
+                    chunk_results[idx].borderline_judged = stamped
+                    chunk_results[idx].accepted.extend(stamped)
             if call_collector is not None:
                 for records in task_records:
                     merge_call_records(call_collector, records, counts=_counts_judge)
@@ -1002,7 +996,7 @@ def _merge_query_candidates(chunk_results, chunks, qr, candidates):
     model_copy — the same candidate objects are shared between chunks, so
     nothing is mutated in place.
     """
-    stamped = [c.model_copy(update={"selected_by": "query_gen"}) for c in candidates]
+    stamped = [c.model_copy(update={"accepted_by": "query_gen"}) for c in candidates]
     for ci in qr.chunk_indices:
         chunk = chunks[ci]
         if chunk_results[ci] is not None:
@@ -1291,12 +1285,7 @@ def _prefilter_one_chunk(
             assessment.answers.get(candidate.risk_id, ()),
             index.get_taxonomy(candidate.risk_id),
             cr.chunk_index,
-            determine_accepted_by(
-                candidate,
-                borderline_judged=cr.borderline_judged,
-                use_cross_encoder=retrieval.use_cross_encoder,
-                no_judge=retrieval.no_judge,
-            ),
+            determine_accepted_by(candidate),
         )
         for candidate in cr.accepted
         if candidate.risk_id not in keep_ids

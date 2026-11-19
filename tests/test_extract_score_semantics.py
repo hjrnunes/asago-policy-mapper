@@ -186,10 +186,10 @@ def test_merge_handles_null_confidence():
 def test_shared_candidate_not_mutated():
     """Setting selected_by/rerank_source never mutates a candidate in place."""
     shared = ScoredCandidate(risk_id="R-SHARED", risk_name="n", risk_description="d", rrf_score=0.05)
-    tagged = shared.model_copy(update={"selected_by": "query_gen", "rerank_source": "cross_encoder"})
-    assert shared.selected_by is None
+    tagged = shared.model_copy(update={"accepted_by": "query_gen", "rerank_source": "cross_encoder"})
+    assert shared.accepted_by is None
     assert shared.rerank_source is None
-    assert tagged.selected_by == "query_gen"
+    assert tagged.accepted_by == "query_gen"
     assert tagged.rerank_source == "cross_encoder"
 
 
@@ -202,7 +202,7 @@ def test_scored_candidate_source_defaults():
     """New source fields default to None on plain candidates."""
     c = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d")
     assert c.rerank_source is None
-    assert c.selected_by is None
+    assert c.accepted_by is None
     assert c.cross_encoder_score == 0.0
 
 
@@ -460,7 +460,7 @@ def test_rerank_measured_zero_is_kept_with_source(monkeypatch):
 
 
 def test_retrieve_chunk_labels_rank_and_threshold():
-    """retrieve_chunk stamps selected_by=rank or threshold after classification."""
+    """retrieve_chunk stamps accepted_by=rank or threshold after classification."""
     from asago_policy_mapper.extract.parse import Chunk
     from asago_policy_mapper.extract.retrieve import retrieve_chunk
 
@@ -473,16 +473,16 @@ def test_retrieve_chunk_labels_rank_and_threshold():
 
     # rank mode: no threshold_high
     cr = retrieve_chunk(chunks, 0, mock_index, top_n_accept=1, top_n_judge=1)
-    assert all(c.selected_by == "rank" for c in cr.accepted)
-    assert all(c.selected_by == "rank" for c in cr.borderline)
+    assert all(c.accepted_by == "rank" for c in cr.accepted)
+    assert all(c.accepted_by == "rank" for c in cr.borderline)
 
     # threshold mode: threshold_high set
     cr = retrieve_chunk(chunks, 0, mock_index, threshold_high=0.7, threshold_low=0.2)
-    assert all(c.selected_by == "threshold" for c in cr.accepted)
-    assert all(c.selected_by == "threshold" for c in cr.borderline)
+    assert all(c.accepted_by == "threshold" for c in cr.accepted)
+    assert all(c.accepted_by == "threshold" for c in cr.borderline)
     # the candidates from the mock were not mutated in place
     for c in mock_index.hybrid_search.return_value:
-        assert c.selected_by is None
+        assert c.accepted_by is None
 
 
 def test_retrieve_chunk_no_cross_encoder_labels_rrf():
@@ -499,8 +499,8 @@ def test_retrieve_chunk_no_cross_encoder_labels_rrf():
     cr = retrieve_chunk(chunks, 0, mock_index, use_cross_encoder=False, rrf_min_score=0.01)
 
     assert len(cr.accepted) == 1
-    assert cr.accepted[0].selected_by == "rrf"
-    assert mock_index.hybrid_search.return_value[0].selected_by is None
+    assert cr.accepted[0].accepted_by == "rrf"
+    assert mock_index.hybrid_search.return_value[0].accepted_by is None
 
 
 def test_retrieve_chunk_cross_encoder_score_null_untouched():
@@ -529,9 +529,9 @@ def test_retrieve_chunk_cross_encoder_score_null_untouched():
     by_id = {c.risk_id: c for c in cr.accepted + cr.borderline}
     assert by_id["R-002"].cross_encoder_score == 0.5
     assert by_id["R-002"].rerank_source == "cross_encoder"
-    assert by_id["R-002"].selected_by == "rank"
+    assert by_id["R-002"].accepted_by == "rank"
     assert by_id["R-001"].rerank_source is None
-    assert by_id["R-001"].selected_by == "rank"
+    assert by_id["R-001"].accepted_by == "rank"
 
 
 # --- pipeline wiring (step 3) ---
@@ -543,30 +543,29 @@ def _pipeline():
     return pipeline
 
 
-def test_determine_accepted_by_prefers_selected_by():
-    """determine_accepted_by returns the recorded label; a missing label raises."""
+def test_determine_accepted_by_prefers_stamped_label():
+    """determine_accepted_by returns the recorded label; missing labels raise.
+
+    Retrieval, query generation and the judge stamp every accepted
+    candidate, so a candidate with no stamp is an invariant failure, not a
+    fallback case.
+    """
     pl = _pipeline()
-    stamped = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="rank")
-    assert pl.determine_accepted_by(stamped, borderline_judged=[], use_cross_encoder=True, no_judge=False) == "rank"
-    stamped_qg = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="query_gen")
-    assert (
-        pl.determine_accepted_by(stamped_qg, borderline_judged=[], use_cross_encoder=True, no_judge=False)
-        == "query_gen"
-    )
+    stamped = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", accepted_by="rank")
+    assert pl.determine_accepted_by(stamped) == "rank"
+    stamped_qg = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", accepted_by="query_gen")
+    assert pl.determine_accepted_by(stamped_qg) == "query_gen"
+    # the judge stamps its promotions like any other acceptance
+    judged = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", accepted_by="llm_judge")
+    assert pl.determine_accepted_by(judged) == "llm_judge"
+    promoted = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", accepted_by="auto_promoted")
+    assert pl.determine_accepted_by(promoted) == "auto_promoted"
     # an unstamped candidate is an invariant failure, not a fallback
     plain = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d")
-    with pytest.raises(pl.PipelineInvariantError):
-        pl.determine_accepted_by(plain, borderline_judged=[], use_cross_encoder=True, no_judge=False)
-    # judge promotion still wins over the recorded label
-    judged = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", selected_by="rank")
-    assert (
-        pl.determine_accepted_by(judged, borderline_judged=[judged], use_cross_encoder=True, no_judge=False)
-        == "llm_judge"
-    )
-    assert (
-        pl.determine_accepted_by(judged, borderline_judged=[judged], use_cross_encoder=True, no_judge=True)
-        == "auto_promoted"
-    )
+    from asago_policy_mapper.extract.pipeline import PipelineInvariantError
+
+    with pytest.raises(PipelineInvariantError):
+        pl.determine_accepted_by(plain)
 
 
 def test_build_risk_match_ce_measured_source():
@@ -606,7 +605,7 @@ def test_build_risk_match_colbert_source():
 def test_build_risk_match_rrf_mode():
     """Without the cross-encoder, confidence comes from the RRF score."""
     pl = _pipeline()
-    c = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", rrf_score=0.04, selected_by="rrf")
+    c = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d", rrf_score=0.04, accepted_by="rrf")
     m = pl.build_risk_match(
         c, taxonomy="t", accepted_by="rrf", grounding_confidence="high", evidence=[], use_cross_encoder=False
     )
@@ -629,9 +628,9 @@ def test_merge_query_candidates_stamps_query_gen():
 
     pl._merge_query_candidates(chunk_results, chunks, qr, candidates)
 
-    assert all(c.selected_by == "query_gen" for cr in chunk_results for c in cr.accepted)
+    assert all(c.accepted_by == "query_gen" for cr in chunk_results for c in cr.accepted)
     # the shared candidates were not mutated in place
-    assert all(c.selected_by is None for c in candidates)
+    assert all(c.accepted_by is None for c in candidates)
     # first-occurrence dedup keeps one R-1 per chunk
     assert [c.risk_id for c in chunk_results[0].accepted] == ["R-1", "R-2"]
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator, model_serializer
+from pydantic import BaseModel, field_validator, model_serializer, model_validator
 
 
 def _reject_nan(value: float | None) -> float | None:
@@ -20,6 +20,18 @@ def _reject_nan(value: float | None) -> float | None:
     return value
 
 
+# How a risk candidate was accepted into the result set.
+ACCEPTED_BY = Literal[
+    "rank",
+    "threshold",
+    "rrf",
+    "query_gen",
+    "llm_judge",
+    "auto_promoted",
+    "expansion",
+]
+
+
 class ScoredCandidate(BaseModel):
     risk_id: str
     risk_name: str
@@ -33,7 +45,10 @@ class ScoredCandidate(BaseModel):
     # measurement was invalid) — the 0.0 default is a placeholder, not a
     # measurement.
     rerank_source: Literal["cross_encoder", "colbert"] | None = None
-    selected_by: str | None = None
+    # The selection label stamped where the candidate was accepted; typed
+    # so a mistyped stamp fails at the stamping site, not later at
+    # RiskMatch construction.
+    accepted_by: ACCEPTED_BY | None = None
 
 
 DPV_RISK_CONTROLS = Literal[
@@ -79,18 +94,6 @@ class RetrievalScores(BaseModel):
     rrf_score: float
 
 
-# How a risk candidate was accepted into the result set.
-ACCEPTED_BY = Literal[
-    "rank",
-    "threshold",
-    "rrf",
-    "query_gen",
-    "llm_judge",
-    "auto_promoted",
-    "expansion",
-]
-
-
 class RiskMatch(BaseModel):
     risk_id: str
     risk_name: str
@@ -111,6 +114,20 @@ class RiskMatch(BaseModel):
     scores_inherited_from: str | None = None
 
     _reject_nan_confidence = field_validator("confidence")(_reject_nan)
+
+    @model_validator(mode="after")
+    def _confidence_needs_a_source(self) -> "RiskMatch":
+        """A numeric confidence must name where it came from.
+
+        Null confidence means "not calculated"; a number without a source
+        would be exactly the unsourced score this schema exists to prevent.
+        """
+        if self.confidence is not None and self.confidence_source == "none":
+            raise ValueError(
+                "numeric confidence requires a confidence_source other than 'none' "
+                f"(risk {self.risk_id} has confidence={self.confidence})"
+            )
+        return self
 
 
 class RetrievalStats(BaseModel):

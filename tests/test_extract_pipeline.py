@@ -666,43 +666,31 @@ def _candidate(risk_id="R-001"):
     )
 
 
-def test_determine_accepted_by_llm_judge():
+def test_judge_promotion_stamps_llm_judge_label():
+    """The LLM judge stamps its promotions at promotion time."""
     c = _candidate()
-    result = determine_accepted_by(
-        c,
-        borderline_judged=[c],
-        use_cross_encoder=True,
-        no_judge=False,
-    )
-    assert result == "llm_judge"
+    stamped = c.model_copy(update={"accepted_by": "llm_judge"})
+    assert determine_accepted_by(stamped) == "llm_judge"
 
 
-def test_determine_accepted_by_auto_promoted():
+def test_judge_promotion_stamps_auto_promoted_label():
+    """Auto-promotion under --no-judge stamps its own label."""
     c = _candidate()
-    result = determine_accepted_by(
-        c,
-        borderline_judged=[c],
-        use_cross_encoder=True,
-        no_judge=True,
-    )
-    assert result == "auto_promoted"
+    stamped = c.model_copy(update={"accepted_by": "auto_promoted"})
+    assert determine_accepted_by(stamped) == "auto_promoted"
 
 
 def test_determine_accepted_by_unstamped_candidate_raises():
     """An unstamped candidate is an invariant failure, not a fallback.
 
-    Retrieval and query generation stamp every accepted candidate with its
-    selection label; a candidate without one never occurs in production.
+    Retrieval, query generation and the judge stamp every accepted
+    candidate with its selection label; a candidate without one never
+    occurs in production.
     """
     c = _candidate()
-    c = c.model_copy(update={"selected_by": None})
+    c = c.model_copy(update={"accepted_by": None})
     with pytest.raises(PipelineInvariantError):
-        determine_accepted_by(
-            c,
-            borderline_judged=[],
-            use_cross_encoder=True,
-            no_judge=False,
-        )
+        determine_accepted_by(c)
 
 
 @pytest.mark.slow

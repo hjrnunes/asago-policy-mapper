@@ -12,6 +12,7 @@ def _make_match(risk_id, confidence, doc="a.pdf", chunk_index=0, sentence_index=
         risk_name=f"Risk {risk_id}",
         risk_description=f"Description of {risk_id}.",
         confidence=confidence,
+        confidence_source="cross_encoder" if confidence is not None else "none",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[
