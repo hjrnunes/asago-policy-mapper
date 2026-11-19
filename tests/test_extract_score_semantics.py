@@ -137,7 +137,7 @@ def test_variant_scores_marked_inherited():
 
 
 def test_merge_handles_null_confidence():
-    """merge_matches treats None as lower than any number, ties keep 150a's keys."""
+    """merge_matches treats None as lower than any number, ties keep the deterministic tie-break keys."""
     none_conf = _match("R-NULL", None, accepted_by="query_gen", ce=None)
     low = _match("R-NULL", 0.1, accepted_by="threshold", ce=0.1)
     for group in ([none_conf, low], [low, none_conf]):
@@ -166,7 +166,7 @@ def test_merge_handles_null_confidence():
     ]
     for group in ([both_none[0], both_none[1]], [both_none[1], both_none[0]]):
         merged = merge_matches(group, max_evidence=3)
-        # tied at None, the lowest evidence chunk decides (150a tie-break)
+        # tied at None, the lowest evidence chunk decides (deterministic tie-break)
         assert merged[0].confidence is None
         assert merged[0].evidence[0].chunk_index == 0
 
