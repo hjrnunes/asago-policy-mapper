@@ -655,7 +655,7 @@ def test_empty_cases_return_empty_batch():
     assert batch.exchange == {"requests": [], "responses": []}
 
 
-def test_empty_batch_wire_is_not_shared_between_results():
+def test_empty_batch_exchange_is_not_shared_between_results():
     """Appending to one empty batch's exchange leaves the next empty batch clean."""
     assessor = _assessor(lambda request: httpx.Response(200, json=_scores_body()))
 
@@ -782,9 +782,65 @@ def test_response_echoing_the_key_in_a_dict_key_is_redacted(monkeypatch):
     assessor = _assessor(handler)
     batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    assert "secret-value-123" not in json.dumps(batch.wire)
-    assert batch.wire["responses"][0]["echo"] == {"[redacted]": "x"}
-    assert _p_value(batch.outcomes["R-001"][0]) == 0.5
+    assert "secret-value-123" not in json.dumps(batch.exchange)
+    assert batch.exchange["responses"][0]["echo"] == {"[redacted]": "x"}
+    assert _p_value(batch.answers["R-001"][0]) == 0.5
+
+
+def test_response_redaction_keeps_both_values_on_key_collision(monkeypatch):
+    """A redacted key colliding with an existing key keeps both entries.
+
+    An endpoint that echoes the credential as one key and also carries
+    literal ``[redacted]`` keys makes several keys redact to the same
+    marker; a plain dict comprehension would silently drop all but the
+    last entry's value. The numbered markers keep every value so no data
+    is lost while no credential survives.
+    """
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "echo": {
+                    "secret-value-123": "first",
+                    "[redacted]": "second",
+                    "[redacted](2)": "third",
+                },
+                "scores": [{"id": "R-001", "p": 0.5}],
+            },
+        )
+
+    assessor = _assessor(handler)
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+
+    echo = batch.exchange["responses"][0]["echo"]
+    assert sorted(echo.values()) == ["first", "second", "third"]
+    assert len(echo) == 3
+    assert "secret-value-123" not in json.dumps(batch.exchange)
+
+
+def test_response_redaction_collision_numbering_is_stable(monkeypatch):
+    """The collision markers number deterministically from the first use.
+
+    Three colliding keys land on distinct markers in insertion order, so
+    repeated runs of the same response record identically; a marker's own
+    collision numbers within that marker (the second use of
+    ``[redacted](2)`` becomes ``[redacted](2)(2)``).
+    """
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"echo": {"secret-value-123": "a", "[redacted]": "b", "[redacted](2)": "c"}},
+        )
+
+    assessor = _assessor(handler)
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+
+    echo = batch.exchange["responses"][0]["echo"]
+    assert echo == {"[redacted]": "a", "[redacted](2)": "b", "[redacted](2)(2)": "c"}
 
 
 def test_response_redaction_absent_when_no_key(monkeypatch):
