@@ -1025,6 +1025,92 @@ def test_group_unmatched_quote_pinned_to_first_today():
     assert evidence[0].found_chunk_index is None
 
 
+def test_group_unmatched_quote_document_from_shared_source():
+    """An unmatched quote takes its document from the group's shared source.
+
+    The group's chunks all name one source, so that source is the fallback
+    document — not the caller's first document.
+    """
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["This quote appears in no chunk."],
+            ),
+        ]
+    )
+
+    chunks = _make_meta_chunks(
+        [
+            ("First chunk text.", "first.md", 1, "One"),
+            ("Second chunk text.", "first.md", 2, "Two"),
+        ]
+    )
+    risks = [
+        {"risk_id": "R-001", "risk_name": "Bias", "risk_description": "Model bias risk."},
+    ]
+
+    result = ground_risk_group(
+        chunks=chunks,
+        chunk_indices=[1],
+        risks=risks,
+        client=mock_client,
+        model="test-model",
+        document="documents-first.pdf",
+    )
+
+    evidence, _ = result["R-001"]
+    assert evidence[0].chunk_index is None
+    assert evidence[0].document == "first.md"
+    assert evidence[0].page is None
+    assert evidence[0].section is None
+
+
+def test_group_unmatched_quote_mixed_sources_keep_caller_document():
+    """A group whose chunks span several sources keeps the caller's document.
+
+    No single source names the group, so the fallback stays the caller's
+    document rather than picking one source arbitrarily.
+    """
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+        items=[
+            _RiskEvidence(
+                risk_id="R-001",
+                grounded=True,
+                confidence="high",
+                quotes=["This quote appears in no chunk."],
+            ),
+        ]
+    )
+
+    chunks = _make_meta_chunks(
+        [
+            ("First chunk text.", "first.md", 1, "One"),
+            ("Second chunk text.", "second.md", 2, "Two"),
+        ]
+    )
+    risks = [
+        {"risk_id": "R-001", "risk_name": "Bias", "risk_description": "Model bias risk."},
+    ]
+
+    result = ground_risk_group(
+        chunks=chunks,
+        chunk_indices=[0, 1],
+        risks=risks,
+        client=mock_client,
+        model="test-model",
+        document="caller-doc.pdf",
+    )
+
+    evidence, _ = result["R-001"]
+    assert evidence[0].chunk_index is None
+    assert evidence[0].document == "caller-doc.pdf"
+
+
 def _make_meta_chunks(entries):
     """Chunks with source/page/section metadata, keyed by (index, text)."""
     return [

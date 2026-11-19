@@ -356,11 +356,25 @@ def ground_risk_group(
     # never joins across documents because each window is one chunk's text.
     source_windows = [(idx, chunks[idx].text) for idx in chunk_indices if idx < len(chunks)]
 
+    # An unmatched quote has no chunk to take a document from; when the
+    # group's chunks all share one source, that source is the honest
+    # fallback, and only a genuinely mixed group falls back to the caller's
+    # document. Chunks without a source attribute keep the caller's
+    # document too — the match path treats a missing source the same way.
+    group_sources = {
+        source
+        for idx in chunk_indices
+        if idx < len(chunks)
+        for source in (getattr(chunks[idx], "source", None),)
+        if source
+    }
+    fallback_document = next(iter(group_sources)) if len(group_sources) == 1 else document
+
     def _locate_in_group(quote: str) -> dict:
         verification, found_index = locate_quote(quote, source_windows)
         if found_index is None:
             return {
-                "document": document,
+                "document": fallback_document,
                 "page": None,
                 "section": None,
                 "chunk_index": None,
