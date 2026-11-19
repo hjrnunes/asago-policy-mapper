@@ -1332,4 +1332,36 @@ which is the issue's acceptance condition.
 
 **Conclusion:** The schema and label change costs no extraction quality;
 every metric sits inside the endpoint's same-code noise band.
->>>>>>> 7ed2943 (docs(experiments): record score-source battery on gemma4)
+
+## 2026-11-19: Review round 1 — snapshot harness run after the score-source fix
+
+**Description:** Re-ran the deterministic snapshot harness (faked models,
+ten scenario configurations) after the review fixes to the score-source
+change: BM25-rescued candidates now keep their measured cross-encoder score
+and `rerank_source` stamp, unstamped candidates raise instead of falling
+back to a `threshold` label, and `accepted_by` is a typed label. The
+harness's fake retrieval previously returned candidates without a selection
+label, which the fallback masked; the fake now stamps the label the same
+way real retrieval does, so rank-mode scenarios report `rank` instead of
+the fallback's `threshold`.
+
+**MLflow:** disabled (harness runs offline with faked models).
+
+**Runs:** review-round snapshot; pre-change baselines under the same
+harness.
+
+**Calls:** identical call sequences in all ten scenarios — the fixes do
+not change what the pipeline calls.
+
+**Serialized state:** versus the pre-change baseline, every scenario adds
+`confidence_source` and `scores_inherited_from`, bumps `version` 0.3→0.4,
+reports never-calculated `cross_encoder_score` and `confidence` as null
+instead of 0.0, keeps numeric confidence with `confidence_source: "rrf"`
+in RRF-only scenarios, and reports `accepted_by: "rank"` on cross-encoder
+scenarios where the fallback previously mislabeled them `threshold`.
+Rescued candidates in the harness carry no `rerank_source` stamp because
+the harness fakes retrieval entirely; the measured-score stamping is
+covered by unit tests instead.
+
+**Conclusion:** The review fixes change serialized state only in the
+intended places; the call sequence is unchanged.
