@@ -286,7 +286,7 @@
                     </div>
                     <div class="w-20 text-right pr-3">
                       <span class="px-2 py-0.5 rounded text-xs font-mono font-semibold"
-                            :class="confidenceColor(risk.confidence)"
+                            :class="confidenceColor(risk.confidence, risk.confidence_source)"
                             x-text="confidenceText(risk.confidence, risk.confidence_source)"></span>
                     </div>
                     <div class="w-20 pr-3">
@@ -806,8 +806,10 @@ function reportApp() {
       return path.split('/').pop().split('\\').pop();
     },
 
-    confidenceColor(score) {
-      if (score == null) return 'bg-gray-100 text-gray-600';
+    confidenceColor(score, source) {
+      // null is "not calculated"; an RRF value is a ranking score, not a
+      // calibrated confidence, so it renders neutrally instead of red
+      if (score == null || source === 'rrf') return 'bg-gray-100 text-gray-600';
       if (score >= 0.9) return 'bg-green-100 text-green-800';
       if (score >= 0.7) return 'bg-amber-100 text-amber-800';
       return 'bg-red-100 text-red-800';
