@@ -7,7 +7,6 @@ silently loses risks.
 """
 
 import pytest
-
 from asago_policy_mapper.extract.decide import (
     AssessmentBatch,
     Categorical,
@@ -15,6 +14,7 @@ from asago_policy_mapper.extract.decide import (
     Probability,
     Unavailable,
 )
+
 from asago_policy_mapper.extract.gates import ThresholdDrop
 
 

@@ -1,7 +1,7 @@
-"""A replay assessor that serves stored outcomes from a JSONL file.
+"""A replay assessor that serves stored answers from a JSONL file.
 
 The offline evaluation (``scripts/eval_prefilter.py``) uses this assessor
-to sweep thresholds and compare rules on saved outcomes without contacting
+to sweep thresholds and compare rules on saved answers without contacting
 any provider. Rows are keyed by ``(context_sha256, risk_id)``, which the
 fixture builder writes.
 """
@@ -15,18 +15,18 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from asago_policy_mapper.extract.decide import (
-    AssessmentBatch,
-    BinaryTask,
+from asago_policy_mapper.extract.screening import (
+    Answer,
+    AnswerBatch,
     DecisionCase,
-    Outcome,
-    Probability,
-    Unavailable,
+    NoAnswer,
+    ProbabilityAnswer,
+    Question,
 )
 
 
 def context_sha256(context: str) -> str:
-    """Hash a context string to the key the stored outcomes use."""
+    """Hash a context string to the key the stored answers use."""
     return hashlib.sha256(context.encode()).hexdigest()
 
 
@@ -35,8 +35,8 @@ _MAX_LATENCY_MS = 1e12
 small enough that float() conversion cannot overflow."""
 
 
-def _parse_row(raw: object) -> tuple[str, str, Outcome, float | None] | None:
-    """Turn one stored row into its key, outcome and recorded latency, or None when unusable.
+def _parse_row(raw: object) -> tuple[str, str, Answer, float | None] | None:
+    """Turn one stored row into its key, answer and recorded latency, or None when unusable.
 
     Rows may carry ``latency_ms`` (the assessment cost the recorder
     measured); it is optional and absent from hand-written files. A
@@ -57,19 +57,19 @@ def _parse_row(raw: object) -> tuple[str, str, Outcome, float | None] | None:
         reason = raw.get("unavailable")
         if reason in ("missing", "invalid", "timeout", "error"):
             detail = raw.get("detail")
-            outcome = Unavailable(reason, detail) if isinstance(detail, str) and detail else Unavailable(reason)
-            return key, risk_id, outcome, recorded_ms
+            answer = NoAnswer(reason, detail) if isinstance(detail, str) and detail else NoAnswer(reason)
+            return key, risk_id, answer, recorded_ms
         return None
     p = raw.get("p")
     if isinstance(p, bool) or not isinstance(p, (int, float)) or not 0 <= p <= 1:
         return None
-    return key, risk_id, Probability(float(p)), recorded_ms
+    return key, risk_id, ProbabilityAnswer(float(p)), recorded_ms
 
 
 class ReplayAssessor:
-    """A ``BinaryAssessor`` that answers from stored outcomes, offline.
+    """An ``Assessor`` that answers from stored answers, offline.
 
-    Emits ``Probability`` for rows with a valid ``p`` and ``Unavailable``
+    Emits ``ProbabilityAnswer`` for rows with a valid ``p`` and ``NoAnswer``
     for rows carrying an ``unavailable`` reason or for keys with no row at
     all. The file is read once, at construction. A missing path raises
     ``FileNotFoundError`` and a file with no usable rows raises
@@ -85,28 +85,28 @@ class ReplayAssessor:
     whether the previous batch's latency was recorded.
     """
 
-    emits = frozenset({Probability, Unavailable})
+    answer_types = frozenset({ProbabilityAnswer, NoAnswer})
 
     def __init__(self, path: Path | str):
         self.path = Path(path)
         self.assessor_id = f"replay:{self.path.name}"
-        self.offsite = False
+        self.sends_offsite = False
+        self.prompt_name = "replay"
         self.malformed_lines = 0
         self.last_recorded = False
         self._latencies: dict[tuple[str, str], float] = {}
-        self._outcomes = self._load()
+        self._answers = self._load()
 
     @property
     def recorded_latencies(self) -> bool:
         """Whether any loaded row carries recorded latency."""
         return bool(self._latencies)
 
-    def assess(self, task: BinaryTask, context: str, cases: Sequence[DecisionCase]) -> AssessmentBatch:
+    def assess(self, question: Question, context: str, cases: Sequence[DecisionCase]) -> AnswerBatch:
         t0 = time.perf_counter()
         key = context_sha256(context)
-        outcomes: dict[str, tuple[Outcome, ...]] = {
-            case.risk_id: tuple(self._outcomes.get((key, case.risk_id), ())) or (Unavailable("missing"),)
-            for case in cases
+        answers: dict[str, tuple[Answer, ...]] = {
+            case.risk_id: tuple(self._answers.get((key, case.risk_id), ())) or (NoAnswer("missing"),) for case in cases
         }
         recorded = [self._latencies[(key, case.risk_id)] for case in cases if (key, case.risk_id) in self._latencies]
         self.last_recorded = bool(recorded)
@@ -114,15 +114,15 @@ class ReplayAssessor:
             latency_ms = max(recorded)
         else:
             latency_ms = (time.perf_counter() - t0) * 1000
-        return AssessmentBatch(
-            outcomes=outcomes,
+        return AnswerBatch(
+            answers=answers,
             unmatched_ids=(),
             latency_ms=latency_ms,
-            wire=None,
+            exchange=None,
         )
 
-    def _load(self) -> dict[tuple[str, str], list[Outcome]]:
-        rows: dict[tuple[str, str], list[Outcome]] = {}
+    def _load(self) -> dict[tuple[str, str], list[Answer]]:
+        rows: dict[tuple[str, str], list[Answer]] = {}
         if not self.path.exists():
             raise FileNotFoundError(f"answers file not found: {self.path}")
         with open(self.path, encoding="utf-8") as handle:
@@ -139,8 +139,8 @@ class ReplayAssessor:
                 if parsed is None:
                     self.malformed_lines += 1
                     continue
-                key, risk_id, outcome, recorded_ms = parsed
-                rows.setdefault((key, risk_id), []).append(outcome)
+                key, risk_id, answer, recorded_ms = parsed
+                rows.setdefault((key, risk_id), []).append(answer)
                 if recorded_ms is not None:
                     # Max on duplicates, matching the batch reduction in assess().
                     prior = self._latencies.get((key, risk_id))

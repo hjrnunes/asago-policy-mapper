@@ -159,7 +159,7 @@ def test_threshold_metrics():
 
 
 def test_threshold_metrics_bypass():
-    """Unavailable outcomes keep the candidate and count as bypassed."""
+    """No-answer outcomes keep the candidate and count as bypassed."""
     from scripts.eval_prefilter import threshold_metrics
 
     rows = [_fixture_row("p", 0, "ctx", [_candidate("R-1")], ["R-1"])]
@@ -174,7 +174,7 @@ def test_threshold_metrics_bypass():
 
 
 def test_threshold_metrics_absent_outcome_bypasses():
-    """An outcome key with no row at all also bypasses (replay answers missing)."""
+    """An answer key with no row at all also bypasses (replay answers missing)."""
     from scripts.eval_prefilter import threshold_metrics
 
     rows = [_fixture_row("p", 0, "ctx", [_candidate("R-1")], [])]
@@ -201,23 +201,23 @@ def test_latency_percentiles():
 
 
 def test_effective_p_reduces_like_the_rule():
-    """Duplicate probabilities reduce to the maximum; any Unavailable bypasses."""
-    from asago_policy_mapper.extract.decide import Probability, Unavailable
+    """Duplicate probabilities reduce to the maximum; any NoAnswer bypasses."""
+    from asago_policy_mapper.extract.screening import NoAnswer, ProbabilityAnswer
     from scripts.eval_prefilter import _effective_p
 
-    assert _effective_p([Probability(0.90), Probability(0.02)]) == 0.90
-    assert _effective_p([Probability(0.02), Probability(0.03)]) == 0.03
-    assert _effective_p([Probability(0.5), Unavailable("timeout")]) is None
+    assert _effective_p([ProbabilityAnswer(0.90), ProbabilityAnswer(0.02)]) == 0.90
+    assert _effective_p([ProbabilityAnswer(0.02), ProbabilityAnswer(0.03)]) == 0.03
+    assert _effective_p([ProbabilityAnswer(0.5), NoAnswer("timeout")]) is None
     assert _effective_p([]) is None
 
 
 def test_effective_p_treats_nan_like_the_rule():
-    """A NaN probability bypasses in the metrics, mirroring the rule's bypass:invalid."""
-    from asago_policy_mapper.extract.decide import Probability
+    """A NaN probability bypasses in the metrics, mirroring the rule's no_answer:invalid."""
+    from asago_policy_mapper.extract.screening import ProbabilityAnswer
     from scripts.eval_prefilter import _effective_p
 
-    assert _effective_p([Probability(float("nan"))]) is None
-    assert _effective_p([Probability(0.01), Probability(float("nan"))]) is None
+    assert _effective_p([ProbabilityAnswer(float("nan"))]) is None
+    assert _effective_p([ProbabilityAnswer(0.01), ProbabilityAnswer(float("nan"))]) is None
 
 
 def test_duplicate_probabilities_use_max_not_last(tmp_path):

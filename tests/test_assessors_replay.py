@@ -10,14 +10,14 @@ import json
 import pytest
 
 from asago_policy_mapper.assessors.replay import ReplayAssessor
-from asago_policy_mapper.extract.decide import (
-    BinaryTask,
+from asago_policy_mapper.extract.screening import (
     DecisionCase,
-    Probability,
-    Unavailable,
+    NoAnswer,
+    ProbabilityAnswer,
+    Question,
 )
 
-TASK = BinaryTask(task_id="risk-relevance", version="1", proposition="Is the risk relevant?")
+QUESTION = Question(question_id="risk-relevance", version="1", criterion="Is the risk relevant?")
 
 
 def _cases(*risk_ids: str) -> list[DecisionCase]:
@@ -41,16 +41,16 @@ def test_replay_roundtrip(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001", "R-002"))
 
-    assert batch.outcomes["R-001"] == (Probability(0.42),)
-    assert batch.outcomes["R-002"] == (Probability(0.9),)
+    assert batch.answers["R-001"] == (ProbabilityAnswer(0.42),)
+    assert batch.answers["R-002"] == (ProbabilityAnswer(0.9),)
     assert batch.unmatched_ids == ()
     assert batch.latency_ms >= 0.0
 
 
 def test_replay_serves_unavailable_outcomes(tmp_path):
-    """Stored unavailable rows are served as Unavailable outcomes with their reason."""
+    """Stored unavailable rows are served as NoAnswer answers with their reason."""
     context = "ctx"
     rows = [
         {"context_sha256": _sha256(context), "risk_id": "R-001", "unavailable": "timeout"},
@@ -60,21 +60,21 @@ def test_replay_serves_unavailable_outcomes(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001", "R-002"))
 
-    assert batch.outcomes["R-001"] == (Unavailable("timeout"),)
-    assert batch.outcomes["R-002"] == (Unavailable("invalid"),)
+    assert batch.answers["R-001"] == (NoAnswer("timeout"),)
+    assert batch.answers["R-002"] == (NoAnswer("invalid"),)
 
 
 def test_replay_unknown_key_is_missing(tmp_path):
-    """A (context, risk_id) with no stored row yields Unavailable("missing")."""
+    """A (context, risk_id) with no stored row yields NoAnswer("missing")."""
     path = tmp_path / "outcomes.jsonl"
     path.write_text(json.dumps({"context_sha256": _sha256("other"), "risk_id": "R-001", "p": 0.5}) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, "this context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "this context", _cases("R-001"))
 
-    assert batch.outcomes["R-001"] == (Unavailable("missing"),)
+    assert batch.answers["R-001"] == (NoAnswer("missing"),)
 
 
 def test_replay_duplicate_rows_keep_all_outcomes(tmp_path):
@@ -85,9 +85,9 @@ def test_replay_duplicate_rows_keep_all_outcomes(tmp_path):
     path.write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001"))
 
-    assert batch.outcomes["R-001"] == (Probability(0.5), Probability(0.5))
+    assert batch.answers["R-001"] == (ProbabilityAnswer(0.5), ProbabilityAnswer(0.5))
 
 
 def test_replay_unavailable_missing_row_is_not_droppable(tmp_path):
@@ -106,9 +106,9 @@ def test_replay_unavailable_missing_row_is_not_droppable(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001"))
 
-    assert batch.outcomes["R-001"] == (Unavailable("missing"), Probability(0.5))
+    assert batch.answers["R-001"] == (NoAnswer("missing"), ProbabilityAnswer(0.5))
 
 
 def test_replay_reads_only_once(tmp_path):
@@ -120,19 +120,19 @@ def test_replay_reads_only_once(tmp_path):
     assessor = ReplayAssessor(path)
     path.write_text("")  # truncate after construction
 
-    batch = assessor.assess(TASK, context, _cases("R-001"))
-    assert batch.outcomes["R-001"] == (Probability(0.5),)
+    batch = assessor.assess(QUESTION, context, _cases("R-001"))
+    assert batch.answers["R-001"] == (ProbabilityAnswer(0.5),)
 
 
 def test_replay_properties(tmp_path):
-    """The replay assessor is local, offline, and emits Probability and Unavailable."""
+    """The replay assessor is local, offline, and emits ProbabilityAnswer and NoAnswer."""
     path = tmp_path / "o.jsonl"
     path.write_text(json.dumps({"context_sha256": _sha256("c"), "risk_id": "R-001", "p": 0.5}) + "\n")
     assessor = ReplayAssessor(path)
 
-    assert assessor.offsite is False
-    assert Probability in assessor.emits
-    assert Unavailable in assessor.emits
+    assert assessor.sends_offsite is False
+    assert ProbabilityAnswer in assessor.answer_types
+    assert NoAnswer in assessor.answer_types
     assert "replay" in assessor.assessor_id
 
 
@@ -148,7 +148,7 @@ def test_replay_serves_recorded_latency(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001", "R-002"))
 
     assert batch.latency_ms == 120.0  # the max the batch's rows carry
     assert assessor.last_recorded is True
@@ -170,7 +170,7 @@ def test_replay_invalid_latencies_are_treated_as_absent(tmp_path):
 
     assessor = ReplayAssessor(path)
     for rid in ("R-001", "R-002", "R-003", "R-004", "R-005"):
-        assessor.assess(TASK, context, _cases(rid))
+        assessor.assess(QUESTION, context, _cases(rid))
         assert assessor.last_recorded is False, rid
     # The rows themselves still load: only the latency is discarded.
     assert assessor.malformed_lines == 0
@@ -188,7 +188,7 @@ def test_replay_duplicate_rows_keep_the_max_latency(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001"))
 
     assert batch.latency_ms == 120.0
 
@@ -202,9 +202,9 @@ def test_replay_unavailable_detail_round_trips(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001"))
 
-    assert batch.outcomes["R-001"] == (Unavailable("error", "HTTP 503"),)
+    assert batch.answers["R-001"] == (NoAnswer("error", "HTTP 503"),)
 
 
 def test_replay_missing_file_is_an_error(tmp_path):
@@ -231,15 +231,15 @@ def test_replay_all_malformed_file_is_an_error(tmp_path):
         ReplayAssessor(path)
 
 
-def test_replay_wire_is_none(tmp_path):
-    """Replay makes no wire request; wire stays None like other offline assessors."""
+def test_replay_exchange_is_none(tmp_path):
+    """Replay makes no request; its exchange stays None like other offline assessors."""
     path = tmp_path / "outcomes.jsonl"
     path.write_text(json.dumps({"context_sha256": _sha256("ctx"), "risk_id": "R-001", "p": 0.5}) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, "ctx", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "ctx", _cases("R-001"))
 
-    assert batch.wire is None
+    assert batch.exchange is None
 
 
 def test_replay_bad_rows_are_counted_not_fatal(tmp_path, capsys):
@@ -261,11 +261,11 @@ def test_replay_bad_rows_are_counted_not_fatal(tmp_path, capsys):
     path.write_text("\n".join(lines) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001", "R-003", "R-004", "R-005"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001", "R-003", "R-004", "R-005"))
 
-    assert batch.outcomes["R-001"] == (Probability(0.5),)
+    assert batch.answers["R-001"] == (ProbabilityAnswer(0.5),)
     for rid in ("R-003", "R-004", "R-005"):
-        assert batch.outcomes[rid] == (Unavailable("missing"),), rid
+        assert batch.answers[rid] == (NoAnswer("missing"),), rid
     assert assessor.malformed_lines == 7  # every unusable line; blank lines excluded
     assert "malformed line" in capsys.readouterr().err
 
@@ -286,11 +286,11 @@ def test_replay_out_of_range_p_is_skipped(tmp_path):
     path.write_text("\n".join(r % key for r in raws) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001", "R-002", "R-003", "R-004", "R-005", "R-006"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001", "R-002", "R-003", "R-004", "R-005", "R-006"))
 
     for rid in ("R-001", "R-002", "R-003", "R-004", "R-005"):
-        assert batch.outcomes[rid] == (Unavailable("missing"),), rid
-    assert batch.outcomes["R-006"] == (Probability(0.5),)
+        assert batch.answers[rid] == (NoAnswer("missing"),), rid
+    assert batch.answers["R-006"] == (ProbabilityAnswer(0.5),)
 
 
 def test_replay_boundary_p_values_load(tmp_path):
@@ -307,12 +307,12 @@ def test_replay_boundary_p_values_load(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001", "R-002", "R-003", "R-004"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001", "R-002", "R-003", "R-004"))
 
-    assert batch.outcomes["R-001"] == (Probability(0.0),)
-    assert batch.outcomes["R-002"] == (Probability(1.0),)
-    assert batch.outcomes["R-003"] == (Probability(0.0),)
-    assert batch.outcomes["R-004"] == (Probability(1.0),)
+    assert batch.answers["R-001"] == (ProbabilityAnswer(0.0),)
+    assert batch.answers["R-002"] == (ProbabilityAnswer(1.0),)
+    assert batch.answers["R-003"] == (ProbabilityAnswer(0.0),)
+    assert batch.answers["R-004"] == (ProbabilityAnswer(1.0),)
 
 
 def test_replay_unavailable_never_falls_through_to_p(tmp_path):
@@ -329,14 +329,14 @@ def test_replay_unavailable_never_falls_through_to_p(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001", "R-002", "R-003"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001", "R-002", "R-003"))
 
     for rid in ("R-001", "R-002", "R-003"):
-        assert batch.outcomes[rid] == (Unavailable("missing"),), rid
+        assert batch.answers[rid] == (NoAnswer("missing"),), rid
 
 
 def test_replay_unavailable_reasons_are_exact(tmp_path):
-    """Each stored Unavailable reason round-trips exactly; an unknown reason drops the row."""
+    """Each stored NoAnswer reason round-trips exactly; an unknown reason drops the row."""
     context = "ctx"
     key = _sha256(context)
     rows = [
@@ -349,14 +349,14 @@ def test_replay_unavailable_reasons_are_exact(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001", "R-002", "R-003", "R-004"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001", "R-002", "R-003", "R-004"))
 
     # Each row carries both a reason and a p; the reason wins for every
     # recognized reason, including "missing".
-    assert batch.outcomes["R-001"] == (Unavailable("missing"),)
-    assert batch.outcomes["R-002"] == (Unavailable("invalid"),)
-    assert batch.outcomes["R-003"] == (Unavailable("timeout"),)
-    assert batch.outcomes["R-004"] == (Unavailable("error"),)
+    assert batch.answers["R-001"] == (NoAnswer("missing"),)
+    assert batch.answers["R-002"] == (NoAnswer("invalid"),)
+    assert batch.answers["R-003"] == (NoAnswer("timeout"),)
+    assert batch.answers["R-004"] == (NoAnswer("error"),)
 
 
 def test_replay_latency_is_milliseconds(monkeypatch, tmp_path):
@@ -375,7 +375,7 @@ def test_replay_latency_is_milliseconds(monkeypatch, tmp_path):
     path.write_text(json.dumps({"context_sha256": _sha256("ctx"), "risk_id": "R-001", "p": 0.5}) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, "ctx", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "ctx", _cases("R-001"))
 
     assert batch.latency_ms == 500.0
 
@@ -393,10 +393,10 @@ def test_replay_rejects_one_bad_key_field_at_a_time(tmp_path):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-001", "R-003"))
+    batch = assessor.assess(QUESTION, context, _cases("R-001", "R-003"))
 
-    assert batch.outcomes["R-001"] == (Unavailable("missing"),)
-    assert batch.outcomes["R-003"] == (Probability(0.5),)
+    assert batch.answers["R-001"] == (NoAnswer("missing"),)
+    assert batch.answers["R-003"] == (ProbabilityAnswer(0.5),)
 
 
 def test_replay_reads_utf8(tmp_path):
@@ -407,6 +407,6 @@ def test_replay_reads_utf8(tmp_path):
     path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
 
     assessor = ReplayAssessor(path)
-    batch = assessor.assess(TASK, context, _cases("R-é"))
+    batch = assessor.assess(QUESTION, context, _cases("R-é"))
 
-    assert batch.outcomes["R-é"] == (Probability(0.5),)
+    assert batch.answers["R-é"] == (ProbabilityAnswer(0.5),)

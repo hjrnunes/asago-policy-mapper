@@ -23,13 +23,18 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor, ProbabilityEndpoint
-from asago_policy_mapper.extract.decide import RISK_RELEVANCE_V1, DecisionCase, Probability, Unavailable
+from asago_policy_mapper.extract.screening import (
+    RELEVANCE_QUESTION_V1,
+    DecisionCase,
+    NoAnswer,
+    ProbabilityAnswer,
+)
 
 
 def record_answers(rows: Sequence[dict], assessor) -> list[dict]:
     """Assess every fixture row's candidates and turn the batch into answer rows.
 
-    Each answer row carries the fixture row's key pair, the outcome
+    Each answer row carries the fixture row's key pair, the answer
     (``p`` or an ``unavailable`` reason) and the assessment's
     ``latency_ms``. Candidates the assessor omitted entirely become
     ``unavailable: "missing"`` rows, so the answers file always covers
@@ -40,18 +45,18 @@ def record_answers(rows: Sequence[dict], assessor) -> list[dict]:
         cases = [
             DecisionCase(risk_id=c["risk_id"], name=c["name"], description=c["description"]) for c in row["candidates"]
         ]
-        batch = assessor.assess(RISK_RELEVANCE_V1, row["context"], cases)
+        batch = assessor.assess(RELEVANCE_QUESTION_V1, row["context"], cases)
         for case in cases:
-            outcomes = batch.outcomes.get(case.risk_id, ())
+            case_answers = batch.answers.get(case.risk_id, ())
             answer = {"context_sha256": row["context_sha256"], "risk_id": case.risk_id, "latency_ms": batch.latency_ms}
-            probability = next((o for o in outcomes if isinstance(o, Probability)), None)
-            unavailable = next((o for o in outcomes if isinstance(o, Unavailable)), None)
+            probability = next((o for o in case_answers if isinstance(o, ProbabilityAnswer)), None)
+            unavailable = next((o for o in case_answers if isinstance(o, NoAnswer)), None)
             if unavailable is not None:
                 answer["unavailable"] = unavailable.reason
                 if unavailable.detail:
                     answer["detail"] = unavailable.detail
             elif probability is not None:
-                answer["p"] = probability.p
+                answer["p"] = probability.probability
             else:
                 answer["unavailable"] = "missing"
             answers.append(answer)

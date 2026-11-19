@@ -113,9 +113,7 @@ class HttpProbabilityAssessor:
         if not cases:
             # Built inline: a shared dict would let one caller's append leak
             # into the next empty batch's exchange.
-            return AnswerBatch(
-                answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []}
-            )
+            return AnswerBatch(answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []})
         answers: dict[str, tuple[Answer, ...]] = {}
         unmatched: list[str] = []
         exchanges: list[dict] = []
@@ -218,9 +216,7 @@ class HttpProbabilityAssessor:
         secret = os.environ.get(self.endpoint.api_key_env) or ""
         return {"request": request_body, "response": _redact(response_payload, secret)}
 
-    def _mark_all(
-        self, cases: Sequence[DecisionCase], reason: _NoAnswerReason, detail: str = ""
-    ) -> dict[str, Answer]:
+    def _mark_all(self, cases: Sequence[DecisionCase], reason: _NoAnswerReason, detail: str = "") -> dict[str, Answer]:
         return {c.risk_id: NoAnswer(reason, detail) for c in cases}
 
 

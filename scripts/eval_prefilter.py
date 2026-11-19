@@ -29,11 +29,11 @@ import sys
 from pathlib import Path
 
 from asago_policy_mapper.assessors.replay import ReplayAssessor
-from asago_policy_mapper.extract.decide import (
-    RISK_RELEVANCE_V1,
+from asago_policy_mapper.extract.screening import (
+    RELEVANCE_QUESTION_V1,
     DecisionCase,
-    Probability,
-    Unavailable,
+    NoAnswer,
+    ProbabilityAnswer,
 )
 
 TUNING_POLICIES = frozenset(
@@ -86,16 +86,16 @@ def split_rows(rows: list[dict], tuning: frozenset[str], held_out: frozenset[str
     return tune, hold
 
 
-def _effective_p(outcomes: tuple) -> float | None:
-    """Reduce one candidate's stored outcomes to the probability the rule sees.
+def _effective_p(answers: tuple) -> float | None:
+    """Reduce one candidate's stored answers to the probability the rule sees.
 
-    Mirrors ThresholdDrop: an Unavailable anywhere bypasses (None marks
+    Mirrors DropThreshold: a NoAnswer anywhere bypasses (None marks
     that), a NaN probability cannot be compared and bypasses the same way
-    (the rule keeps it with bypass:invalid), otherwise the maximum
+    (the rule keeps it with no_answer:invalid), otherwise the maximum
     probability decides (any high one keeps).
     """
-    probabilities = [o.p for o in outcomes if isinstance(o, Probability)]
-    if any(isinstance(o, Unavailable) for o in outcomes) or not probabilities:
+    probabilities = [o.probability for o in answers if isinstance(o, ProbabilityAnswer)]
+    if any(isinstance(o, NoAnswer) for o in answers) or not probabilities:
         return None
     if any(math.isnan(p) for p in probabilities):
         return None
@@ -119,8 +119,8 @@ def _assess_rows(rows: list[dict], assessor: ReplayAssessor) -> list[_AssessedRo
         cases = [
             DecisionCase(risk_id=c["risk_id"], name=c["name"], description=c["description"]) for c in row["candidates"]
         ]
-        batch = assessor.assess(RISK_RELEVANCE_V1, row["context"], cases)
-        effective = {case.risk_id: _effective_p(batch.outcomes.get(case.risk_id, ())) for case in cases}
+        batch = assessor.assess(RELEVANCE_QUESTION_V1, row["context"], cases)
+        effective = {case.risk_id: _effective_p(batch.answers.get(case.risk_id, ())) for case in cases}
         assessed.append((row, effective, batch.latency_ms if assessor.last_recorded else None))
     return assessed
 

@@ -118,7 +118,7 @@ def test_record_then_replay_roundtrip(tmp_path):
     """The recorded answers file replays: scores, missing and latency all serve back."""
     from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor, ProbabilityEndpoint
     from asago_policy_mapper.assessors.replay import ReplayAssessor
-    from asago_policy_mapper.extract.decide import RISK_RELEVANCE_V1, DecisionCase, Probability
+    from asago_policy_mapper.extract.screening import RELEVANCE_QUESTION_V1, DecisionCase, ProbabilityAnswer
     from scripts.record_prefilter_answers import record_answers
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -138,10 +138,10 @@ def test_record_then_replay_roundtrip(tmp_path):
     cases = [
         DecisionCase(risk_id=c["risk_id"], name=c["name"], description=c["description"]) for c in rows[0]["candidates"]
     ]
-    batch = replay.assess(RISK_RELEVANCE_V1, "ctx", cases)
+    batch = replay.assess(RELEVANCE_QUESTION_V1, "ctx", cases)
 
-    assert batch.outcomes["R-x1"] == (Probability(0.9),)
-    assert batch.outcomes["R-y1"] == (Probability(0.05),)
+    assert batch.answers["R-x1"] == (ProbabilityAnswer(0.9),)
+    assert batch.answers["R-y1"] == (ProbabilityAnswer(0.05),)
     assert replay.recorded_latencies is True
     # The replayed latency is the provider's recorded round-trip, not lookup time.
     recorded = {a["risk_id"]: a["latency_ms"] for a in answers}
