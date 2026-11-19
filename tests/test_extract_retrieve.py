@@ -565,7 +565,7 @@ def test_retrieve_chunk_unscored_not_counted_as_bm25_rescued():
     assert cr.stats["bm25_rescued"] == 0
 
 
-def test_unavailable_never_serialized_as_nan():
+def test_unscored_never_serialized_as_nan():
     """Candidates carried in the chunk result never expose NaN; unscored reads 0.0."""
     chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
 

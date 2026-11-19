@@ -146,7 +146,8 @@ def test_rerank_counts_unscored(monkeypatch, caplog):
     """rerank counts NaN-scored candidates as rerank_unscored and warns once each.
 
     Unscored candidates stay in the returned list, after every scored one,
-    so the selection path can route them to the judge (D3 option b).
+    so the selection path can route them to the judge instead of dropping
+    them.
     """
     index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan"), 0.8])
     candidates = [
