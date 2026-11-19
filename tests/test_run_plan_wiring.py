@@ -1,4 +1,4 @@
-"""Wiring tests for the run plan (asago-uzfb1.12, step order per bead).
+"""Wiring tests for the run plan.
 
 One ``RunPlan`` (``extract/plan.py::resolve_plan``) decides the CLI's
 LLM check, the saved settings, the CLI summary and the pipeline's stage
@@ -38,7 +38,7 @@ def _policy(tmp_path) -> Path:
     return policy
 
 
-# --- the CLI check and error (step 1) ---
+# --- the CLI check and error ---
 
 
 def _validate_kwargs(tmp_path, retrieval=None, **overrides):
@@ -465,7 +465,7 @@ def test_run_pipeline_omits_the_plan_kwarg_without_a_plan():
     assert result is plan
 
 
-# --- the metadata (step 2) ---
+# --- the metadata ---
 
 
 def test_metadata_records_requested_and_effective(mock_config, tmp_path, monkeypatch):
@@ -582,7 +582,7 @@ def test_empty_run_records_the_plan(tmp_path, mock_config):
     assert result.metadata["run_plan"]["effective"]["prefilter"] is True
 
 
-# --- the explicit reranker argument (step 3) ---
+# --- the explicit reranker argument ---
 
 
 class _RecordingIndex:
@@ -738,7 +738,7 @@ def test_rrf_floor_does_not_toggle_reranking(mock_config, tmp_path, monkeypatch)
     assert all(call["rerank"] is False for call in index.calls)
 
 
-# --- judge contexts (step 4) ---
+# --- judge contexts ---
 
 
 def test_judge_context_tokens_used_when_positive(mock_config, monkeypatch, tmp_path):
@@ -1086,7 +1086,7 @@ def test_judge_stage_follows_the_plan_not_the_raw_flags(mock_config, monkeypatch
     assert chunk_results[0].accepted == borderline
 
 
-# --- the warnings (step 6) ---
+# --- the warnings ---
 
 
 def test_overlap_warns_not_errors(tmp_path, capsys, monkeypatch):
