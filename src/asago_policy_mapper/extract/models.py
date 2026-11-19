@@ -122,8 +122,9 @@ class RiskMatch(BaseModel):
     consequence: str | None = None
     impact: str | None = None
     scores_inherited_from: str | None = None
-    # Why there is no causal chain: "disabled" covers synthesis turned off or
-    # no client; the other values come from CausalOutcomeStatus.
+    # Why there is no causal chain: "disabled" covers synthesis turned off,
+    # no client or no grounding; the other values come from
+    # CausalSynthesisStatus.
     causal_status: Literal["generated", "no_evidence", "empty_answer", "validation_exhausted", "disabled"] | None = None
     # Which source supplied each causal field: LLM synthesis or the built-in
     # catalog tables.
@@ -338,11 +339,11 @@ class _CausalChains(BaseModel):
     items: list[_CausalChain]
 
 
-CausalOutcomeStatus = Literal["generated", "no_evidence", "empty_answer", "validation_exhausted"]
+CausalSynthesisStatus = Literal["generated", "no_evidence", "empty_answer", "validation_exhausted"]
 
 
 @dataclass
-class CausalOutcome:
+class CausalSynthesisResult:
     """The result of one causal-synthesis attempt, with the reason for no chain.
 
     ``status`` keeps the three "no chain" reasons apart: ``no_evidence``
@@ -351,7 +352,7 @@ class CausalOutcome:
     model output failed parsing or validation until retries ran out).
     """
 
-    status: CausalOutcomeStatus
+    status: CausalSynthesisStatus
     chain: _CausalChain | None = None
 
 

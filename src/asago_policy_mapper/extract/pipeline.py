@@ -15,12 +15,12 @@ from asago_policy_mapper.extract.attribute import (
     ground_and_extract_evidence,
     ground_risk_group,
     ground_variants,
-    synthesize_causal_chain_outcome,
+    synthesize_causal_chain_with_status,
 )
 from asago_policy_mapper.extract.index import RiskIndex
 from asago_policy_mapper.extract.merge import merge_matches
 from asago_policy_mapper.extract.models import (
-    CausalOutcome,
+    CausalSynthesisResult,
     ChunkSummary,
     DecisionCallRecord,
     DecisionItem,
@@ -910,7 +910,7 @@ def _run_causal_synthesis(merged, chunks, client, config, max_workers, call_coll
     chunk_texts = {i: chunks[i].text for i in range(len(chunks))}
 
     def _synthesize_one(risk_match):
-        return risk_match.risk_id, synthesize_causal_chain_outcome(
+        return risk_match.risk_id, synthesize_causal_chain_with_status(
             risk_match=risk_match,
             chunk_texts=chunk_texts,
             client=client,
@@ -918,7 +918,7 @@ def _run_causal_synthesis(merged, chunks, client, config, max_workers, call_coll
             call_collector=call_collector,
         )
 
-    outcomes: dict[str, CausalOutcome] = {}
+    outcomes: dict[str, CausalSynthesisResult] = {}
     logger.info("Causal synthesis: %d risks", len(merged))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_synthesize_one, m): m for m in merged}

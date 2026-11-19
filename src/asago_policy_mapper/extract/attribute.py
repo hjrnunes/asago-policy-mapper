@@ -6,8 +6,8 @@ import time
 from asago_policy_mapper.extract.calllog import append_with_call_id
 from asago_policy_mapper.extract.evidence import locate_quote
 from asago_policy_mapper.extract.models import (
-    CausalOutcome,
-    CausalOutcomeStatus,
+    CausalSynthesisResult,
+    CausalSynthesisStatus,
     EvidenceSpan,
     LLMCallRecord,
     RiskMatch,
@@ -482,7 +482,7 @@ def _downgrade_empty_chain(chain: _CausalChain | None, risk_id: str) -> _CausalC
     return chain
 
 
-def _outcome_status(chain: _CausalChain | None, retry_exhausted: bool) -> CausalOutcomeStatus:
+def _outcome_status(chain: _CausalChain | None, retry_exhausted: bool) -> CausalSynthesisStatus:
     """Map (chain, retry_exhausted) to the no-chain reason when there is no chain."""
     if retry_exhausted:
         return "validation_exhausted"
@@ -524,24 +524,24 @@ def _record_causal_call(
     )
 
 
-def synthesize_causal_chain_outcome(
+def synthesize_causal_chain_with_status(
     risk_match: RiskMatch,
     chunk_texts: dict[int, str],
     client,
     model: str,
     *,
     call_collector: list[LLMCallRecord] | None = None,
-) -> CausalOutcome:
+) -> CausalSynthesisResult:
     """Synthesize one risk's causal chain, keeping the no-chain reasons apart.
 
-    Returns a ``CausalOutcome`` whose ``status`` distinguishes the three ways
-    a chain can be missing; the chain itself (or None) rides in ``chain``.
-    Non-validation errors propagate unchanged.
+    Returns a ``CausalSynthesisResult`` whose ``status`` distinguishes the
+    three ways a chain can be missing; the chain itself (or None) rides in
+    ``chain``. Non-validation errors propagate unchanged.
     """
     evidence_chunks = _evidence_chunk_texts(risk_match, chunk_texts)
 
     if not evidence_chunks:
-        return CausalOutcome(status="no_evidence")
+        return CausalSynthesisResult(status="no_evidence")
 
     combined_text = "\n\n---\n\n".join(evidence_chunks)
 
@@ -560,7 +560,7 @@ def synthesize_causal_chain_outcome(
             duration_ms=duration_ms,
         )
 
-    return CausalOutcome(status=status, chain=chain)
+    return CausalSynthesisResult(status=status, chain=chain)
 
 
 def synthesize_causal_chain(
@@ -571,8 +571,8 @@ def synthesize_causal_chain(
     *,
     call_collector: list[LLMCallRecord] | None = None,
 ) -> _CausalChain | None:
-    """Legacy view of ``synthesize_causal_chain_outcome``: the chain, or None."""
-    return synthesize_causal_chain_outcome(
+    """Legacy view of ``synthesize_causal_chain_with_status``: the chain, or None."""
+    return synthesize_causal_chain_with_status(
         risk_match=risk_match,
         chunk_texts=chunk_texts,
         client=client,

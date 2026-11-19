@@ -21,7 +21,7 @@ from asago_policy_mapper.extract.attribute import (
     ground_risk_group,
     ground_variants,
     synthesize_causal_chain,
-    synthesize_causal_chain_outcome,
+    synthesize_causal_chain_with_status,
 )
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
@@ -1680,7 +1680,7 @@ def test_synthesize_causal_chain_records_call(mock_client):
 
 
 # ---------------------------------------------------------------------------
-# Tests for synthesize_causal_chain_outcome
+# Tests for synthesize_causal_chain_with_status
 # ---------------------------------------------------------------------------
 
 
@@ -1708,7 +1708,7 @@ def test_generated_status_with_chain(mock_client):
         ]
     )
 
-    outcome = synthesize_causal_chain_outcome(
+    outcome = synthesize_causal_chain_with_status(
         risk_match=_make_risk_match(),
         chunk_texts={0: "Some text.", 2: "More text."},
         client=mock_client,
@@ -1725,7 +1725,7 @@ def test_no_evidence_status(mock_client):
     """A risk whose evidence points at no chunk in chunk_texts never calls the model."""
     risk = _make_risk_match(chunk_indices=[0, 2])
 
-    outcome = synthesize_causal_chain_outcome(
+    outcome = synthesize_causal_chain_with_status(
         risk_match=risk,
         chunk_texts={5: "Some other chunk."},
         client=mock_client,
@@ -1742,7 +1742,7 @@ def test_empty_answer_status(mock_client):
         items=[_CausalChain(threat="", threat_source="", vulnerability="", consequence="", impact="")]
     )
 
-    outcome = synthesize_causal_chain_outcome(
+    outcome = synthesize_causal_chain_with_status(
         risk_match=_make_risk_match(),
         chunk_texts={0: "Some text.", 2: "More text."},
         client=mock_client,
@@ -1756,7 +1756,7 @@ def test_empty_answer_status(mock_client):
 def test_empty_items_list_is_empty_answer(mock_client):
     mock_client.chat.completions.create.return_value = _CausalChains(items=[])
 
-    outcome = synthesize_causal_chain_outcome(
+    outcome = synthesize_causal_chain_with_status(
         risk_match=_make_risk_match(),
         chunk_texts={0: "Some text.", 2: "More text."},
         client=mock_client,
@@ -1770,7 +1770,7 @@ def test_empty_items_list_is_empty_answer(mock_client):
 def test_validation_exhausted_status(mock_client):
     mock_client.chat.completions.create.side_effect = validation_exhaustion(malformed_json_validation_error())
 
-    outcome = synthesize_causal_chain_outcome(
+    outcome = synthesize_causal_chain_with_status(
         risk_match=_make_risk_match(),
         chunk_texts={0: "Some text.", 2: "More text."},
         client=mock_client,
@@ -1795,7 +1795,7 @@ def test_outcome_records_call_like_legacy(mock_client):
     )
     collector: list[LLMCallRecord] = []
 
-    outcome = synthesize_causal_chain_outcome(
+    outcome = synthesize_causal_chain_with_status(
         risk_match=_make_risk_match(),
         chunk_texts={0: "Text.", 2: "More."},
         client=mock_client,
@@ -1814,7 +1814,7 @@ def test_outcome_no_evidence_records_no_call(mock_client):
     """The no-evidence short-circuit must not append a call record."""
     collector: list[LLMCallRecord] = []
 
-    outcome = synthesize_causal_chain_outcome(
+    outcome = synthesize_causal_chain_with_status(
         risk_match=_make_risk_match(chunk_indices=[0]),
         chunk_texts={1: "Some other chunk."},
         client=mock_client,
