@@ -55,6 +55,7 @@ def test_risk_match_serialization():
         risk_name="Discriminatory Outcomes",
         risk_description="AI system produces biased results.",
         confidence=0.85,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[
@@ -271,3 +272,57 @@ def test_llm_call_record_causal_synthesis_stage():
         result_summary="synthesized",
     )
     assert record.stage == "causal_synthesis"
+
+
+def test_risk_match_rejects_unsourced_numeric_confidence():
+    """A numeric confidence without a source is the unsourced score the schema prevents."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="confidence_source"):
+        RiskMatch(
+            risk_id="atlas-bias",
+            risk_name="Bias",
+            risk_description="",
+            confidence=0.9,
+            grounding_confidence="high",
+            accepted_by="threshold",
+            evidence=[],
+            scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.5),
+        )
+
+
+def test_risk_match_allows_null_confidence_without_source():
+    """Null confidence legitimately pairs with source none."""
+    m = RiskMatch(
+        risk_id="atlas-bias",
+        risk_name="Bias",
+        risk_description="",
+        confidence=None,
+        confidence_source="none",
+        grounding_confidence="high",
+        accepted_by="query_gen",
+        evidence=[],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=None, rrf_score=0.5),
+    )
+    assert m.confidence is None
+    assert m.confidence_source == "none"
+
+
+def test_risk_match_accepted_by_rejects_unknown_label():
+    """accepted_by admits exactly the seven documented labels."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        RiskMatch(
+            risk_id="atlas-bias",
+            risk_name="Bias",
+            risk_description="",
+            confidence=None,
+            confidence_source="none",
+            grounding_confidence="high",
+            accepted_by="grounding",
+            evidence=[],
+            scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=None, rrf_score=0.5),
+        )

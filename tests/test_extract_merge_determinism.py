@@ -47,6 +47,7 @@ def _match(risk_id, confidence, spans, grounding_confidence="high"):
         risk_name=f"Risk {risk_id}",
         risk_description=f"Description of {risk_id}.",
         confidence=confidence,
+        confidence_source="cross_encoder" if confidence is not None else "none",
         grounding_confidence=grounding_confidence,
         accepted_by="threshold",
         evidence=list(spans),
