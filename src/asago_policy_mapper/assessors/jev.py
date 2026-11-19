@@ -95,8 +95,8 @@ class JevProbabilityAssessor(HttpProbabilityAssessor):
 
     #: What the Jev request carries beyond the generic shape: each
     #: question's instructions embed the fixed question text and the
-    #: task's criterion (the ``BinaryTask`` proposition — the grounding
-    #: criterion) alongside the case's name and description.
+    #: question's criterion (the ``Question`` grounding criterion) alongside
+    #: the case's name and description.
     fields_sent = ("chunk_context", "question", "criterion", "risk_name", "risk_description")
 
     def __init__(self, endpoint: ProbabilityEndpoint, transport=None):

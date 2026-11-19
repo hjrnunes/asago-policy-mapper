@@ -5,9 +5,9 @@ Jev endpoint is contacted and no real key is needed. The mapping is a
 thin subclass of the generic adapter: it translates the decision seam's
 ``{context, cases}`` input onto Jev's ``/v1/systemone`` wire (one Noul
 question per case, keyed by risk id) and reads each answer's ``noul``
-probability back as the generic ``{id, p}`` score, keeping 149a's
-semantics (no-answer reasons, sends-offsite determination, credentials never
-in repr/serialization/wire logs).
+probability back as the generic ``{id, p}`` score, keeping the generic
+adapter's semantics (no-answer reasons, sends-offsite determination,
+credentials never in repr/serialization/exchange logs).
 """
 
 import ast
@@ -487,7 +487,6 @@ def test_response_echoing_the_api_key_is_redacted(monkeypatch):
     assert batch.exchange["responses"][0]["echo"] == "key=[redacted]"
 
 
-
 def test_unmatched_id_echoing_the_api_key_is_redacted(monkeypatch):
     """An unmatched question id carrying the key is redacted, not recorded.
 
@@ -511,8 +510,6 @@ def test_unmatched_id_echoing_the_api_key_is_redacted(monkeypatch):
     assert _p_value(batch.answers["R-001"][0]) == 0.9
 
 
-
-
 def test_unmatched_id_partial_key_echo_is_redacted(monkeypatch):
     """A key embedded inside an unmatched id is replaced in place."""
     monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "secret-value-123")
@@ -526,8 +523,6 @@ def test_unmatched_id_partial_key_echo_is_redacted(monkeypatch):
     assert batch.unmatched_ids == ("prefix-[redacted]-suffix",)
 
 
-
-
 def test_unmatched_id_with_no_key_configured_stays_exact(monkeypatch):
     """With no key configured there is no secret to redact; ids stay exact."""
     monkeypatch.delenv("POLICY_MAPPER_JEV_API_KEY", raising=False)
@@ -539,7 +534,6 @@ def test_unmatched_id_with_no_key_configured_stays_exact(monkeypatch):
     batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
 
     assert batch.unmatched_ids == ("R-999",)
-
 
 
 def test_error_object_without_answers_is_error_not_missing():
@@ -557,8 +551,6 @@ def test_error_object_without_answers_is_error_not_missing():
     assert batch.answers["R-001"][0].reason == "error"
     assert batch.answers["R-001"][0].detail == "state exceeded the context window"
     assert batch.answers["R-002"][0].reason == "error"
-
-
 
 
 def test_error_object_detail_redacts_an_echoed_key(monkeypatch):
@@ -579,8 +571,6 @@ def test_error_object_detail_redacts_an_echoed_key(monkeypatch):
 
     assert batch.answers["R-001"][0].reason == "error"
     assert batch.answers["R-001"][0].detail == "auth failed for key [redacted]"
-
-
 
 
 def test_error_object_detail_redacts_before_truncating(monkeypatch):
@@ -605,8 +595,6 @@ def test_error_object_detail_redacts_before_truncating(monkeypatch):
     assert "secret-value-123" not in detail
 
 
-
-
 def test_null_answers_key_treated_as_missing_not_invalid():
     """An explicit answers:null means the same as an absent key.
 
@@ -626,8 +614,6 @@ def test_null_answers_key_treated_as_missing_not_invalid():
     assert batch.answers["R-001"][0].detail == "overloaded"
 
 
-
-
 def test_error_object_non_string_collapses_to_a_stable_detail():
     """A non-string error object yields a stable marker, not a repr of the payload."""
     body = {"model": "jev-1.14.0", "error": {"code": 429, "retry": True}}
@@ -639,8 +625,6 @@ def test_error_object_non_string_collapses_to_a_stable_detail():
     assert batch.answers["R-001"][0].detail == "endpoint returned an error object"
 
 
-
-
 def test_error_object_null_collapses_to_a_stable_detail():
     """An explicit null error object is still an error with the stable marker."""
     body = {"model": "jev-1.14.0", "error": None}
@@ -650,7 +634,6 @@ def test_error_object_null_collapses_to_a_stable_detail():
 
     assert batch.answers["R-001"][0].reason == "error"
     assert batch.answers["R-001"][0].detail == "endpoint returned an error object"
-
 
 
 def test_fields_sent_describes_the_jev_exchange():
@@ -670,8 +653,6 @@ def test_fields_sent_describes_the_jev_exchange():
         "risk_name",
         "risk_description",
     )
-
-
 
 
 def test_metadata_fields_sent_uses_the_assessor_declaration():
