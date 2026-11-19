@@ -33,7 +33,7 @@ class ScoredCandidate(BaseModel):
     # measurement was invalid) — the 0.0 default is a placeholder, not a
     # measurement.
     rerank_source: Literal["cross_encoder", "colbert"] | None = None
-    selected_by: str | None = None
+    accepted_by: str | None = None
 
 
 DPV_RISK_CONTROLS = Literal[

@@ -201,8 +201,8 @@ def determine_accepted_by(candidate, *, borderline_judged, use_cross_encoder, no
     """
     if candidate in borderline_judged:
         return "auto_promoted" if no_judge else "llm_judge"
-    if candidate.selected_by is not None:
-        return candidate.selected_by
+    if candidate.accepted_by is not None:
+        return candidate.accepted_by
     raise PipelineInvariantError(
         f"candidate {candidate.risk_id} reached acceptance without a selection label; "
         "retrieval and query generation must stamp every accepted candidate"
@@ -939,7 +939,7 @@ def _merge_query_candidates(chunk_results, chunks, qr, candidates):
     model_copy — the same candidate objects are shared between chunks, so
     nothing is mutated in place.
     """
-    stamped = [c.model_copy(update={"selected_by": "query_gen"}) for c in candidates]
+    stamped = [c.model_copy(update={"accepted_by": "query_gen"}) for c in candidates]
     for ci in qr.chunk_indices:
         chunk = chunks[ci]
         if chunk_results[ci] is not None:

@@ -694,7 +694,7 @@ def test_determine_accepted_by_unstamped_candidate_raises():
     selection label; a candidate without one never occurs in production.
     """
     c = _candidate()
-    c = c.model_copy(update={"selected_by": None})
+    c = c.model_copy(update={"accepted_by": None})
     with pytest.raises(PipelineInvariantError):
         determine_accepted_by(
             c,

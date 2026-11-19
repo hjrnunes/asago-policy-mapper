@@ -309,6 +309,34 @@ def test_risk_match_allows_null_confidence_without_source():
     assert m.confidence_source == "none"
 
 
+def test_risk_match_rejects_nan_confidence_despite_nullable_type():
+    """Nullable confidence still refuses NaN in every source mode.
+
+    The type widened to ``float | None`` for never-calculated scores, but
+    None is the only legal "no value": NaN would break the merge ordering
+    keys, so the field validator rejects it whether or not a source is
+    stamped.
+    """
+    import math
+
+    import pytest
+    from pydantic import ValidationError
+
+    for source in ("cross_encoder", "none"):
+        with pytest.raises(ValidationError, match="must not be NaN"):
+            RiskMatch(
+                risk_id="atlas-bias",
+                risk_name="Bias",
+                risk_description="",
+                confidence=math.nan,
+                confidence_source=source,
+                grounding_confidence="high",
+                accepted_by="threshold",
+                evidence=[],
+                scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.5),
+            )
+
+
 def test_risk_match_accepted_by_rejects_unknown_label():
     """accepted_by admits exactly the seven documented labels."""
     import pytest
