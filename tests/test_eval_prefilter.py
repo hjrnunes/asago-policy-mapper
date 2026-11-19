@@ -143,15 +143,10 @@ def test_threshold_metrics():
     """Metrics at one threshold: drop rate, recall loss, bypass rate over candidates."""
     from scripts.eval_prefilter import threshold_metrics
 
-    context = "ctx"
-    sha = _sha(context)
-    rows = [
-        _fixture_row("p", 0, context, [_candidate("R-1"), _candidate("R-2"), _candidate("R-3")], ["R-3"]),
-    ]
-    outcomes = {(sha, "R-1"): 0.02, (sha, "R-2"): 0.90, (sha, "R-3"): 0.05}
-    unavailable = {(sha, "R-9")}  # not in this row's candidates
+    rows = [_fixture_row("p", 0, "ctx", [_candidate("R-1"), _candidate("R-2"), _candidate("R-3")], ["R-3"])]
+    assessed = [(rows[0], {"R-1": 0.02, "R-2": 0.90, "R-3": 0.05}, 0.0)]
 
-    metrics = threshold_metrics(rows, outcomes, unavailable, threshold=0.10)
+    metrics = threshold_metrics(assessed, threshold=0.10)
 
     # R-1 (0.02) and R-3 (0.05) drop; R-2 (0.90) keeps. R-3 is grounded -> recall loss.
     assert metrics["candidates"] == 3
@@ -167,13 +162,10 @@ def test_threshold_metrics_bypass():
     """Unavailable outcomes keep the candidate and count as bypassed."""
     from scripts.eval_prefilter import threshold_metrics
 
-    context = "ctx"
-    sha = _sha(context)
-    rows = [_fixture_row("p", 0, context, [_candidate("R-1")], ["R-1"])]
-    outcomes = {}
-    unavailable = {(sha, "R-1")}
+    rows = [_fixture_row("p", 0, "ctx", [_candidate("R-1")], ["R-1"])]
+    assessed = [(rows[0], {"R-1": None}, 0.0)]
 
-    metrics = threshold_metrics(rows, outcomes, unavailable, threshold=0.10)
+    metrics = threshold_metrics(assessed, threshold=0.10)
 
     assert metrics["dropped"] == 0
     assert metrics["bypassed"] == 1
@@ -186,8 +178,9 @@ def test_threshold_metrics_absent_outcome_bypasses():
     from scripts.eval_prefilter import threshold_metrics
 
     rows = [_fixture_row("p", 0, "ctx", [_candidate("R-1")], [])]
+    assessed = [(rows[0], {"R-1": None}, 0.0)]
 
-    metrics = threshold_metrics(rows, {}, set(), threshold=0.10)
+    metrics = threshold_metrics(assessed, threshold=0.10)
 
     assert metrics["dropped"] == 0
     assert metrics["bypassed"] == 1
@@ -221,24 +214,22 @@ def test_effective_p_reduces_like_the_rule():
 def test_duplicate_probabilities_use_max_not_last(tmp_path):
     """A candidate stored with 0.90 then 0.02 keeps at threshold 0.10, like the rule."""
     from asago_policy_mapper.assessors.replay import ReplayAssessor
-    from scripts.eval_prefilter import _outcome_lookups
 
     context = "ctx"
-    sha = _sha(context)
     rows = [  # grounded candidate with conflicting stored scores
         _fixture_row("p", 0, context, [_candidate("R-1")], ["R-1"]),
     ]
     outcome_rows = [
-        {"context_sha256": sha, "risk_id": "R-1", "p": 0.90},
-        {"context_sha256": sha, "risk_id": "R-1", "p": 0.02},
+        {"context_sha256": _sha(context), "risk_id": "R-1", "p": 0.90},
+        {"context_sha256": _sha(context), "risk_id": "R-1", "p": 0.02},
     ]
     outcomes_file = tmp_path / "outcomes.jsonl"
     outcomes_file.write_text("\n".join(json.dumps(r) for r in outcome_rows) + "\n")
 
-    outcomes, unavailable = _outcome_lookups(ReplayAssessor(outcomes_file))
-    from scripts.eval_prefilter import threshold_metrics
+    from scripts.eval_prefilter import _assess_rows, threshold_metrics
 
-    metrics = threshold_metrics(rows, outcomes, unavailable, threshold=0.10)
+    assessed = _assess_rows(rows, ReplayAssessor(outcomes_file))
+    metrics = threshold_metrics(assessed, threshold=0.10)
 
     assert metrics["dropped"] == 0
     assert metrics["recall_loss"] == 0.0
@@ -274,6 +265,26 @@ def test_choose_threshold_breaks_full_tie_by_smallest_threshold():
     best = choose_threshold(sweep)
 
     assert best["threshold"] == 0.10
+
+
+def test_choose_threshold_respects_recall_loss_budget():
+    """With a budget, the most aggressive threshold within it wins, not the least-loss one."""
+    from scripts.eval_prefilter import choose_threshold
+
+    sweep = [
+        {"threshold": 0.05, "recall_loss": 0.0, "dropped": 8},
+        {"threshold": 0.10, "recall_loss": 0.01, "dropped": 12},
+        {"threshold": 0.20, "recall_loss": 0.02, "dropped": 20},
+        {"threshold": 0.30, "recall_loss": 0.5, "dropped": 30},
+    ]
+
+    # The least-loss rule would pick 0.05 (zero loss, 8 drops); the budget
+    # trades 1 percent of recall for 4 more drops.
+    assert choose_threshold(sweep, max_recall_loss=0.01)["threshold"] == 0.10
+    # No threshold fits an impossible budget: fall back to least loss.
+    assert choose_threshold(sweep, max_recall_loss=0.0)["threshold"] == 0.05
+    # The budget admits the most aggressive fitting threshold.
+    assert choose_threshold(sweep, max_recall_loss=0.02)["threshold"] == 0.20
 
 
 def test_eval_script_runs_end_to_end(tmp_path):
@@ -330,7 +341,8 @@ def test_eval_script_runs_end_to_end(tmp_path):
     assert held["grounded_dropped"] == 0
     assert held["recall_loss"] == 0.0
     assert held["drop_rate"] == 1 / 3
-    assert held["latency_p50_ms"] >= 0.0
+    # Hand-written answers carry no recorded latency.
+    assert held["latency_recorded"] is False
 
 
 def test_eval_script_rejects_empty_split(tmp_path):
@@ -432,5 +444,6 @@ def test_eval_main_in_process(tmp_path, capsys):
     assert held["candidates"] == 1
     assert held["latency_p50_ms"] >= 0.0
     assert held["latency_p95_ms"] >= held["latency_p50_ms"]
+    assert held["latency_recorded"] is False
     out = capsys.readouterr().out
     assert "chosen_threshold" in out
