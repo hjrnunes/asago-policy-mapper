@@ -5,9 +5,9 @@ Jev endpoint is contacted and no real key is needed. The mapping is a
 thin subclass of the generic adapter: it translates the decision seam's
 ``{context, cases}`` input onto Jev's ``/v1/systemone`` wire (one Noul
 question per case, keyed by risk id) and reads each answer's ``noul``
-probability back as the generic ``{id, p}`` score, keeping 149a's
-semantics (no-answer reasons, sends-offsite determination, credentials never
-in repr/serialization/wire logs).
+probability back as the generic ``{id, p}`` score, keeping the generic
+adapter's semantics (no-answer reasons, sends-offsite determination,
+credentials never in repr/serialization/exchange logs).
 """
 
 import ast
