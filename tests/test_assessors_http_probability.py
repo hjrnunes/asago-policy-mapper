@@ -820,6 +820,53 @@ def test_invalid_id_does_not_stop_later_ids():
     assert _p_value(batch.answers["R-002"][0]) == 0.4
 
 
+def test_unmatched_ids_redact_the_api_key(monkeypatch):
+    """An id echoed back that matches the credential never reaches unmatched_ids raw.
+
+    Unmatched ids come verbatim from the response, so an endpoint echoing
+    the API key (alone or inside a longer id) would otherwise carry it
+    through ``AnswerBatch.unmatched_ids`` into the decision log's
+    serialized output. The adapter redacts them against the same secret
+    the exchange is redacted with.
+    """
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _scores_body(("R-001", 0.9))
+        body["scores"].insert(0, {"id": "secret-value-123", "p": 0.4})
+        body["scores"].append({"id": "prefix-secret-value-123-suffix", "p": 0.2})
+        return httpx.Response(200, json=body)
+
+    assessor = _assessor(handler)
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+
+    assert "secret-value-123" not in json.dumps(batch.unmatched_ids)
+    assert batch.unmatched_ids == ("[redacted]", "prefix-[redacted]-suffix")
+    assert _p_value(batch.answers["R-001"][0]) == 0.9
+    # The serialized batch as a whole carries no credential.
+    assert "secret-value-123" not in json.dumps(
+        {
+            "unmatched_ids": list(batch.unmatched_ids),
+            "exchange": batch.exchange,
+            "answers": [a for a in batch.answers.values()],
+        },
+        default=repr,
+    )
+
+
+def test_unmatched_ids_without_key_pass_through_unchanged(monkeypatch):
+    """With no key configured, unmatched ids keep their exact raw value."""
+    monkeypatch.delenv("PROB_API_KEY", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_scores_body(("R-999", 0.4), ("R-001", 0.9)))
+
+    assessor = _assessor(handler)
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+
+    assert batch.unmatched_ids == ("R-999",)
+
+
 def test_conflicting_id_does_not_stop_later_ids():
     """A row for an already-conflicting id is skipped, and later ids still score."""
     body = {

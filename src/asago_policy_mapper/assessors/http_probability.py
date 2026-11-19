@@ -89,6 +89,11 @@ class HttpProbabilityAssessor:
     the caller's ownership and is never closed here. Constructing an
     offsite assessor whose ``api_key_env`` variable is unset warns once:
     policy text would leave this machine unauthenticated.
+
+    Everything the response contributes to the batch is redacted against
+    the configured credential before it leaves this adapter: the recorded
+    exchange and the unmatched ids alike, so an endpoint echoing the key
+    back cannot leak it into a run's serialized output.
     """
 
     answer_types = frozenset({ProbabilityAnswer})
@@ -132,9 +137,10 @@ class HttpProbabilityAssessor:
         finally:
             if self._transport is None:
                 client.close()
+        secret = os.environ.get(self.endpoint.api_key_env) or ""
         return AnswerBatch(
             answers=answers,
-            unmatched_ids=tuple(unmatched),
+            unmatched_ids=tuple(_redact_id(rid, secret) for rid in unmatched),
             latency_ms=latency_ms,
             exchange={
                 "requests": [w["request"] for w in exchanges],
@@ -274,6 +280,19 @@ def _reduce_scores(scores: Sequence[object], case_ids: frozenset[str]) -> tuple[
         seen[rid] = number
         answers[rid] = ProbabilityAnswer(number)
     return answers, unmatched
+
+
+def _redact_id(rid: str, secret: str) -> str:
+    """Redact one response-echoed id against the credential, like the exchange.
+
+    Ids outside the batch come verbatim from the response, so an endpoint
+    that echoes the API key back as an id would carry it into
+    ``unmatched_ids`` (and from there the decision log) unredacted. This
+    closes that path the same way ``_redact`` closes the exchange.
+    """
+    if not secret:
+        return rid
+    return rid.replace(secret, _REDACTED)
 
 
 def _redact(value: object, secret: str) -> object:
