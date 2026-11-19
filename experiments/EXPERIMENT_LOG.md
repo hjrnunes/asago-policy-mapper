@@ -1144,12 +1144,12 @@ The detailed commands and evaluator methodology are in
 
 ## 2026-11-14: Logging-fix smoke on gemma4 (per-stage token usage)
 
-**Description:** One-doc smoke run (ars.md) on the gemma4-oc-65k endpoint to verify
-the #148 part-1 logging fixes live: per-stage token usage, unique call ids under
-concurrency, and the new output fields. Default battery settings, no MLflow.
+**Description:** One-doc smoke run (ars.md) on the internal gemma-4 26B endpoint to
+verify the #148 part-1 logging fixes live: per-stage token usage, unique call ids
+under concurrency, and the new output fields. Default battery settings, no MLflow.
 
 **Command:** `UV_NO_CONFIG=1 uv run --frozen python run_extract_battery.py
-batteries/smoke-uzfb1.yaml --base-url <gemma4-url> --model gemma-4-26b-a4b-it -j 4
+batteries/smoke-ars.yaml --base-url <endpoint-url> --model gemma-4-26b-a4b-it -j 4
 --no-mlflow`
 
 **Results:** 34 risks matched, 300 auto-accepted, 0 judged (query-gen mode has no
