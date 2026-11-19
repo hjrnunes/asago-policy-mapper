@@ -487,7 +487,7 @@ def test_validate_extract_options_ignores_nexus_base_dir(tmp_path):
     assert _validate_extract_options(**_validate_kwargs(tmp_path)).needs_llm is True
 
 
-def test_validate_extract_options_expand_siblings_forces_llm(tmp_path):
+def test_validate_extract_options_expand_siblings_resolved_away_without_grounding(tmp_path):
     from asago_policy_mapper.cli import _validate_extract_options
 
     # Judge and grounding off, so the plan resolves expansion away (it
@@ -501,6 +501,11 @@ def test_validate_extract_options_expand_siblings_forces_llm(tmp_path):
         )
     )
     assert plan.needs_llm is False
+
+
+def test_validate_extract_options_expand_siblings_requires_endpoint_with_grounding(tmp_path):
+    from asago_policy_mapper.cli import _validate_extract_options
+
     # With grounding on, expansion needs the LLM: a missing endpoint is fatal.
     with pytest.raises(typer.Exit) as excinfo:
         _validate_extract_options(
@@ -512,6 +517,11 @@ def test_validate_extract_options_expand_siblings_forces_llm(tmp_path):
             )
         )
     assert excinfo.value.exit_code == 1
+
+
+def test_validate_extract_options_expand_siblings_run_passes_with_endpoint(tmp_path):
+    from asago_policy_mapper.cli import _validate_extract_options
+
     # With the endpoint present the same combination passes and reports the need.
     plan = _validate_extract_options(
         **_validate_kwargs(tmp_path, retrieval=RetrievalConfig(query_gen=False, expand_siblings=True))
