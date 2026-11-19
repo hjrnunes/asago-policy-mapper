@@ -3,10 +3,10 @@
 Note: importing ``asago_policy_mapper.assessors.http_probability`` pulls in
 ``extract.screening`` through the package's lazy ``extract/__init__``, which
 can import the pipeline and, transitively, ``openai`` (which bundles httpx).
-That chain predates this lane and is not ours to change. What this lane
-owns is that the assessor module itself never imports httpx at module
-level: the import sits inside the constructor, so the module's own import
-graph adds nothing. The tests pin exactly that contract.
+That chain predates the assessor and is not this module's to change. What
+these tests own is that the assessor module itself never imports httpx at
+module level: the import sits inside the constructor, so the module's own
+import graph adds nothing. The tests pin exactly that contract.
 """
 
 import ast

@@ -7,7 +7,6 @@ protocol from ``extract/screening.py`` and emits ``ProbabilityAnswer`` and
 """
 
 import json
-import os
 import time
 import warnings
 
@@ -56,32 +55,33 @@ def _p_value(answer) -> float | None:
     return answer.probability if isinstance(answer, ProbabilityAnswer) else None
 
 
-def test_endpoint_repr_and_serialization_exclude_credentials():
+def test_endpoint_repr_and_serialization_exclude_credentials(monkeypatch):
     """The endpoint's repr and dict forms never carry the API key value.
 
     ``api_key_env`` stores the environment variable NAME, and neither repr
     nor to_dict() reads the variable or includes a key.
     """
-    os.environ["PROB_API_KEY"] = "secret-value-123"
-    try:
-        endpoint = _endpoint()
-        text = repr(endpoint)
-        dumped = endpoint.to_dict()
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+    endpoint = _endpoint()
+    text = repr(endpoint)
+    dumped = endpoint.to_dict()
 
-        assert "secret-value-123" not in text
-        assert "secret-value-123" not in json.dumps(dumped)
-        assert endpoint.api_key_env == "PROB_API_KEY"
-        assert dumped["api_key_env"] == "PROB_API_KEY"
-        assert dumped["base_url"] == "http://localhost:9100/v1"
-        assert dumped["model"] == "prob-model"
-        assert dumped["timeout_s"] == 10.0
-        assert dumped["max_batch"] == 32
-    finally:
-        del os.environ["PROB_API_KEY"]
+    assert "secret-value-123" not in text
+    assert "secret-value-123" not in json.dumps(dumped)
+    assert endpoint.api_key_env == "PROB_API_KEY"
+    assert dumped["api_key_env"] == "PROB_API_KEY"
+    assert dumped["base_url"] == "http://localhost:9100/v1"
+    assert dumped["model"] == "prob-model"
+    assert dumped["timeout_s"] == 10.0
+    assert dumped["max_batch"] == 32
 
 
-def test_wire_excludes_api_key():
-    """The wire record carries the exact request body, never credentials."""
+def test_wire_excludes_api_key(monkeypatch):
+    """The wire record carries the exact request body, never credentials.
+
+    The header check reads the lowercased key (httpx.Headers lowercases on
+    dict conversion), so it cannot pass by accident of case.
+    """
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -89,18 +89,18 @@ def test_wire_excludes_api_key():
         seen["headers"] = dict(request.headers)
         return httpx.Response(200, json=_scores_body(("R-001", 0.9)))
 
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
     assessor = _assessor(handler)
-    os.environ["PROB_API_KEY"] = "secret-value-123"
-    try:
-        batch = assessor.assess(QUESTION, "policy context", _cases("R-001"))
-    finally:
-        del os.environ["PROB_API_KEY"]
+    batch = assessor.assess(QUESTION, "policy context", _cases("R-001"))
 
     assert seen["body"]["context"] == "policy context"
     assert seen["body"]["items"] == [{"id": "R-001", "text": "Risk R-001: Description for R-001."}]
     assert "secret-value-123" not in json.dumps(batch.exchange)
+    # The recorded exchange is what was sent, and the header that carried
+    # the key went out on the wire but never into the record.
     assert batch.exchange["requests"][0] == seen["body"]
-    assert "Authorization" not in seen["headers"]
+    assert seen["headers"].get("authorization") == "Bearer secret-value-123"
+    assert "authorization" not in json.dumps(batch.exchange).lower()
     assert _p_value(batch.answers["R-001"][0]) == 0.9
 
 
@@ -782,12 +782,12 @@ def test_redaction_covers_dict_keys(monkeypatch):
         return httpx.Response(200, json={"secret-value-123": "value", "scores": [{"id": "R-001", "p": 0.5}]})
 
     assessor = _assessor(handler)
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    dumped = json.dumps(batch.wire)
+    dumped = json.dumps(batch.exchange)
     assert "secret-value-123" not in dumped
     assert "[redacted]" in dumped
-    assert _p_value(batch.outcomes["R-001"][0]) == 0.5
+    assert _p_value(batch.answers["R-001"][0]) == 0.5
 
 
 def test_unmatched_row_after_invalid_id_is_still_unmatched():
