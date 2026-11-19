@@ -541,6 +541,117 @@ def test_unmatched_id_with_no_key_configured_stays_exact(monkeypatch):
     assert batch.unmatched_ids == ("R-999",)
 
 
+
+def test_error_object_without_answers_is_error_not_missing():
+    """A 200 body carrying an error object (no answers) marks every case error.
+
+    Jev reports request-level failures this way; treating it as missing
+    would blame the cases for an endpoint-side failure, and the detail
+    carries the error text for the run output.
+    """
+    body = {"model": "jev-1.14.0", "error": "state exceeded the context window"}
+
+    assessor = _assessor(lambda request: httpx.Response(200, json=body))
+    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+
+    assert batch.outcomes["R-001"][0].reason == "error"
+    assert batch.outcomes["R-001"][0].detail == "state exceeded the context window"
+    assert batch.outcomes["R-002"][0].reason == "error"
+
+
+
+
+def test_error_object_detail_redacts_an_echoed_key(monkeypatch):
+    """An error string echoing the key is redacted, not recorded verbatim.
+
+    The detail lands in ``Unavailable.detail`` and so in the run output;
+    the endpoint saw the credential in its Authorization header and can
+    echo it in the error text, so the detail gets the same replacement
+    the recorded response does — applied before the length cut, so a
+    secret straddling the cut is fully replaced, never partially kept.
+    """
+    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "secret-value-123")
+
+    body = {"model": "jev-1.14.0", "error": "auth failed for key secret-value-123"}
+
+    assessor = _assessor(lambda request: httpx.Response(200, json=body))
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+
+    assert batch.outcomes["R-001"][0].reason == "error"
+    assert batch.outcomes["R-001"][0].detail == "auth failed for key [redacted]"
+
+
+
+
+def test_error_object_detail_redacts_before_truncating(monkeypatch):
+    """A secret straddling the 200-char cut is replaced whole, not clipped.
+
+    Redacting after truncating would keep a fragment of the credential
+    that happened to fall past the cut; replacing first guarantees the
+    marker is the only thing the cut can shorten. The cut may land inside
+    the marker itself — the guarantee is only that no secret fragment
+    survives it.
+    """
+    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "secret-value-123")
+
+    filler = "x" * 190
+    body = {"model": "jev-1.14.0", "error": f"{filler}...secret-value-123..."}
+
+    assessor = _assessor(lambda request: httpx.Response(200, json=body))
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+
+    detail = batch.outcomes["R-001"][0].detail
+    assert len(detail) == 200
+    assert "secret-value-123" not in detail
+
+
+
+
+def test_null_answers_key_treated_as_missing_not_invalid():
+    """An explicit answers:null means the same as an absent key.
+
+    The null-equals-missing reading matches the generic adapter, so a
+    body with no usable answers and an error object is an error, and a
+    bare null with no error is missing — never invalid.
+    """
+    assessor = _assessor(lambda request: httpx.Response(200, json={"model": "jev-1.14.0", "answers": None}))
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    assert batch.outcomes["R-001"][0].reason == "missing"
+
+    assessor = _assessor(
+        lambda request: httpx.Response(200, json={"model": "jev-1.14.0", "answers": None, "error": "overloaded"})
+    )
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    assert batch.outcomes["R-001"][0].reason == "error"
+    assert batch.outcomes["R-001"][0].detail == "overloaded"
+
+
+
+
+def test_error_object_non_string_collapses_to_a_stable_detail():
+    """A non-string error object yields a stable marker, not a repr of the payload."""
+    body = {"model": "jev-1.14.0", "error": {"code": 429, "retry": True}}
+
+    assessor = _assessor(lambda request: httpx.Response(200, json=body))
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+
+    assert batch.outcomes["R-001"][0].reason == "error"
+    assert batch.outcomes["R-001"][0].detail == "endpoint returned an error object"
+
+
+
+
+def test_error_object_null_collapses_to_a_stable_detail():
+    """An explicit null error object is still an error with the stable marker."""
+    body = {"model": "jev-1.14.0", "error": None}
+
+    assessor = _assessor(lambda request: httpx.Response(200, json=body))
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+
+    assert batch.outcomes["R-001"][0].reason == "error"
+    assert batch.outcomes["R-001"][0].detail == "endpoint returned an error object"
+
+
 def test_wire_keeps_request_on_timeout_and_error():
     """Timeout and error batches still record the exact Jev request body in the wire."""
     endpoint = _endpoint(timeout_s=0.05)
