@@ -51,7 +51,7 @@ def _verdicts_to_result(
             verification = None
             found_chunk_index = None
             if source_windows is not None:
-                verification, found_chunk_index = locate_quote(quote, source_windows)
+                verification, found_chunk_index = locate_quote(quote, source_windows, preferred_index=chunk_index)
             spans.append(
                 EvidenceSpan(
                     text=quote,
