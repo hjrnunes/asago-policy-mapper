@@ -1172,7 +1172,6 @@ The detailed commands and evaluator methodology are in
 
 ---
 
-<<<<<<< ours
 ## 2026-11-14: Logging-fix smoke on gemma4 (per-stage token usage)
 
 **Description:** One-doc smoke run (ars.md) on the internal gemma-4 26B endpoint to
@@ -1192,7 +1191,7 @@ query_gen 6, grounding 72, expansion_grounding 90, causal_synthesis 34. All 202
 
 **Conclusion:** The per-stage token accounting and the id-atomicity hold on a live
 concurrent run; the new output fields serialize correctly. No MLflow run (disabled).
-=======
+---
 ## 2026-11-15: Deterministic Merge Tie-Breaks — Quote Churn on gemma4
 
 **Description:** Measured the effect of deterministic merging and evidence
@@ -1280,4 +1279,6 @@ with removing completion-order dependence. The direct evidence for
 order-independence remains the permutation and reverse-completion tests;
 single live-run comparisons on this endpoint cannot separate a small
 determinism gain from noise.
->>>>>>> theirs
+
+
+
