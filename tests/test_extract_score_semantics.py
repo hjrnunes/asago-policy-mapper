@@ -371,9 +371,12 @@ def test_bm25_rescued_invalid_measurement_is_null(monkeypatch):
     """
     from asago_policy_mapper.extract import index as index_mod
 
-    class _NaNForThirdCrossEncoder:
+    class _NaNThenValidCrossEncoder:
+        """A 0.9, B 0.8, C NaN, D 0.4 — invalid between valid ones."""
+
         def predict(self, pairs):
-            return [0.9 if "A" in p[0] else float("nan") for p in pairs]
+            by_risk = {"A:": 0.9, "B:": 0.8, "C:": float("nan"), "D:": 0.4}
+            return [by_risk.get(p[0][:2], 0.0) for p in pairs]
 
     risks = [
         SimpleNamespace(
@@ -385,23 +388,27 @@ def test_bm25_rescued_invalid_measurement_is_null(monkeypatch):
             isDefinedByTaxonomy="test-tax",
             isPartOf="",
         )
-        for rid, name in (("R-001", "A"), ("R-003", "C"))
+        for rid, name in (("R-001", "A"), ("R-002", "B"), ("R-003", "C"), ("R-004", "D"))
     ]
     with (
         patch.object(index_mod, "_load_bi_encoder", return_value=(None, None, None)),
-        patch.object(index_mod, "_load_cross_encoder", return_value=(_NaNForThirdCrossEncoder(), None, False, False)),
+        patch.object(index_mod, "_load_cross_encoder", return_value=(_NaNThenValidCrossEncoder(), None, False, False)),
     ):
         idx = index_mod.RiskIndex(risks)
 
-    # Both candidates are in the rerank window; R-003's measurement is NaN
-    # (invalid), so it is skipped and falls out of the top_k=1 slice, then
-    # is rescued by BM25 rank — unmeasured.
+    # All four are in the rerank window (top_k*2 = 4 slots with top_k=2);
+    # R-003's measurement is NaN (invalid) and R-004's is valid but low.
+    # The slice keeps R-001 and R-002; R-003 and R-004 fall out and are
+    # rescued by BM25 rank — R-004's measurement must survive the invalid
+    # score ahead of it.
     monkeypatch.setattr(
         idx,
         "search_bm25",
         lambda text, top_k=100: [
             ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", bm25_rank=1),
-            ScoredCandidate(risk_id="R-003", risk_name="C", risk_description="c", bm25_rank=2),
+            ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b", bm25_rank=2),
+            ScoredCandidate(risk_id="R-003", risk_name="C", risk_description="c", bm25_rank=3),
+            ScoredCandidate(risk_id="R-004", risk_name="D", risk_description="d", bm25_rank=4),
         ],
     )
     monkeypatch.setattr(
@@ -410,13 +417,18 @@ def test_bm25_rescued_invalid_measurement_is_null(monkeypatch):
         lambda text, top_k=100: [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a")],
     )
 
-    results = idx.hybrid_search("text", top_k=1, bm25_rescue_rank=5)
+    results = idx.hybrid_search("text", top_k=2, bm25_rescue_rank=5)
 
     by_id = {c.risk_id: c for c in results}
-    assert "R-003" in by_id
     # invalid measurement: no score to keep, no source to stamp
     assert by_id["R-003"].rerank_source is None
-    assert by_id["R-003"].bm25_rank == 2
+    assert by_id["R-003"].cross_encoder_score == 0.0
+    assert by_id["R-003"].bm25_rank == 3
+    # a valid measurement after an invalid one still registers: R-004 is
+    # measured despite the NaN ahead of it in the window
+    assert by_id["R-004"].rerank_source == "cross_encoder"
+    assert by_id["R-004"].cross_encoder_score == 0.4
+    assert by_id["R-004"].bm25_rank == 4
 
 
 def test_rerank_measured_zero_is_kept_with_source(monkeypatch):
