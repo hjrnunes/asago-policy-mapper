@@ -57,6 +57,59 @@ def test_normalize_applies_nfkc_compatibility_forms():
     assert normalize("Ａﬃ①") == "affi1"
 
 
+def test_normalize_straightens_hyphen_characters():
+    """U+2010 and U+2011 map to the ASCII hyphen."""
+    assert normalize("non\u2010breaking and non\u2011breaking") == "non-breaking and non-breaking"
+
+
+def test_normalize_deletes_zero_width_characters():
+    """Soft hyphen, zero-width space/joiners and BOM vanish between word halves."""
+    for zw in ("\u00ad", "\u200b", "\u200c", "\u200d", "\ufeff"):
+        assert normalize(f"pro{zw}cessing") == "processing"
+
+
+def test_normalize_maps_guillemets_to_straight_quotes():
+    """Guillemets compare like their straight double-quote counterparts."""
+    assert normalize("«mot» and “mot”") == '"mot" and "mot"'
+
+
+def test_normalize_joins_hyphenated_words_across_line_breaks():
+    """A hyphen before a newline is a typographic wrap: the word joins."""
+    assert normalize("exam-\nple") == "example"
+
+
+def test_normalize_joins_u2010_wraps_and_crlf_wraps():
+    """U+2010 wraps join like ASCII hyphens; CRLF line endings wrap too."""
+    assert normalize("exam\u2010\r\nple") == "example"
+
+
+def test_normalize_does_not_join_em_dash_before_line_break():
+    """An em/en dash before a break is punctuation, not hyphenation."""
+    assert normalize("He said—\nand left") == "he said- and left"
+    assert normalize("pp. 3–\n5") == "pp. 3- 5"
+
+
+def test_locate_quote_matches_through_a_line_break_hyphen():
+    """A reflowed quote matches a window whose word is wrapped mid-word.
+
+    The window keeps the typesetting wrap ("produc-\\ntivity"); the model's
+    quote carries the joined spelling ("productivity"). Both normalize to
+    the same word.
+    """
+    status, found_index = locate_quote(
+        "raised productivity targets", [(0, "The policy raised produc-\ntivity targets for AI systems.")]
+    )
+    assert status == "normalized"
+    assert found_index == 0
+
+
+def test_zero_width_only_quote_is_not_found():
+    """A quote made only of zero-width characters normalizes to nothing."""
+    status, found_index = locate_quote("\ufeff\u200b", [(0, "any text")])
+    assert status == "not_found"
+    assert found_index is None
+
+
 def test_empty_quote_matches_first_window_by_substring_semantics():
     """An empty quote is a substring of any text, so it verifies in window order."""
     status, found_index = locate_quote("", [(7, "policy"), (8, "text")])
@@ -108,3 +161,35 @@ def test_normalized_match_searches_all_windows_after_exact_fails():
     status, found_index = locate_quote("the normalized text.", windows)
     assert status == "normalized"
     assert found_index == 2
+
+
+def test_preferred_window_wins_over_earlier_window():
+    """A quote in several windows reports the context's own chunk first."""
+    windows = [(0, "shared text."), (1, "shared text."), (2, "shared text.")]
+    status, found_index = locate_quote("shared text.", windows, preferred_index=1)
+    assert status == "verified"
+    assert found_index == 1
+
+
+def test_preferred_window_wins_in_normalized_tier():
+    """The preference also applies when only the normalized tier matches."""
+    windows = [(0, "Shared  text."), (1, "Shared  text.")]
+    status, found_index = locate_quote("shared text.", windows, preferred_index=1)
+    assert status == "normalized"
+    assert found_index == 1
+
+
+def test_preferred_index_absent_from_windows_keeps_scan_order():
+    """A preferred index that names no window changes nothing."""
+    windows = [(3, "duplicated text."), (1, "duplicated text.")]
+    status, found_index = locate_quote("duplicated text.", windows, preferred_index=9)
+    assert status == "verified"
+    assert found_index == 3
+
+
+def test_preferred_window_without_the_quote_does_not_win():
+    """The preference only applies when that window contains the quote."""
+    windows = [(0, "the quote lives here."), (1, "unrelated text.")]
+    status, found_index = locate_quote("the quote lives here.", windows, preferred_index=1)
+    assert status == "verified"
+    assert found_index == 0

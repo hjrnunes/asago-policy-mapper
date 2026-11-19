@@ -16,25 +16,45 @@ from typing import Literal, Sequence
 
 VerificationStatus = Literal["verified", "normalized", "not_found"]
 
-_CURLEY_TO_STRAIGHT = {
+# Characters that carry no width: deleting them lets quotes match text whose
+# extraction scattered invisible marks through words.
+_ZERO_WIDTH = "\u00ad\u200b\u200c\u200d\ufeff"
+
+# Punctuation straightened for the normalized tier. U+2011 never survives
+# NFKC (it folds to U+2010), but keeping the pair documents the intent.
+_CURLY_TO_STRAIGHT = {
     "’": "'",
     "‘": "'",
     "“": '"',
     "”": '"',
+    "«": '"',
+    "»": '"',
     "—": "-",
     "–": "-",
     "−": "-",
+    "\u2010": "-",
+    "\u2011": "-",
 }
 
 
 def normalize(text: str) -> str:
     """Normalize text for quote comparison.
 
-    Applies NFKC compatibility normalization, straightens curly quotes and
-    dashes, collapses all whitespace runs to single spaces and lowercases.
+    Applies NFKC compatibility normalization, deletes zero-width characters
+    (soft hyphen, zero-width space/joiners, BOM), joins words hyphenated
+    across a line break ("exam-\\nple" becomes "example"; em/en dashes do
+    not join), straightens curly quotes, guillemets and dashes, collapses
+    all whitespace runs to single spaces and lowercases.
     """
     text = unicodedata.normalize("NFKC", text)
-    for curly, straight in _CURLEY_TO_STRAIGHT.items():
+    for zero_width in _ZERO_WIDTH:
+        text = text.replace(zero_width, "")
+    # A hyphen (or U+2010, which NFKC does not fold) directly before a line
+    # break is a typographic wrap, so the two word halves join. This runs
+    # before the dash mappings: an em/en dash before a break is punctuation,
+    # not hyphenation, and must survive as a dash.
+    text = re.sub(r"[\-\u2010]\r?\n", "", text)
+    for curly, straight in _CURLY_TO_STRAIGHT.items():
         text = text.replace(curly, straight)
     text = re.sub(r"\s+", " ", text)
     return text.lower().strip()
@@ -43,22 +63,33 @@ def normalize(text: str) -> str:
 def locate_quote(
     quote: str,
     windows: Sequence[tuple[int, str]],
+    preferred_index: int | None = None,
 ) -> tuple[VerificationStatus, int | None]:
     """Locate a quote within (chunk_index, text) windows.
 
-    Tries an exact substring match first, scanning windows in the order
-    given; the first window containing the quote wins. If no exact match
-    exists, retries with normalize() applied to both sides. Returns
-    ("not_found", None) when the quote appears in no window.
+    Tries an exact substring match first across all windows, then a
+    normalized one, so an exact match always beats a merely normalized
+    one. Within each tier the scan order puts ``preferred_index`` (the
+    chunk whose context the model read) before the remaining windows in
+    the order given, so a quote present in both the context's own chunk
+    and a neighbour reports the context's own chunk, and otherwise the
+    earliest window in the given order wins. Returns ("not_found", None)
+    when the quote appears in no window.
     """
-    for index, text in windows:
+    ordered = list(windows)
+    if preferred_index is not None:
+        preferred = [w for w in windows if w[0] == preferred_index]
+        if preferred:
+            ordered = preferred + [w for w in windows if w[0] != preferred_index]
+
+    for index, text in ordered:
         if quote in text:
             return "verified", index
 
     normalized_quote = normalize(quote)
     if not normalized_quote:
         return "not_found", None
-    for index, text in windows:
+    for index, text in ordered:
         if normalized_quote in normalize(text):
             return "normalized", index
 
