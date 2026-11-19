@@ -266,13 +266,32 @@ class DecisionCallRecord(BaseModel):
     credentials (the prefilter's key travels in a header the body never
     sees). Assessors that batch report one body per batch as a list;
     single-shot assessors report one body as a dict. ``decision`` is the
-    ``DecisionLog`` the seam produced.
+    ``DecisionLog`` the seam produced. ``responses`` holds what the
+    assessor recorded as answered, when the wire shape carries it
+    (provider assessors record usage readouts there, e.g. laya's token
+    truncation and Jev's token spend); it stays empty for assessors
+    that record no responses, so the serialized output is unchanged.
     """
 
     stage: str
     chunk_index: int
     request: dict | list
     decision: DecisionLog | None = None
+    responses: list = []
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_responses(self, handler) -> dict[str, Any]:
+        """Leave ``responses`` out unless the assessor recorded any.
+
+        Assessors without a response wire (replay, the generic seam stub)
+        keep it empty, and serializing it would change the output of every
+        prefilter run those assessors serve; only a provider run carries
+        response readouts.
+        """
+        data: dict[str, Any] = handler(self)
+        if not data.get("responses"):
+            data.pop("responses", None)
+        return data
 
 
 class RemovedVariantGroup(BaseModel):

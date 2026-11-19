@@ -322,6 +322,182 @@ def test_prefilter_records_exchange_requests_when_assessor_batches(mock_config, 
     assert restored.request == request
 
 
+def _run_extraction_with_assessor(assessor, mock_config, tmp_path, monkeypatch):
+    """Run one extraction with the given prefilter assessor over the stub index."""
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(
+        pipeline,
+        "ground_and_extract_evidence",
+        lambda **kwargs: {},
+    )
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    return run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        ocr=False,
+    )
+
+
+def test_prefilter_records_wire_responses_when_the_assessor_has_them(mock_config, tmp_path, monkeypatch):
+    """A wire with responses lands in the call record: usage readouts survive.
+
+    Provider assessors answer with readouts the run needs after the fact
+    (laya's token truncation, Jev's token spend); the record must carry
+    them so a run's output can measure the loss.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class RespondingAssessor(ScriptedAssessor):
+        """Reports a responses list in its wire, like the provider assessors."""
+
+        def assess(self, task, context, cases):
+            self.calls.append((task, context, list(cases)))
+            outcomes = {c.risk_id: (Probability(0.5),) for c in cases}
+            return AssessmentBatch(
+                outcomes=outcomes,
+                unmatched_ids=(),
+                latency_ms=0.5,
+                wire={
+                    "requests": [{"context": context, "items": [{"id": c.risk_id, "text": "x"}]} for c in cases],
+                    "responses": [
+                        {
+                            "model": "laya-multilingual-mlx",
+                            "answers": {c.risk_id: {"type": "noul", "noul": 0.5} for c in cases},
+                            "usage": {"state_tokens": 100, "state_tokens_dropped": 263, "truncated": True},
+                        }
+                    ],
+                },
+            )
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(
+        pipeline,
+        "ground_and_extract_evidence",
+        lambda **kwargs: {},
+    )
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=RespondingAssessor({}), rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    assert len(result.decision_calls) >= 1
+    responses = result.decision_calls[0].responses
+    assert isinstance(responses, list)
+    assert len(responses) == 1
+    assert responses[0]["usage"]["state_tokens_dropped"] == 263
+    assert responses[0]["usage"]["truncated"] is True
+    # The responses round-trip through the record's serialized form.
+    dumped = result.decision_calls[0].model_dump()
+    assert dumped["responses"] == responses
+
+
+def test_prefilter_omits_responses_when_the_assessor_has_none(mock_config, tmp_path, monkeypatch):
+    """A wire without responses leaves the field out: output stays unchanged.
+
+    Assessors that record no responses (replay, the generic seam stub)
+    must produce the same serialized record as before the field existed.
+    """
+
+    class NoResponsesAssessor(ScriptedAssessor):
+        """A wire with requests but no responses list."""
+
+        def assess(self, task, context, cases):
+            self.calls.append((task, context, list(cases)))
+            outcomes = {c.risk_id: (Probability(0.5),) for c in cases}
+            return AssessmentBatch(
+                outcomes=outcomes,
+                unmatched_ids=(),
+                latency_ms=0.5,
+                wire={"requests": [{"context": context, "items": [{"id": c.risk_id, "text": "x"}]} for c in cases]},
+            )
+
+    result = _run_extraction_with_assessor(NoResponsesAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    assert len(result.decision_calls) >= 1
+    dumped = result.decision_calls[0].model_dump()
+    assert "responses" not in dumped
+
+
+def test_prefilter_request_and_responses_tolerate_a_missing_wire_attribute(mock_config, tmp_path, monkeypatch):
+    """An assessment with no wire attribute at all falls back to the defaults.
+
+    The seam contract names ``wire`` a field of ``AssessmentBatch``, but
+    the helpers read it defensively; an assessor returning a batch
+    without the attribute must still record the seam's request shape and
+    no responses, not crash.
+    """
+
+    class WirelessAssessor(ScriptedAssessor):
+        """Returns a batch whose wire attribute is deleted entirely."""
+
+        def assess(self, task, context, cases):
+            self.calls.append((task, context, list(cases)))
+            outcomes = {c.risk_id: (Probability(0.5),) for c in cases}
+            batch = AssessmentBatch(
+                outcomes=outcomes,
+                unmatched_ids=(),
+                latency_ms=0.5,
+                wire={"requests": [], "responses": []},
+            )
+            # Frozen dataclasses block __delattr__; the base object
+            # implementation removes the field regardless.
+            object.__delattr__(batch, "wire")
+            return batch
+
+    result = _run_extraction_with_assessor(WirelessAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    assert len(result.decision_calls) >= 1
+    # The fallback request shape: the seam's {context, items} body.
+    request = result.decision_calls[0].request
+    assert isinstance(request, dict)
+    assert "context" in request and "items" in request
+    # And no responses recorded.
+    dumped = result.decision_calls[0].model_dump()
+    assert "responses" not in dumped
+
+
 def test_prefilter_drops_at_0_10_keeps_above(mock_config, tmp_path, monkeypatch):
     """p <= 0.10 drops before grounding; p > 0.10 is grounded."""
     from asago_policy_mapper.extract import pipeline

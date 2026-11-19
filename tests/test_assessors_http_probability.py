@@ -746,6 +746,29 @@ def test_response_echoing_the_api_key_is_redacted(monkeypatch):
     assert _p_value(batch.answers["R-001"][0]) == 0.5
 
 
+def test_response_echoing_the_key_in_a_dict_key_is_redacted(monkeypatch):
+    """An endpoint that echoes the credential as an object KEY gets it redacted.
+
+    The wire's responses persist into ``decision_calls`` in the run
+    output, so no position in a recorded response — value or key — may
+    carry the credential.
+    """
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"echo": {"secret-value-123": "x"}, "scores": [{"id": "R-001", "p": 0.5}]},
+        )
+
+    assessor = _assessor(handler)
+    batch = assessor.assess(TASK, "context", _cases("R-001"))
+
+    assert "secret-value-123" not in json.dumps(batch.wire)
+    assert batch.wire["responses"][0]["echo"] == {"[redacted]": "x"}
+    assert _p_value(batch.outcomes["R-001"][0]) == 0.5
+
+
 def test_response_redaction_absent_when_no_key(monkeypatch):
     """With no key configured the response is recorded unchanged, byte for byte."""
     monkeypatch.delenv("PROB_API_KEY", raising=False)

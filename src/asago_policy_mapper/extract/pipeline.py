@@ -1256,6 +1256,23 @@ def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> d
     }
 
 
+def _prefilter_responses(assessment) -> list:
+    """What the assessor recorded as answered, when its wire carries it.
+
+    Assessors whose wire carries ``responses`` (the provider assessors)
+    answer with readouts the run needs after the fact — laya's usage
+    block (``state_tokens_dropped``, ``truncated``) and Jev's token
+    usage. Assessors that record nothing (replay, the generic seam stub)
+    stay empty, so their serialized output is unchanged. Credentials
+    never appear: the wire records bodies, and the key travels in a
+    header the body never sees.
+    """
+    wire = getattr(assessment, "wire", None)
+    if isinstance(wire, dict) and isinstance(wire.get("responses"), list):
+        return list(wire["responses"])
+    return []
+
+
 def _prefilter_decision_log(decisions: list[Decision], assessment, rule, assessor_id: str) -> DecisionLog:
     """Assemble the prefilter's DecisionLog for one chunk."""
     items = [
@@ -1357,6 +1374,7 @@ def _prefilter_one_chunk(
         stage="prefilter",
         chunk_index=cr.chunk_index,
         request=_prefilter_request(context, cases, assessment),
+        responses=_prefilter_responses(assessment),
         decision=_prefilter_decision_log(decisions, assessment, prefilter.rule, prefilter.assessor.assessor_id),
     )
     drops = [
