@@ -1,5 +1,6 @@
 """Tests for variant-selective grounding (ground_variants + pipeline integration)."""
 
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -1126,6 +1127,131 @@ def test_parent_without_evidence_recorded():
     assert record.stage == "grounding"
     # no variant was ever sent to ground_variants
     assert record.attempted_variant_ids == []
+
+
+def _client_grounding_chunk(chunk_text_marker, grounded_delay_s=0.0):
+    """A client whose verdicts ground one variant, but only for one chunk's prompt.
+
+    The grounded chunk's answer can be delayed so the rejected chunk always
+    completes first: the completion order the record logic must survive.
+    """
+
+    def _create(**kwargs):
+        messages = kwargs["messages"]
+        user_text = messages[-1]["content"]
+        if chunk_text_marker not in user_text:
+            return _RiskEvidenceList(
+                items=[
+                    _RiskEvidence(risk_id=v["risk_id"], grounded=False, confidence="low", quotes=[]) for v in VARIANTS
+                ]
+            )
+        if grounded_delay_s:
+            time.sleep(grounded_delay_s)
+        return _RiskEvidenceList(
+            items=[_RiskEvidence(risk_id=VARIANTS[0]["risk_id"], grounded=True, confidence="high", quotes=["quote"])]
+        )
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = _create
+    return client
+
+
+def test_removed_group_not_recorded_when_any_chunk_grounded_a_variant():
+    """A parent grounded in one chunk and rejected in another is not recorded as removed.
+
+    The grounding chunk's answer arrives after the rejection, so the
+    empty-grounded result is folded into the outcome first.
+    """
+    chunks = _make_chunks(["chunk zero text", "chunk one text"])
+
+    matches, removed = _run_variant_grounding(
+        [_make_parent_match(chunk_index=0), _make_parent_match(chunk_index=1)],
+        chunks,
+        VARIANT_MAP,
+        _client_grounding_chunk("chunk one text", grounded_delay_s=0.2),
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    # chunk 1 grounded a variant; the parent survives through it
+    assert [m.risk_id for m in matches] == [VARIANTS[0]["risk_id"]]
+    assert removed == []
+
+
+def test_removed_reason_independent_of_completion_order():
+    """The reason and removal stay the same whichever chunk grounds or finishes first."""
+    results = []
+    # each pass swaps which chunk grounds the variant and reverses the
+    # submission order, so the surviving result comes from a different
+    # chunk and a different completion position each time
+    for marker, reverse in (("chunk one text", False), ("chunk zero text", True)):
+        parents = [_make_parent_match(chunk_index=0), _make_parent_match(chunk_index=1)]
+        if reverse:
+            parents = list(reversed(parents))
+        matches, removed = _run_variant_grounding(
+            parents,
+            _make_chunks(["chunk zero text", "chunk one text"]),
+            VARIANT_MAP,
+            _client_grounding_chunk(marker),
+            SimpleNamespace(model="test-model"),
+            None,
+        )
+        results.append((sorted(m.risk_id for m in matches), [(r.reason, r.attempted_variant_ids) for r in removed]))
+
+    # whichever chunk grounded the variant, the parent survives and no
+    # removal is recorded; whichever chunk was rejected, nothing leaked
+    assert results[0] == results[1]
+    assert results[0][0] == [VARIANTS[0]["risk_id"]]
+    assert results[0][1] == []
+
+
+def test_removed_reason_no_parent_evidence_across_mixed_chunks():
+    """Evidence without an attributed chunk counts as no parent evidence, not a variant attempt."""
+    parent_attributed = _make_parent_match(chunk_index=0)
+    parent_unattributed = _make_parent_match(chunk_index=1)
+    # the group stage could not place these quotes; no chunk can ground against them
+    parent_unattributed.evidence = [
+        EvidenceSpan(text="quote", document="doc.md", chunk_index=None, cross_encoder_score=0.5)
+    ]
+
+    matches, removed = _run_variant_grounding(
+        [parent_attributed, parent_unattributed],
+        _make_chunks(["chunk zero text", "chunk one text"]),
+        VARIANT_MAP,
+        _client_grounding_nothing(),
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    # chunk 0 had attributed evidence, so the variants were attempted
+    assert matches == []
+    assert [(r.reason, r.attempted_variant_ids) for r in removed] == [
+        ("no_variant_grounded", [v["risk_id"] for v in VARIANTS])
+    ]
+
+
+def test_parent_with_only_unattributed_evidence_records_no_attempt():
+    """A parent whose evidence names no chunk records no attempted variants."""
+    parent = _make_parent_match(chunk_index=0)
+    parent.evidence = [EvidenceSpan(text="quote", document="doc.md", chunk_index=None, cross_encoder_score=0.5)]
+    client = MagicMock()
+
+    matches, removed = _run_variant_grounding(
+        [parent],
+        _make_chunks(["chunk text"]),
+        VARIANT_MAP,
+        client,
+        SimpleNamespace(model="test-model"),
+        None,
+    )
+
+    assert matches == []
+    assert len(removed) == 1
+    record = removed[0]
+    assert record.reason == "no_parent_evidence"
+    assert record.attempted_variant_ids == []
+    # no variant was ever sent to the model
+    client.chat.completions.create.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -449,6 +449,17 @@ def _variant_context_span(evidence: list[EvidenceSpan]) -> EvidenceSpan | None:
     return min(attributed, key=_variant_evidence_key)
 
 
+def _variants_attemptable(evidence) -> bool:
+    """Tell whether variant grounding can run against this evidence.
+
+    Mirrors `_ground_variants_one`'s proceed condition: grounding needs at
+    least one evidence span the group stage could attribute to a chunk.
+    `_variant_context_span` returns None for an empty list, so the no-evidence
+    early return is covered too.
+    """
+    return _variant_context_span(evidence) is not None
+
+
 def _ground_variants_one(
     parent_match,
     chunks,
@@ -466,13 +477,11 @@ def _ground_variants_one(
         return parent_match, {}
 
     evidence = parent_match.evidence
-    if not evidence:
+    if not _variants_attemptable(evidence):
         return parent_match, {}
 
     best_ev = _variant_context_span(evidence)
-    if best_ev is None or best_ev.chunk_index is None:
-        return parent_match, {}
-
+    assert best_ev is not None and best_ev.chunk_index is not None  # for mypy; checked above
     ci = best_ev.chunk_index
     text = chunk_contexts[ci] if chunk_contexts and ci < len(chunk_contexts) else chunks[ci].text
     chunk = chunks[ci]
@@ -543,9 +552,7 @@ def _run_variant_grounding(
 
     Returns (matches, removed): the surviving matches (non-parent matches
     plus one match per grounded variant) and one RemovedVariantGroup record
-    per distinct parent group that produced no variant match. Per-chunk
-    matches for the same parent collapse into one record before the merge
-    stage would deduplicate them.
+    per distinct parent group that no chunk grounded a variant for.
     """
     parent_matches = []
     non_parent_matches = []
@@ -565,7 +572,7 @@ def _run_variant_grounding(
     )
 
     variant_matches: list[RiskMatch] = []
-    removed: list[RemovedVariantGroup] = []
+    outcomes: dict[str, _ParentOutcome] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(
@@ -583,6 +590,8 @@ def _run_variant_grounding(
         }
         for future in as_completed(futures):
             parent_match, grounded = future.result()
+            outcome = outcomes.setdefault(parent_match.risk_id, _ParentOutcome())
+            outcome.record(parent_match, grounded)
             for vid, (evidence, confidence) in grounded.items():
                 vinfo = _variant_info(variant_map[parent_match.risk_id], vid)
                 if not vinfo:
@@ -601,10 +610,62 @@ def _run_variant_grounding(
                         use_cross_encoder=parent_match.confidence_source != "rrf",
                     ).model_copy(update={"scores_inherited_from": parent_match.risk_id})
                 )
-            if not grounded:
-                _record_removed_group(parent_match, variant_map[parent_match.risk_id], stage, removed)
 
+    removed = _removed_group_records(outcomes, variant_map, stage)
     return non_parent_matches + variant_matches, removed
+
+
+class _ParentOutcome:
+    """Aggregate one parent group's variant grounding across its chunk matches.
+
+    Tracks whether any chunk grounded a variant and whether any chunk sent
+    variants to ground_variants at all, so the removal decision and its
+    reason come from the union over chunks, not from whichever match
+    finished first.
+    """
+
+    def __init__(self):
+        self.grounded_variant_ids: list[str] = []
+        self.attempted = False
+
+    def record(self, parent_match, grounded) -> None:
+        """Fold one chunk's result into the parent's outcome."""
+        if grounded:
+            self.grounded_variant_ids.extend(grounded)
+        if _variants_attemptable(parent_match.evidence):
+            self.attempted = True
+
+    @property
+    def removed_reason(self) -> str | None:
+        """The removal reason, or None when a variant survived somewhere."""
+        if self.grounded_variant_ids:
+            return None
+        return "no_variant_grounded" if self.attempted else "no_parent_evidence"
+
+
+def _removed_group_records(outcomes, variant_map, stage) -> list[RemovedVariantGroup]:
+    """Build one removal record per parent group that grounded no variant.
+
+    A group records ``no_variant_grounded`` with the ids that were sent to
+    ground_variants when at least one chunk had evidence to ground against;
+    otherwise it records ``no_parent_evidence`` with no attempted ids.
+    """
+    removed = []
+    for parent_id, outcome in outcomes.items():
+        reason = outcome.removed_reason
+        if reason is None:
+            continue
+        variants = variant_map[parent_id]
+        attempted = [v["risk_id"] for v in variants] if reason == "no_variant_grounded" else []
+        removed.append(
+            RemovedVariantGroup(
+                parent_id=parent_id,
+                stage=stage,
+                reason=reason,
+                attempted_variant_ids=attempted,
+            )
+        )
+    return removed
 
 
 def _variant_info(variants, variant_id):
@@ -613,31 +674,6 @@ def _variant_info(variants, variant_id):
         if v["risk_id"] == variant_id:
             return v
     return None
-
-
-def _record_removed_group(parent_match, variants, stage, removed) -> None:
-    """Append one removal record unless this parent group already has one.
-
-    A parent without evidence never reaches ground_variants, so its record
-    lists no attempted variant ids.
-    """
-    parent_id = parent_match.risk_id
-    if any(r.parent_id == parent_id for r in removed):
-        return
-    if not parent_match.evidence:
-        reason = "no_parent_evidence"
-        attempted: list[str] = []
-    else:
-        reason = "no_variant_grounded"
-        attempted = [v["risk_id"] for v in variants]
-    removed.append(
-        RemovedVariantGroup(
-            parent_id=parent_id,
-            stage=stage,
-            reason=reason,
-            attempted_variant_ids=attempted,
-        )
-    )
 
 
 def _run_judge(
