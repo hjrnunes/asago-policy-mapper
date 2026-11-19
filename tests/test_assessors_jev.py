@@ -487,6 +487,55 @@ def test_response_echoing_the_api_key_is_redacted(monkeypatch):
     assert batch.exchange["responses"][0]["echo"] == "key=[redacted]"
 
 
+def test_unmatched_id_echoing_the_api_key_is_redacted(monkeypatch):
+    """An unmatched question id carrying the key is redacted, not recorded.
+
+    Unmatched ids leave the response payload and land in the batch's
+    ``unmatched_ids`` — which persists into the run output — so a
+    hostile or broken echo keyed by the secret must not survive there,
+    the same way the recorded response's keys do not.
+    """
+    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "secret-value-123")
+
+    body = _jev_body(("R-001", 0.9))
+    body["answers"]["secret-value-123"] = {"type": "noul", "noul": 0.4}
+
+    assessor = _assessor(lambda request: httpx.Response(200, json=body))
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
+
+    assert "secret-value-123" not in json.dumps(batch.unmatched_ids)
+    assert batch.unmatched_ids == ("[redacted]",)
+    # The matched answer is unaffected: the redaction touches only the
+    # unmatched id, never the scores.
+    assert _p_value(batch.answers["R-001"][0]) == 0.9
+
+
+def test_unmatched_id_partial_key_echo_is_redacted(monkeypatch):
+    """A key embedded inside an unmatched id is replaced in place."""
+    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "secret-value-123")
+
+    body = _jev_body(("R-001", 0.9))
+    body["answers"]["prefix-secret-value-123-suffix"] = {"type": "noul", "noul": 0.4}
+
+    assessor = _assessor(lambda request: httpx.Response(200, json=body))
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
+
+    assert batch.unmatched_ids == ("prefix-[redacted]-suffix",)
+
+
+def test_unmatched_id_with_no_key_configured_stays_exact(monkeypatch):
+    """With no key configured there is no secret to redact; ids stay exact."""
+    monkeypatch.delenv("POLICY_MAPPER_JEV_API_KEY", raising=False)
+
+    body = _jev_body(("R-001", 0.9))
+    body["answers"]["R-999"] = {"type": "noul", "noul": 0.4}
+
+    assessor = _assessor(lambda request: httpx.Response(200, json=body))
+    batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
+
+    assert batch.unmatched_ids == ("R-999",)
+
+
 def test_wire_keeps_request_on_timeout_and_error():
     """Timeout and error batches still record the exact Jev request body in the wire."""
     endpoint = _endpoint(timeout_s=0.05)

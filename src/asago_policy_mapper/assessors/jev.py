@@ -33,10 +33,12 @@ HTTP errors, which the base maps to ``NoAnswer("error")``, fail-open.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from asago_policy_mapper.assessors.http_probability import (
+    _REDACTED,
     HttpProbabilityAssessor,
     ProbabilityEndpoint,
     _as_float,
@@ -90,6 +92,12 @@ class JevProbabilityAssessor(HttpProbabilityAssessor):
     """
 
     _PATH = "/v1/systemone"
+
+    #: What the Jev request carries beyond the generic shape: each
+    #: question's instructions embed the fixed question text and the
+    #: task's criterion (the ``BinaryTask`` proposition — the grounding
+    #: criterion) alongside the case's name and description.
+    fields_sent = ("chunk_context", "question", "criterion", "risk_name", "risk_description")
 
     def __init__(self, endpoint: ProbabilityEndpoint, transport=None):
         super().__init__(endpoint, transport=transport)
@@ -160,16 +168,30 @@ class JevProbabilityAssessor(HttpProbabilityAssessor):
         """
         if not isinstance(payload, dict):
             return self._mark_all(cases, "error"), []
-        if "answers" not in payload:
+        answers = payload.get("answers")
+        if answers is None:
+            # Jev reports a request-level failure as a 200 body carrying
+            # an error object instead of answers; that is an error for
+            # every case, not a missing answer. An absent and an explicit
+            # null answers key mean the same thing (the null-equals-
+            # missing reading the generic adapter takes).
+            if "error" in payload:
+                detail = _error_detail(payload["error"], self._secret())
+                return {c.risk_id: NoAnswer("error", detail) for c in cases}, []
             return self._mark_all(cases, "missing"), []
-        answers = payload["answers"]
         if not isinstance(answers, dict):
+            # Answers present but unreadable is a payload problem, even
+            # when an error object rides along: the answers won.
             return self._mark_all(cases, "invalid"), []
         case_ids = frozenset({c.risk_id for c in cases})
         answers_out: dict[str, Answer] = {}
         unmatched: list[str] = []
         for qid, answer in answers.items():
             if qid not in case_ids:
+                # The id leaves the payload and lands in the recorded
+                # batch (and so the run output), so it goes through the
+                # same secret replacement the recorded response does —
+                # the base adapter's assembly-point redaction covers it.
                 unmatched.append(qid)
                 continue
             number = _noul_probability(answer)
@@ -177,6 +199,10 @@ class JevProbabilityAssessor(HttpProbabilityAssessor):
         missing = {c.risk_id: NoAnswer("missing") for c in cases if c.risk_id not in answers_out}
         answers_out.update(missing)
         return answers_out, unmatched
+
+    def _secret(self) -> str:
+        """The configured credential, or an empty string (a no-op walk)."""
+        return os.environ.get(self.endpoint.api_key_env) or ""
 
 
 def _noul_probability(answer: object) -> float | None:
@@ -188,3 +214,19 @@ def _noul_probability(answer: object) -> float | None:
     if not isinstance(answer, dict) or answer.get("type") != "noul":
         return None
     return _as_float(answer.get("noul"))
+
+
+def _error_detail(error: object, secret: str) -> str:
+    """A short summary of a request-level error object, redacted.
+
+    Jev's error body is free-form, so a string is taken as-is (truncated
+    to 200) and anything else collapses to a stable marker. The text
+    comes from the endpoint, which also saw the credential in its
+    Authorization header, so it is redacted against that secret first —
+    replacing before truncating, so a secret straddling the cut is fully
+    replaced rather than partially kept. The detail lands in
+    ``NoAnswer.detail`` and so in the run output.
+    """
+    if isinstance(error, str):
+        return error.replace(secret, _REDACTED)[:200]
+    return "endpoint returned an error object"
