@@ -86,12 +86,11 @@ def _pad_name(name: str, width: int = 20) -> str:
     return name.ljust(width)[:width]
 
 
-def run_one(
+def _build_extract_command(
     policies: list[Path],
-    name: str,
+    out: Path,
     base_url: str,
     model: str,
-    runs_dir: Path,
     chunk_max_tokens: int = 512,
     top_n_accept: int = 10,
     top_n_judge: int = 10,
@@ -103,7 +102,6 @@ def run_one(
     query_instruction: str | None = None,
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2",
     cross_encoder_type: str = "score",
-    name_width: int = 20,
     bm25_rescue_rank: int = 0,
     no_cross_encoder: bool = False,
     rrf_min_score: float = 0.015,
@@ -119,13 +117,8 @@ def run_one(
     temperature: float = 0.0,
     top_p: float | None = None,
     top_k: int | None = None,
-) -> tuple[str, bool, str, int, float]:
-    out = runs_dir / name
-    tag = _pad_name(name, name_width)
-
-    files_desc = ", ".join(p.name for p in policies)
-    _locked_print(f"  [{tag}] starting ({files_desc})")
-
+) -> list[str]:
+    """Assemble the `asago-policy-mapper extract` invocation for one battery run."""
     cmd = [
         "uv",
         "run",
@@ -167,8 +160,10 @@ def run_one(
         cmd.extend(["--no-cross-encoder", "--rrf-min-score", str(rrf_min_score)])
     if colbert_model:
         cmd.extend(["--colbert-model", colbert_model])
-    if expand_siblings:
-        cmd.append("--expand-siblings")
+    # The CLI default already expands siblings; passing the positive form
+    # explicitly would warn as ignored on --no-grounding runs.
+    if not expand_siblings:
+        cmd.append("--no-expand-siblings")
     if grounding_passes > 1:
         cmd.extend(["--grounding-passes", str(grounding_passes)])
     if expansion_passes > 1:
@@ -193,6 +188,81 @@ def run_one(
         cmd.extend(["--top-p", str(top_p)])
     if top_k is not None:
         cmd.extend(["--top-k", str(top_k)])
+    return cmd
+
+
+def run_one(
+    policies: list[Path],
+    name: str,
+    base_url: str,
+    model: str,
+    runs_dir: Path,
+    chunk_max_tokens: int = 512,
+    top_n_accept: int = 10,
+    top_n_judge: int = 10,
+    min_score_floor: float = 0.70,
+    threshold_high: float | None = None,
+    threshold_low: float | None = None,
+    bi_encoder_model: str = "all-mpnet-base-v2",
+    bi_encoder_model_name: str | None = None,
+    query_instruction: str | None = None,
+    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2",
+    cross_encoder_type: str = "score",
+    name_width: int = 20,
+    bm25_rescue_rank: int = 0,
+    no_cross_encoder: bool = False,
+    rrf_min_score: float = 0.015,
+    colbert_model: str | None = None,
+    expand_siblings: bool = True,
+    grounding_passes: int = 3,
+    expansion_passes: int = 3,
+    judge_prompt: str = "judge_risk",
+    judge_context_tokens: int = 0,
+    no_judge: bool = False,
+    no_grounding: bool = False,
+    query_gen: bool = True,
+    temperature: float = 0.0,
+    top_p: float | None = None,
+    top_k: int | None = None,
+) -> tuple[str, bool, str, int, float]:
+    out = runs_dir / name
+    tag = _pad_name(name, name_width)
+
+    files_desc = ", ".join(p.name for p in policies)
+    _locked_print(f"  [{tag}] starting ({files_desc})")
+
+    cmd = _build_extract_command(
+        policies,
+        out,
+        base_url,
+        model,
+        chunk_max_tokens=chunk_max_tokens,
+        top_n_accept=top_n_accept,
+        top_n_judge=top_n_judge,
+        min_score_floor=min_score_floor,
+        threshold_high=threshold_high,
+        threshold_low=threshold_low,
+        bi_encoder_model=bi_encoder_model,
+        bi_encoder_model_name=bi_encoder_model_name,
+        query_instruction=query_instruction,
+        cross_encoder_model=cross_encoder_model,
+        cross_encoder_type=cross_encoder_type,
+        bm25_rescue_rank=bm25_rescue_rank,
+        no_cross_encoder=no_cross_encoder,
+        rrf_min_score=rrf_min_score,
+        colbert_model=colbert_model,
+        expand_siblings=expand_siblings,
+        grounding_passes=grounding_passes,
+        expansion_passes=expansion_passes,
+        judge_prompt=judge_prompt,
+        judge_context_tokens=judge_context_tokens,
+        no_judge=no_judge,
+        no_grounding=no_grounding,
+        query_gen=query_gen,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+    )
 
     t0 = time.monotonic()
     proc = subprocess.Popen(
@@ -530,6 +600,7 @@ def main():
     if args.rrf_min_score < 0:
         print("Error: --rrf-min-score must not be negative: it is a floor, never a ceiling")
         sys.exit(1)
+
     if args.no_judge and args.no_grounding and args.no_query_gen:
         base_url = args.base_url or "unused"
         model = args.model or config.get("model") or os.environ.get("POLICY_MAPPER_MODEL") or "unused"
