@@ -257,6 +257,29 @@ def test_merge_evidence_tie_still_deterministic():
         assert merged[0].evidence[0].document == "a.pdf"
 
 
+def test_merge_duplicate_quote_keeps_highest_scoring_copy():
+    """Duplicate texts keep their highest-scoring copy as the representative.
+
+    The same quote text appears twice with different cross-encoder scores.
+    The evidence ordering puts the higher-scoring copy first, so that copy
+    survives deduplication — regardless of input order, and even when the
+    lower-scoring copy sits in an earlier chunk.
+    """
+    high_score_late_chunk = _span("shared quote", 4, score=0.9, document="high.pdf")
+    low_score_early_chunk = _span("shared quote", 1, score=0.3, document="low.pdf")
+
+    for spans in (
+        [high_score_late_chunk, low_score_early_chunk],
+        [low_score_early_chunk, high_score_late_chunk],
+    ):
+        merged = merge_matches([_match("R-DUPSCORE", 0.7, spans)], max_evidence=3)
+        assert len(merged[0].evidence) == 1
+        assert merged[0].evidence[0].text == "shared quote"
+        assert merged[0].evidence[0].cross_encoder_score == 0.9
+        assert merged[0].evidence[0].chunk_index == 4
+        assert merged[0].evidence[0].document == "high.pdf"
+
+
 def test_merge_cap_applies_after_dedup():
     """The cap counts unique texts, not raw spans.
 
