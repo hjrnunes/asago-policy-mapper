@@ -638,16 +638,16 @@ def test_empty_cases_return_empty_batch():
 
 
 def test_empty_batch_wire_is_not_shared_between_results():
-    """Appending to one empty batch's wire leaves the next empty batch clean."""
+    """Appending to one empty batch's exchange leaves the next empty batch clean."""
     assessor = _assessor(lambda request: httpx.Response(200, json=_scores_body()))
 
-    first = assessor.assess(TASK, "context", [])
-    first.wire["requests"].append("not a real request")
-    first.wire["responses"].append("not a real response")
+    first = assessor.assess(QUESTION, "context", [])
+    first.exchange["requests"].append("not a real request")
+    first.exchange["responses"].append("not a real response")
 
-    second = assessor.assess(TASK, "context", [])
+    second = assessor.assess(QUESTION, "context", [])
 
-    assert second.wire == {"requests": [], "responses": []}
+    assert second.exchange == {"requests": [], "responses": []}
 
 
 def test_scores_after_unmatched_row_still_apply():
@@ -693,8 +693,8 @@ def test_non_object_payload_is_error():
     assert answer.reason == "error"
 
 
-def test_scores_null_is_invalid():
-    """A scores key of null marks every candidate invalid, not an exception."""
+def test_scores_null_is_missing():
+    """A scores key of null means the same as no scores key: every candidate is missing."""
     text = '{"scores": null}'
     assessor = _assessor(
         lambda request: httpx.Response(200, content=text.encode(), headers={"Content-Type": "application/json"})
@@ -704,7 +704,7 @@ def test_scores_null_is_invalid():
 
     answer = batch.answers["R-001"][0]
     assert isinstance(answer, NoAnswer)
-    assert answer.reason == "invalid"
+    assert answer.reason == "missing"
 
 
 def test_scores_object_is_invalid():

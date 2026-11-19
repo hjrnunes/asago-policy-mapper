@@ -195,9 +195,12 @@ class HttpProbabilityAssessor:
     ) -> tuple[dict[str, Answer], list[str]]:
         if not isinstance(payload, dict):
             return self._mark_all(cases, "error"), []
-        if "scores" not in payload:
+        scores = payload.get("scores")
+        if scores is None:
+            # A missing scores key and an explicit null mean the same thing:
+            # the endpoint answered but scored nothing, so every case is
+            # missing rather than the whole payload being invalid.
             return self._mark_all(cases, "missing"), []
-        scores = payload["scores"]
         if not isinstance(scores, list):
             return self._mark_all(cases, "invalid"), []
         answers, unmatched = _reduce_scores(scores, frozenset({c.risk_id for c in cases}))
