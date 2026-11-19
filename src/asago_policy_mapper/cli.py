@@ -55,7 +55,7 @@ def _explicit_option_names(param_names: tuple[str, ...]) -> frozenset[str]:
 
     Warnings fire only for explicitly passed options, so defaults (and
     values that arrive via environment variables, which click reports as
-    ``DEFAULT``) stay quiet. Called from inside the command body, where
+    ``ENVIRONMENT``) stay quiet. Called from inside the command body, where
     the current click context holds the parameter sources.
     """
     import click
