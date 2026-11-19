@@ -89,38 +89,32 @@ def _write_policy(directory: Path, name: str, text: str) -> Path:
 
 
 def test_fixture_builder_excludes_expansion_records(tmp_path):
-    """ground-expand- records are excluded from the grounding population; ground- records are kept."""
-    from scripts.build_prefilter_fixtures import grounding_population
+    """ground-expand- records are excluded from grounded ids; ground- records are kept."""
+    from scripts.build_prefilter_fixtures import build_rows
 
     records = [
         _grounding_record("ground-001", 0, ["R-001"], {"R-001": True}),
         _grounding_record("ground-expand-001", 0, ["R-002"], {"R-002": True}),
-        _grounding_record("ground-002", 1, ["R-003"], {"R-003": False}),
+        _grounding_record("ground-002", 0, ["R-003"], {"R-003": False}),
         _grounding_record("judge-001", 0, ["R-004"], {}, stage="judge"),
         _grounding_record("ground-variant-001", 0, ["R-005"], {"R-005": True}, stage="variant_grounding"),
     ]
 
-    population = grounding_population(records)
+    rows = build_rows("p", ["ctx"], records)
 
-    assert "R-002" not in population
-    assert "R-004" not in population
-    assert "R-005" not in population
-    assert population["R-001"] is True
-    assert population["R-003"] is False
+    assert rows[0]["grounded_ids"] == ["R-001"]
 
 
 def test_fixture_builder_any_pass_grounds(tmp_path):
     """A candidate grounded in any pass is grounded, even when another pass says no."""
-    from scripts.build_prefilter_fixtures import build_rows, grounding_population
+    from scripts.build_prefilter_fixtures import build_rows
 
     records = [
         _grounding_record("ground-001", 0, ["R-001"], {"R-001": False}),
         _grounding_record("ground-002", 0, ["R-001"], {"R-001": True}),
     ]
 
-    assert grounding_population(records)["R-001"] is True
-
-    # And through the row-building path, in both pass orders.
+    # Through the row-building path, in both pass orders.
     rows = build_rows("p", ["ctx"], records)
     assert rows[0]["grounded_ids"] == ["R-001"]
     rows = build_rows("p", ["ctx"], list(reversed(records)))

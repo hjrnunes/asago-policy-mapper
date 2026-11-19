@@ -41,23 +41,6 @@ def _is_expansion(call_id: str) -> bool:
     return call_id.startswith("ground-expand-")
 
 
-def grounding_population(records: Iterable[dict]) -> dict[str, bool]:
-    """Map each risk id to whether any non-expansion grounding pass grounded it."""
-    grounded: dict[str, bool] = {}
-    for record in records:
-        if record.get("stage") != "grounding" or _is_expansion(str(record.get("call_id", ""))):
-            continue
-        for row in record.get("response", []):
-            if not isinstance(row, dict):
-                continue
-            rid = row.get("risk_id")
-            if isinstance(rid, str) and row.get("grounded"):
-                grounded[rid] = True
-            elif isinstance(rid, str) and rid not in grounded:
-                grounded[rid] = False
-    return grounded
-
-
 def _parse_candidate_line(line: str, risk_id: str) -> dict | None:
     """Parse one rendered candidate line for a known risk id.
 
