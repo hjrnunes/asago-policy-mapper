@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 
-from asago_policy_mapper.extract.calllog import append_numbered
+from asago_policy_mapper.extract.calllog import append_with_call_id
 from asago_policy_mapper.extract.models import (
     EvidenceSpan,
     LLMCallRecord,
@@ -59,7 +59,7 @@ def _record_grounding_call(
     grounded_count: int,
     batch_size: int,
 ) -> None:
-    append_numbered(
+    append_with_call_id(
         call_collector,
         counts=lambda record: record.stage == "grounding",
         build=lambda number: LLMCallRecord(
@@ -186,7 +186,7 @@ def ground_variants(
     result = _verdicts_to_result(verdicts, variant_ids, document, chunk_index, page, section)
 
     if call_collector is not None:
-        append_numbered(
+        append_with_call_id(
             call_collector,
             counts=lambda record: record.stage == "variant_grounding",
             build=lambda number: LLMCallRecord(
@@ -240,7 +240,7 @@ def _record_group_call(
     grounded_count: int,
     risk_count: int,
 ) -> None:
-    append_numbered(
+    append_with_call_id(
         call_collector,
         counts=lambda record: "expand" in record.call_id,
         build=lambda number: LLMCallRecord(
@@ -416,7 +416,7 @@ def synthesize_causal_chain(
 
     if call_collector is not None:
         first_chunk = risk_match.evidence[0].chunk_index if risk_match.evidence else -1
-        append_numbered(
+        append_with_call_id(
             call_collector,
             counts=lambda record: record.stage == "causal_synthesis",
             build=lambda number: LLMCallRecord(

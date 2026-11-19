@@ -5,8 +5,8 @@ collector already holds (``judge-001``, ``ground-002`` and so on). Doing the
 count and the append in separate steps races when stage workers run in
 parallel: two threads count the same number and both append it. Each site
 keeps its own counting predicate (matching its id format), and
-``append_numbered`` runs the count, the build and the append as one critical
-section so the ids stay unique.
+``append_with_call_id`` runs the count, the build and the append as one
+critical section so the ids stay unique.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from asago_policy_mapper.extract.models import LLMCallRecord
 _lock = threading.Lock()
 
 
-def append_numbered(
+def append_with_call_id(
     collector: list[LLMCallRecord],
     *,
     counts: Callable[[LLMCallRecord], bool],

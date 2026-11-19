@@ -1,7 +1,7 @@
 import threading
 import time
 
-from asago_policy_mapper.extract.calllog import append_numbered
+from asago_policy_mapper.extract.calllog import append_with_call_id
 from asago_policy_mapper.extract.models import LLMCallRecord, _RiskEvidence
 
 
@@ -18,10 +18,10 @@ def _record(call_id: str, stage: str = "grounding") -> LLMCallRecord:
     )
 
 
-def test_append_numbered_returns_sequential_ids():
+def test_append_with_call_id_returns_sequential_ids():
     collector: list[LLMCallRecord] = []
     for expected in ("x-001", "x-002", "x-003"):
-        record = append_numbered(
+        record = append_with_call_id(
             collector,
             counts=lambda r: r.stage == "grounding",
             build=lambda n: _record(f"x-{n:03d}"),
@@ -30,7 +30,7 @@ def test_append_numbered_returns_sequential_ids():
     assert [r.call_id for r in collector] == ["x-001", "x-002", "x-003"]
 
 
-def test_append_numbered_is_unique_under_threads():
+def test_append_with_call_id_is_unique_under_threads():
     """Counting and appending happen as one critical section.
 
     32 threads hit the collector behind a barrier with a build that sleeps,
@@ -46,7 +46,7 @@ def test_append_numbered_is_unique_under_threads():
 
     def worker() -> None:
         barrier.wait()
-        append_numbered(collector, counts=lambda r: r.stage == "grounding", build=build)
+        append_with_call_id(collector, counts=lambda r: r.stage == "grounding", build=build)
 
     threads = [threading.Thread(target=worker) for _ in range(thread_count)]
     for t in threads:
@@ -86,7 +86,7 @@ def test_record_ids_keep_legacy_counting():
     assert [r.call_id for r in collector] == ["ground-expand-001", "ground-002"]
 
 
-def test_append_numbered_counts_by_predicate():
+def test_append_with_call_id_counts_by_predicate():
     """Each site counts only its own stage; other stages leave numbering alone."""
     collector: list[LLMCallRecord] = [
         _record("judge-001", stage="judge"),
@@ -94,26 +94,26 @@ def test_append_numbered_counts_by_predicate():
         _record("ground-variant-001", stage="variant_grounding"),
     ]
 
-    record = append_numbered(
+    record = append_with_call_id(
         collector,
         counts=lambda r: "expand" in r.call_id,
         build=lambda n: _record(f"ground-expand-{n:03d}", stage="grounding"),
     )
 
     assert record.call_id == "ground-expand-001"
-    record = append_numbered(
+    record = append_with_call_id(
         collector,
         counts=lambda r: r.stage == "judge",
         build=lambda n: _record(f"judge-{n:03d}", stage="judge"),
     )
     assert record.call_id == "judge-002"
-    record = append_numbered(
+    record = append_with_call_id(
         collector,
         counts=lambda r: r.stage == "variant_grounding",
         build=lambda n: _record(f"ground-variant-{n:03d}", stage="variant_grounding"),
     )
     assert record.call_id == "ground-variant-002"
-    record = append_numbered(
+    record = append_with_call_id(
         collector,
         counts=lambda r: r.stage == "causal_synthesis",
         build=lambda n: _record(f"causal-{n:03d}", stage="causal_synthesis"),

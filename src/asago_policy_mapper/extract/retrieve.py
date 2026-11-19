@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import spacy
 
-from asago_policy_mapper.extract.calllog import append_numbered
+from asago_policy_mapper.extract.calllog import append_with_call_id
 from asago_policy_mapper.extract.models import LLMCallRecord, ScoredCandidate, _JudgeVerdicts
 from asago_policy_mapper.extract.parse import Chunk
 from asago_policy_mapper.llm import llm_stage
@@ -244,7 +244,7 @@ def _record_judge_call(
     batch_accepted: int,
     batch_size: int,
 ) -> None:
-    append_numbered(
+    append_with_call_id(
         call_collector,
         counts=lambda record: record.stage == "judge",
         build=lambda number: LLMCallRecord(
