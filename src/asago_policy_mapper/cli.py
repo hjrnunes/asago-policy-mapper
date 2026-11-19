@@ -1,8 +1,10 @@
 import json
 import logging
 import math
+import os
 from pathlib import Path
 from typing import NoReturn
+from urllib.parse import urlsplit
 
 import typer
 import yaml
@@ -220,14 +222,18 @@ def _load_prefilter_profile(path: Path) -> dict:
     return dict(profile)
 
 
-def _validate_prefilter_numeric(profile: dict, key: str, path: Path, *, minimum: float | None = None) -> None:
+def _validate_prefilter_numeric(
+    profile: dict, key: str, path: Path, *, minimum: float | None = None, exclusive_minimum: bool = False
+) -> None:
     """Check one optional numeric profile field fails fast when invalid.
 
     ``ProbabilityEndpoint`` is a plain dataclass: a wrong-typed
     ``timeout_s`` or ``max_batch`` from YAML would otherwise surface as
     a ``TypeError`` mid-run, inside the assessor. ``max_batch`` must be
     an integer (``range`` rejects float steps), and an explicit null is
-    an error rather than a silently-omitted field.
+    an error rather than a silently-omitted field. ``exclusive_minimum``
+    turns the floor into a strict bound (``timeout_s`` must be positive,
+    not zero: a zero timeout fails every request).
     """
     value = profile.get(key)
     if value is None:
@@ -240,8 +246,11 @@ def _validate_prefilter_numeric(profile: dict, key: str, path: Path, *, minimum:
             _fail_validation(f"--prefilter-profile {path}: {key} must be an integer, got {value!r}")
     elif not numeric:
         _fail_validation(f"--prefilter-profile {path}: {key} must be a number, got {value!r}")
-    if minimum is not None and value < minimum:
-        _fail_validation(f"--prefilter-profile {path}: {key} must be at least {minimum}, got {value!r}")
+    if minimum is not None:
+        below = value <= minimum if exclusive_minimum else value < minimum
+        if below:
+            relation = "greater than" if exclusive_minimum else "at least"
+            _fail_validation(f"--prefilter-profile {path}: {key} must be {relation} {minimum}, got {value!r}")
 
 
 def _validate_prefilter_strings(profile: dict, keys: tuple[str, ...], path: Path) -> None:
@@ -255,6 +264,44 @@ def _validate_prefilter_strings(profile: dict, keys: tuple[str, ...], path: Path
         value = profile.get(key)
         if not isinstance(value, str) or not value.strip():
             _fail_validation(f"--prefilter-profile {path}: {key} must be a nonempty string, got {value!r}")
+
+
+def _validate_endpoint_base_url(base_url: str, label: str) -> None:
+    """Check a profile URL is an http(s) URL with a host.
+
+    ``urlsplit`` accepts scheme-less hosts, empty hosts and unknown
+    schemes silently, and the assessor only surfaces the problem on the
+    first request — a typo'd scheme would fail every request while the
+    fail-open filter keeps everything, making a permanent
+    misconfiguration indistinguishable from an outage. The check runs
+    at profile load instead. ``label`` names the option in the error.
+    """
+    try:
+        parts = urlsplit(base_url)
+    except ValueError:
+        _fail_validation(f"{label}: base_url is not a valid URL, got {base_url!r}")
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        _fail_validation(f"{label}: base_url must be an http(s) URL with a host, got {base_url!r}")
+
+
+def _require_endpoint_api_key(api_key_env: str, base_url: str, label: str) -> None:
+    """Fail when an offsite endpoint has no API key in its named variable.
+
+    An offsite endpoint with an unset key would send policy text away
+    without authentication, then fail every batch with an authorization
+    error while the filter keeps everything: the run must refuse to
+    start instead. Local endpoints need no key. The provider profile
+    builders can adopt the same rule.
+    """
+    if os.environ.get(api_key_env):
+        return
+    from asago_policy_mapper.assessors.http_probability import _is_local_host
+
+    if not _is_local_host(urlsplit(base_url).hostname):
+        _fail_validation(
+            f"{label}: endpoint {base_url!r} is offsite and {api_key_env} is unset; "
+            "set the variable or point base_url at a local endpoint"
+        )
 
 
 def _build_prefilter(profile_path):
@@ -273,7 +320,8 @@ def _build_prefilter(profile_path):
     path = Path(profile_path)
     profile = _load_prefilter_profile(path)
     _validate_prefilter_strings(profile, ("base_url", "model", "api_key_env"), path)
-    _validate_prefilter_numeric(profile, "timeout_s", path, minimum=0.0)
+    _validate_endpoint_base_url(profile["base_url"], f"--prefilter-profile {path}")
+    _validate_prefilter_numeric(profile, "timeout_s", path, minimum=0.0, exclusive_minimum=True)
     _validate_prefilter_numeric(profile, "max_batch", path, minimum=1.0)
     threshold = _validate_prefilter_threshold(profile.pop("threshold", None), path)
 
@@ -283,6 +331,7 @@ def _build_prefilter(profile_path):
         from asago_policy_mapper.extract.screening import DropThreshold
     except ImportError as e:
         _fail_validation(f"--prefilter-profile could not import its stack: {e}")
+    _require_endpoint_api_key(profile["api_key_env"], profile["base_url"], f"--prefilter-profile {path}")
 
     try:
         endpoint = ProbabilityEndpoint(**profile)
