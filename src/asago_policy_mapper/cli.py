@@ -664,11 +664,16 @@ def extract(
     query_gen: bool = typer.Option(
         True, "--query-gen/--no-query-gen", help="LLM query generation for retrieval (default: on)"
     ),
-    prefilter_profile: Path = typer.Option(
+    prefilter_profile: Path | None = typer.Option(
         None,
         "--prefilter-profile",
         envvar="POLICY_MAPPER_PREFILTER_PROFILE",
         help="YAML profile for the opt-in pre-grounding filter (ProbabilityEndpoint fields plus threshold)",
+    ),
+    no_prefilter: bool = typer.Option(
+        False,
+        "--no-prefilter",
+        help="Turn off the pre-grounding filter, overriding --prefilter-profile and POLICY_MAPPER_PREFILTER_PROFILE",
     ),
     output_format: str = typer.Option(
         "json", "--output-format", "-f", help="Output format: json, yaml, or both (default: json)"
@@ -680,6 +685,10 @@ def extract(
     ),
 ):
     """Extract risks from policy documents using hybrid retrieval."""
+    # --no-prefilter wins over the environment variable: a CI run can
+    # inherit POLICY_MAPPER_PREFILTER_PROFILE and still run unfiltered.
+    if no_prefilter:
+        prefilter_profile = None
     needs_llm = _validate_extract_options(
         output_format=output_format,
         policy_files=policy_files,
@@ -706,6 +715,10 @@ def extract(
         top_p=top_p,
         top_k=top_k,
     )
+
+    # Build and validate the profile before creating any output: a bad
+    # profile fails the run without leaving an empty output directory.
+    prefilter = _build_prefilter(prefilter_profile)
 
     output.mkdir(parents=True, exist_ok=True)
 
@@ -750,7 +763,6 @@ def extract(
 
     _echo_extraction_banner(policy_files, all_risks, custom_risk_count)
 
-    prefilter = _build_prefilter(prefilter_profile)
     result = _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter)
 
     result.token_usage = tracker.to_dict()

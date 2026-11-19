@@ -787,3 +787,175 @@ def test_build_prefilter_allows_local_without_key(monkeypatch, profile_path):
     prefilter = _build_prefilter(profile_path)  # PROFILE points at localhost
     assert prefilter is not None
     assert prefilter.assessor.endpoint.base_url == "http://localhost:8080"
+
+
+# --- --no-prefilter override ---
+
+
+def test_no_prefilter_flag_overrides_envvar_profile(tmp_path, profile_path, monkeypatch):
+    """--no-prefilter wins over a profile set through the environment variable."""
+    from asago_policy_mapper.extract import pipeline
+
+    captured = {}
+
+    def fake_run_extraction(**kwargs):
+        captured["prefilter"] = kwargs.get("prefilter")
+        return pipeline._empty_result(kwargs["documents"])
+
+    monkeypatch.setattr(pipeline, "run_extraction", fake_run_extraction)
+
+    class _Risk:
+        id = "r1"
+        name = "r1"
+        description = "A risk."
+        isDefinedByTaxonomy = "test"
+        isPartOf = ""
+
+    class FakeNexus:
+        def __init__(self, base_dir=None):
+            pass
+
+        def get_all_risks(self):
+            return [_Risk()]
+
+    import asago_policy_mapper.cli as cli
+
+    monkeypatch.setattr(cli, "_attach_mitigations", lambda result, nexus_base_dir: None)
+    monkeypatch.setenv("POLICY_MAPPER_PREFILTER_PROFILE", str(profile_path))
+
+    from unittest.mock import patch
+
+    with (
+        patch("ai_atlas_nexus.AIAtlasNexus", FakeNexus),
+        patch("asago_policy_mapper.extract.report.build_risk_extraction_report") as fake_report,
+        patch("asago_policy_mapper.extract.annotate.prepare_annotation_data") as fake_annotate,
+        patch("asago_policy_mapper.extract.report.build_annotation_report") as fake_ann_report,
+    ):
+        fake_report.return_value = tmp_path / "r.html"
+        fake_annotate.return_value = {}
+        fake_ann_report.return_value = tmp_path / "a.html"
+        result = runner.invoke(
+            app,
+            [
+                "extract",
+                str(_policy(tmp_path)),
+                "-o",
+                str(tmp_path / "out"),
+                "--base-url",
+                "http://localhost:8000/v1",
+                "--model",
+                "test-model",
+                "--no-prefilter",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["prefilter"] is None
+
+
+def test_no_prefilter_flag_beats_explicit_profile(tmp_path, profile_path, monkeypatch):
+    """--no-prefilter turns the filter off even with --prefilter-profile given.
+
+    The off switch is unconditional: a run that asks for no filter runs
+    unfiltered, whatever else set a profile.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    captured = {}
+
+    def fake_run_extraction(**kwargs):
+        captured["prefilter"] = kwargs.get("prefilter")
+        return pipeline._empty_result(kwargs["documents"])
+
+    monkeypatch.setattr(pipeline, "run_extraction", fake_run_extraction)
+
+    class _Risk:
+        id = "r1"
+        name = "r1"
+        description = "A risk."
+        isDefinedByTaxonomy = "test"
+        isPartOf = ""
+
+    class FakeNexus:
+        def __init__(self, base_dir=None):
+            pass
+
+        def get_all_risks(self):
+            return [_Risk()]
+
+    import asago_policy_mapper.cli as cli
+
+    monkeypatch.setattr(cli, "_attach_mitigations", lambda result, nexus_base_dir: None)
+
+    from unittest.mock import patch
+
+    with (
+        patch("ai_atlas_nexus.AIAtlasNexus", FakeNexus),
+        patch("asago_policy_mapper.extract.report.build_risk_extraction_report") as fake_report,
+        patch("asago_policy_mapper.extract.annotate.prepare_annotation_data") as fake_annotate,
+        patch("asago_policy_mapper.extract.report.build_annotation_report") as fake_ann_report,
+    ):
+        fake_report.return_value = tmp_path / "r.html"
+        fake_annotate.return_value = {}
+        fake_ann_report.return_value = tmp_path / "a.html"
+        result = runner.invoke(
+            app,
+            [
+                "extract",
+                str(_policy(tmp_path)),
+                "-o",
+                str(tmp_path / "out"),
+                "--base-url",
+                "http://localhost:8000/v1",
+                "--model",
+                "test-model",
+                "--prefilter-profile",
+                str(profile_path),
+                "--no-prefilter",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["prefilter"] is None
+
+
+def test_no_prefilter_help_lists_the_flag():
+    """The override appears in the extract command's help."""
+    result = runner.invoke(app, ["extract", "--help"])
+    assert result.exit_code == 0
+    assert "--no-prefilter" in result.stdout
+
+
+# --- a bad profile must not create the output directory ---
+
+
+def test_bad_profile_creates_no_output_dir(tmp_path, profile_path, monkeypatch):
+    """A profile that fails validation leaves no empty output directory behind.
+
+    The profile loads before ``output.mkdir``: an invalid profile exits
+    before any filesystem change.
+    """
+    profile = dict(PROFILE)
+    profile["base_url"] = "https://probability.example.com/v1"
+    offsite = tmp_path / "offsite.yaml"
+    offsite.write_text(yaml.safe_dump(profile))
+    monkeypatch.delenv("PROB_API_KEY", raising=False)
+
+    out = tmp_path / "never-created"
+    result = runner.invoke(
+        app,
+        [
+            "extract",
+            str(_policy(tmp_path)),
+            "-o",
+            str(out),
+            "--base-url",
+            "http://localhost:8000/v1",
+            "--model",
+            "test-model",
+            "--prefilter-profile",
+            str(offsite),
+        ],
+    )
+    assert result.exit_code == 1
+    assert not out.exists()
