@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 import os
 import time
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -85,7 +86,9 @@ class HttpProbabilityAssessor:
 
     The client (and its connection pool) is created per ``assess`` call and
     closed at the end, unless a transport was injected, which stays under
-    the caller's ownership and is never closed here.
+    the caller's ownership and is never closed here. Constructing an
+    offsite assessor whose ``api_key_env`` variable is unset warns once:
+    policy text would leave this machine unauthenticated.
     """
 
     answer_types = frozenset({ProbabilityAnswer})
@@ -99,6 +102,12 @@ class HttpProbabilityAssessor:
         self.prompt_name = "http-probability"
         self._httpx = httpx
         self._transport = transport
+        if self.sends_offsite and not os.environ.get(endpoint.api_key_env):
+            warnings.warn(
+                f"{endpoint.api_key_env} is unset; {endpoint.base_url} is offsite"
+                " and will receive unauthenticated requests",
+                stacklevel=2,
+            )
 
     def assess(self, question: Question, context: str, cases: Sequence[DecisionCase]) -> AnswerBatch:
         if not cases:

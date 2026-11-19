@@ -9,6 +9,7 @@ protocol from ``extract/screening.py`` and emits ``ProbabilityAnswer`` and
 import json
 import os
 import time
+import warnings
 
 import httpx
 import pytest
@@ -103,14 +104,41 @@ def test_wire_excludes_api_key():
     assert _p_value(batch.answers["R-001"][0]) == 0.9
 
 
-def test_offsite_flag_follows_host():
+def test_offsite_flag_follows_host(monkeypatch):
     """sends_offsite is False for loopback hosts and True for anything else."""
+    monkeypatch.setenv("PROB_API_KEY", "k")
     assert _assessor(lambda request: httpx.Response(200, json=_scores_body())).sends_offsite is False
 
     for base in ("http://example.com/v1", "http://10.0.0.5/v1", "http://[::1]:9100/v1"):
         endpoint = _endpoint(base_url=base)
         assessor = _assessor(lambda request: httpx.Response(200, json=_scores_body()), endpoint)
         assert assessor.sends_offsite is (base != "http://[::1]:9100/v1"), base
+
+
+def test_offsite_without_key_warns(monkeypatch):
+    """An offsite endpoint with an unset key variable warns at construction."""
+    monkeypatch.delenv("PROB_API_KEY", raising=False)
+
+    with pytest.warns(UserWarning, match="PROB_API_KEY is unset"):
+        _assessor(lambda request: httpx.Response(200, json=_scores_body()), _endpoint(base_url="http://example.com/v1"))
+
+
+def test_offsite_with_key_does_not_warn(monkeypatch):
+    """An offsite endpoint with a set key variable constructs silently."""
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _assessor(lambda request: httpx.Response(200, json=_scores_body()), _endpoint(base_url="http://example.com/v1"))
+
+
+def test_local_without_key_does_not_warn(monkeypatch):
+    """A loopback endpoint needs no key and constructs silently."""
+    monkeypatch.delenv("PROB_API_KEY", raising=False)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _assessor(lambda request: httpx.Response(200, json=_scores_body()))
 
 
 def test_assessor_emits_probability():
