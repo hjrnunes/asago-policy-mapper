@@ -224,6 +224,11 @@ class _RemoteGenerativeReranker:
             response.raise_for_status()
             data = response.json()
             top = data["choices"][0].get("logprobs", {}).get("top_logprobs", [{}])[0]
+            if "yes" not in top and "no" not in top:
+                # Neither answer token in the top logprobs: the reranker gave
+                # no answer for this pair. NaN marks the pair unscored.
+                scores.append(math.nan)
+                continue
             true_logprob = top.get("yes", -10.0)
             false_logprob = top.get("no", -10.0)
             true_score = math.exp(true_logprob)
@@ -383,19 +388,6 @@ def _rerank_pairs(is_nli: bool, text: str, candidates: list[ScoredCandidate]) ->
     if is_nli:
         return [(text, f"This text discusses {c.risk_name}") for c in candidates]
     return [(f"{c.risk_name}: {c.risk_description}", text) for c in candidates]
-
-
-def _scored_candidates(candidates: list[ScoredCandidate], scores: np.ndarray, top_k: int) -> list[ScoredCandidate]:
-    """Attach scores to the top-k candidates, skipping non-finite ones."""
-    scored = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
-    results = []
-    for c, score in scored[:top_k]:
-        s = float(score)
-        if np.isnan(s) or np.isinf(s):
-            logger.warning("Skipping candidate %s with invalid score", c.risk_id)
-            continue
-        results.append(c.model_copy(update={"cross_encoder_score": s}))
-    return results
 
 
 def _measured_scores(candidates: list[ScoredCandidate], scores: np.ndarray) -> dict[str, float]:
@@ -587,6 +579,57 @@ def _load_encoders(
     )
 
 
+def _partition_scored(
+    candidates: list[ScoredCandidate], scores: np.ndarray
+) -> tuple[list[tuple[ScoredCandidate, float]], list[ScoredCandidate]]:
+    """Split candidates into (scored, unscored) by finite score.
+
+    Nonfinite scores (NaN = reranker gave no answer) must not consume a
+    top_k slot: partition them out before sorting, or the NaN would
+    displace a valid low-ranked candidate from the selection. Unscored
+    candidates stay in the returned list, after every scored one, so the
+    selection path can route them to the judge instead of dropping them.
+    """
+    finite_scored = []
+    unscored = []
+    for c, score in zip(candidates, scores):
+        if np.isfinite(score):
+            finite_scored.append((c, score))
+        else:
+            logger.warning("Candidate %s unscored by reranker", c.risk_id)
+            unscored.append(c)
+    return finite_scored, unscored
+
+
+def _reject_majority_unscored(unscored: list[ScoredCandidate], total: int) -> None:
+    """Refuse to rank when the reranker left most candidates unscored."""
+    if len(unscored) > total // 2:
+        # A majority-unscored call means the reranker is broken, not
+        # chatty: refuse to rank on the few scores that remain.
+        raise RuntimeError(
+            f"Reranker left {len(unscored)} of {total} candidates unscored; check the reranker endpoint and model"
+        )
+
+
+def _select_scored(finite_scored: list[tuple[ScoredCandidate, float]], top_k: int) -> list[ScoredCandidate]:
+    """Take the top-k finite-scored candidates, stamping their source."""
+    scored = sorted(finite_scored, key=lambda x: x[1], reverse=True)
+    return [
+        c.model_copy(update={"cross_encoder_score": float(score), "rerank_source": "cross_encoder"})
+        for c, score in scored[:top_k]
+    ]
+
+
+def _mark_unscored(unscored: list[ScoredCandidate]) -> list[ScoredCandidate]:
+    """Carry unscored candidates with the NaN marker and no source stamp.
+
+    The marker keeps them recognizable to the selection path (judge-bound,
+    capped by the borderline rules); the missing ``rerank_source`` reads as
+    "not calculated" at the RiskMatch confidence boundary.
+    """
+    return [c.model_copy(update={"cross_encoder_score": float("nan")}) for c in unscored]
+
+
 class RiskIndex:
     def __init__(
         self,
@@ -614,6 +657,12 @@ class RiskIndex:
         self._is_nli: bool = False
         self._apply_sigmoid: bool = False
         self._score_normalizer = _make_score_normalizer(is_nli=False, apply_sigmoid=False)
+        # Candidates the reranker could not score (no answer). Reset per run
+        # by constructing a fresh index; reported as rerank_unscored.
+        # Single-threaded by construction: retrieval calls rerank
+        # sequentially (_run_retrieval loops chunks in order), so the +=
+        # in rerank needs no lock.
+        self._unscored_count: int = 0
 
         if not risks:
             self._bi_encoder = None
@@ -688,6 +737,11 @@ class RiskIndex:
     @property
     def cross_encoder(self):
         return self._cross_encoder or self._remote_cross_encoder
+
+    @property
+    def rerank_unscored(self) -> int:
+        """Candidates the reranker could not score, in chunk stats form."""
+        return self._unscored_count
 
     @property
     def has_colbert(self) -> bool:
@@ -810,9 +864,10 @@ class RiskIndex:
             raw_scores = self._cross_encoder.predict(pairs)
         raw_scores = np.array(raw_scores)
         scores = self._score_normalizer(raw_scores)
-        scored = _scored_candidates(candidates, scores, top_k)
-        stamped = [c.model_copy(update={"rerank_source": "cross_encoder"}) for c in scored]
-        return stamped, _measured_scores(candidates, scores)
+        finite_scored, unscored = _partition_scored(candidates, scores)
+        self._unscored_count += len(unscored)
+        _reject_majority_unscored(unscored, len(candidates))
+        return _select_scored(finite_scored, top_k) + _mark_unscored(unscored), _measured_scores(candidates, scores)
 
     def hybrid_search(
         self,

@@ -1,3 +1,4 @@
+import math
 from unittest.mock import MagicMock
 
 from asago_policy_mapper.extract.models import LLMCallRecord, ScoredCandidate, _JudgeVerdict, _JudgeVerdicts
@@ -10,6 +11,7 @@ from asago_policy_mapper.extract.retrieve import (
     classify_by_threshold,
     classify_candidates,
     judge_borderline,
+    retrieve_chunk,
 )
 
 
@@ -292,12 +294,292 @@ def test_retrieve_chunk_no_cross_encoder():
     assert len(cr.borderline_judged) == 0
     assert cr.stats["auto_accepted"] == 2
     assert cr.stats["borderline"] == 0
+    assert cr.stats["rerank_unscored"] == 0
     mock_index.hybrid_search.assert_called_once()
     call_kwargs = mock_index.hybrid_search.call_args
     assert call_kwargs[1]["rrf_min_score"] == 0.01
 
 
+def test_retrieve_chunk_records_rerank_unscored():
+    """retrieve_chunk reports the chunk's own unscored count as rerank_unscored.
+
+    The index counter is cumulative across searches, so the chunk stat is the
+    delta across this chunk's hybrid_search call.
+    """
+
+    class _CountingIndex:
+        rerank_unscored = 0
+
+        def hybrid_search(self, *args, **kwargs):
+            # Two candidates went unscored during this chunk's search.
+            self.rerank_unscored += 2
+            return [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9)]
+
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, _CountingIndex())
+
+    assert cr.stats["rerank_unscored"] == 2
+
+
+def test_retrieve_chunk_rerank_unscored_is_per_search_delta():
+    """A chunk searched after earlier searches reports only its own unscored count."""
+
+    class _CountingIndex:
+        def __init__(self):
+            self.rerank_unscored = 5  # unscored in earlier searches
+
+        def hybrid_search(self, *args, **kwargs):
+            return [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9)]
+
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, _CountingIndex())
+
+    assert cr.stats["rerank_unscored"] == 0
+
+
+def test_retrieve_chunk_rerank_unscored_defaults_to_zero():
+    """Indexes without a rerank_unscored attribute report zero."""
+    from types import SimpleNamespace as _NS
+
+    index = _NS(hybrid_search=lambda *a, **k: [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a")])
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, index)
+
+    assert cr.stats["rerank_unscored"] == 0
+
+
+def test_count_unscored_reads_int_counter():
+    """The helper returns the index counter verbatim when it is an int."""
+    from asago_policy_mapper.extract.retrieve import _count_unscored
+
+    class _Idx:
+        rerank_unscored = 4
+
+    assert _count_unscored(_Idx()) == 4
+
+
+def test_count_unscored_missing_attribute_is_zero():
+    """No counter attribute reads as zero, whatever the getattr default mutates to."""
+    from asago_policy_mapper.extract.retrieve import _count_unscored
+
+    class _Idx:
+        pass
+
+    assert _count_unscored(_Idx()) == 0
+
+
+def test_count_unscored_non_int_is_zero():
+    """Mock-style counters (auto-attributes) read as zero, not as a count."""
+    from asago_policy_mapper.extract.retrieve import _count_unscored
+
+    class _Idx:
+        rerank_unscored = "not-an-int"
+
+    assert _count_unscored(_Idx()) == 0
+
+
 # --- classify_by_rank / classify_by_threshold direct tests ---
+
+
+def test_classify_by_rank_routes_unscored_to_borderline():
+    """NaN-scored (unscored) candidates join the borderline list, not the rank selection."""
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.90),
+        ScoredCandidate(risk_id="R-NAN", risk_name="N", risk_description="n", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b", cross_encoder_score=0.70),
+    ]
+
+    accepted, borderline, discarded = classify_by_rank(candidates, top_n_accept=1, top_n_judge=1)
+
+    assert [c.risk_id for c in accepted] == ["R-001"]
+    assert [c.risk_id for c in borderline] == ["R-002", "R-NAN"]
+    assert discarded == []
+
+
+def test_classify_by_threshold_routes_unscored_to_borderline():
+    """Threshold mode also routes unscored candidates to the borderline list."""
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.90),
+        ScoredCandidate(risk_id="R-NAN", risk_name="N", risk_description="n", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b", cross_encoder_score=0.05),
+    ]
+
+    accepted, borderline, discarded = classify_by_threshold(candidates, threshold_high=0.8, threshold_low=0.2)
+
+    assert [c.risk_id for c in accepted] == ["R-001"]
+    assert [c.risk_id for c in borderline] == ["R-NAN"]
+    assert [c.risk_id for c in discarded] == ["R-002"]
+
+
+def test_classify_by_rank_unscored_does_not_disturb_rank_selection():
+    """Unscored candidates neither take an accept slot nor get discarded by the floor."""
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.90),
+        ScoredCandidate(risk_id="R-NAN", risk_name="N", risk_description="n", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b", cross_encoder_score=0.70),
+        ScoredCandidate(risk_id="R-003", risk_name="C", risk_description="c", cross_encoder_score=0.50),
+    ]
+
+    accepted, borderline, discarded = classify_by_rank(candidates, top_n_accept=2, top_n_judge=1, min_score_floor=0.6)
+
+    assert [c.risk_id for c in accepted] == ["R-001", "R-002"]
+    assert [c.risk_id for c in borderline] == ["R-NAN"]
+    assert [c.risk_id for c in discarded] == ["R-003"]
+
+
+def test_classify_by_rank_all_unscored_all_borderline():
+    accepted, borderline, discarded = classify_by_rank(
+        [ScoredCandidate(risk_id="R-NAN", risk_name="N", risk_description="n", cross_encoder_score=float("nan"))],
+        top_n_accept=5,
+        top_n_judge=5,
+    )
+
+    assert accepted == []
+    assert [c.risk_id for c in borderline] == ["R-NAN"]
+    assert discarded == []
+
+
+def test_classify_by_rank_caps_unscored_at_top_n_judge():
+    """No more than top_n_judge unscored candidates ride along to the judge."""
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.90),
+        ScoredCandidate(risk_id="N-1", risk_name="N1", risk_description="n1", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="N-2", risk_name="N2", risk_description="n2", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="N-3", risk_name="N3", risk_description="n3", cross_encoder_score=float("nan")),
+    ]
+
+    accepted, borderline, discarded = classify_by_rank(candidates, top_n_accept=1, top_n_judge=2)
+
+    assert [c.risk_id for c in accepted] == ["R-001"]
+    assert [c.risk_id for c in borderline] == ["N-1", "N-2"]
+    assert [c.risk_id for c in discarded] == ["N-3"]
+
+
+def test_classify_by_threshold_caps_unscored_at_top_n_judge():
+    """Threshold mode caps unscored riders at top_n_judge too."""
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.90),
+        ScoredCandidate(risk_id="N-1", risk_name="N1", risk_description="n1", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="N-2", risk_name="N2", risk_description="n2", cross_encoder_score=float("nan")),
+    ]
+
+    accepted, borderline, discarded = classify_by_threshold(candidates, threshold_high=0.8, threshold_low=0.2)
+
+    # Default top_n_judge is 5, so both ride along.
+    assert [c.risk_id for c in borderline] == ["N-1", "N-2"]
+    assert discarded == []
+
+    accepted, borderline, discarded = classify_by_threshold(
+        candidates, threshold_high=0.8, threshold_low=0.2, top_n_judge=1
+    )
+
+    assert [c.risk_id for c in borderline] == ["N-1"]
+    assert [c.risk_id for c in discarded] == ["N-2"]
+
+
+def test_classify_by_threshold_default_budget_is_five():
+    """Six unscored riders: exactly five ride along under the default budget."""
+    candidates = [
+        ScoredCandidate(risk_id=f"N-{i}", risk_name=f"N{i}", risk_description="n", cross_encoder_score=float("nan"))
+        for i in range(1, 7)
+    ]
+
+    accepted, borderline, discarded = classify_by_threshold(candidates, threshold_high=0.8, threshold_low=0.2)
+
+    assert len(borderline) == 5
+    assert len(discarded) == 1
+
+
+def test_classify_candidates_forwards_top_n_judge_to_threshold_mode():
+    """The threshold branch through classify_candidates honours the judge budget."""
+    candidates = [
+        ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.90),
+        ScoredCandidate(risk_id="N-1", risk_name="N1", risk_description="n1", cross_encoder_score=float("nan")),
+        ScoredCandidate(risk_id="N-2", risk_name="N2", risk_description="n2", cross_encoder_score=float("nan")),
+    ]
+
+    accepted, borderline, discarded = classify_candidates(
+        candidates, threshold_high=0.8, threshold_low=0.2, top_n_judge=1
+    )
+
+    assert [c.risk_id for c in borderline] == ["N-1"]
+    assert [c.risk_id for c in discarded] == ["N-2"]
+
+
+# --- retrieve_chunk: unscored candidates reach the judge as borderline ---
+
+
+class _UnscoringIndex:
+    """hybrid_search returns a ranked list with unscored (NaN) candidates last."""
+
+    def __init__(self):
+        self.rerank_unscored = 0
+
+    def hybrid_search(self, *args, **kwargs):
+        self.rerank_unscored += 1
+        return [
+            ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.95),
+            ScoredCandidate(
+                risk_id="R-NAN",
+                risk_name="N",
+                risk_description="n",
+                cross_encoder_score=float("nan"),
+                bm25_rank=1,
+            ),
+            ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b", cross_encoder_score=0.40),
+        ]
+
+
+def test_retrieve_chunk_routes_unscored_to_borderline():
+    """Unscored candidates become borderline with a serializable score, and count."""
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, _UnscoringIndex(), top_n_accept=1, top_n_judge=1)
+
+    assert [c.risk_id for c in cr.accepted] == ["R-001"]
+    assert [c.risk_id for c in cr.borderline] == ["R-002", "R-NAN"]
+    assert cr.stats["rerank_unscored"] == 1
+    assert cr.stats["bm25_rescued"] == 0
+
+
+def test_retrieve_chunk_unscored_not_counted_as_bm25_rescued():
+    """An unscored candidate with an eligible BM25 rank is not a BM25 rescue."""
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(
+        chunks,
+        0,
+        _UnscoringIndex(),
+        top_n_accept=1,
+        top_n_judge=1,
+        min_score_floor=0.6,
+        bm25_rescue_rank=2,
+    )
+
+    # R-002 (0.40, bm25_rank unset) is discarded by the floor; the unscored
+    # candidate is borderline by the unscored rule, not by rescue.
+    assert [c.risk_id for c in cr.borderline] == ["R-NAN"]
+    assert cr.stats["bm25_rescued"] == 0
+
+
+def test_unscored_never_serialized_as_nan():
+    """Candidates carried in the chunk result never expose NaN; unscored reads 0.0."""
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, _UnscoringIndex(), top_n_accept=1, top_n_judge=5)
+
+    carried = cr.accepted + cr.borderline
+    assert all(math.isnan(c.cross_encoder_score) is False for c in carried)
+    unscored = [c for c in carried if c.risk_id == "R-NAN"]
+    assert len(unscored) == 1
+    assert unscored[0].cross_encoder_score == 0.0
+    # The serialized form must round-trip as a plain float, never NaN/null.
+    dumped = unscored[0].model_dump()
+    assert dumped["cross_encoder_score"] == 0.0
+    assert not math.isnan(dumped["cross_encoder_score"])
 
 
 def test_classify_by_rank_accepts_top_n():

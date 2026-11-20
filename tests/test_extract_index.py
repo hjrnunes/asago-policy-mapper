@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -13,7 +14,6 @@ from asago_policy_mapper.extract.index import (
     _RemoteCrossEncoder,
     _rerank_pairs,
     _rrf_fuse,
-    _scored_candidates,
 )
 from asago_policy_mapper.extract.models import ScoredCandidate
 
@@ -112,6 +112,117 @@ def test_empty_risks():
     assert index.search_bm25("anything", top_k=5) == []
     assert index.search_semantic("anything", top_k=5) == []
     assert index.hybrid_search("anything", top_k=5) == []
+
+
+def _index_with_predict(monkeypatch, score_sequence):
+    """Build an empty index whose remote reranker returns a fixed score vector."""
+    index = RiskIndex([])
+    # The generative remote reranker uses the default clip normalizer, which
+    # preserves NaN; rerank's handling is what this pin exercises.
+    remote = SimpleNamespace(predict=lambda pairs: np.array(score_sequence[: len(pairs)], dtype=np.float64))
+    monkeypatch.setattr(index, "_remote_cross_encoder", remote)
+    return index
+
+
+def test_rerank_nan_score_does_not_consume_top_k_slot(monkeypatch):
+    """A NaN (no-answer) candidate rides along last; it must not displace a valid candidate from top_k."""
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, 0.8])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a", cross_encoder_score=0.5),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b", cross_encoder_score=0.5),
+        ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c", cross_encoder_score=0.5),
+    ]
+
+    reranked = index.rerank("query", candidates, top_k=2)
+
+    # Both valid candidates keep their slots; the unscored one carries its
+    # NaN marker at the tail of the list.
+    assert [c.risk_id for c in reranked] == ["R-B", "R-C", "R-A"]
+    assert [c.cross_encoder_score for c in reranked[:2]] == [0.9, 0.8]
+    assert math.isnan(reranked[2].cross_encoder_score)
+
+
+def test_rerank_counts_unscored(monkeypatch, caplog):
+    """rerank counts NaN-scored candidates as rerank_unscored and warns once each.
+
+    Unscored candidates stay in the returned list, after every scored one,
+    so the selection path can route them to the judge instead of dropping
+    them.
+    """
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan"), 0.8])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
+        ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c"),
+        ScoredCandidate(risk_id="R-D", risk_name="D", risk_description="d"),
+    ]
+
+    with caplog.at_level("WARNING", logger="asago_policy_mapper.extract.index"):
+        reranked = index.rerank("query", candidates, top_k=4)
+
+    assert [c.risk_id for c in reranked] == ["R-B", "R-D", "R-A", "R-C"]
+    assert index.rerank_unscored == 2
+    skip_warnings = [r.getMessage() for r in caplog.records if "unscored" in r.getMessage()]
+    assert skip_warnings == ["Candidate R-A unscored by reranker", "Candidate R-C unscored by reranker"]
+
+
+def test_rerank_majority_unscored_raises(monkeypatch, caplog):
+    """A majority-unscored rerank call raises: the reranker is broken, not chatty."""
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan"), float("nan")])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
+        ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c"),
+        ScoredCandidate(risk_id="R-D", risk_name="D", risk_description="d"),
+    ]
+
+    with caplog.at_level("WARNING", logger="asago_policy_mapper.extract.index"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"^Reranker left 3 of 4 candidates unscored; check the reranker endpoint and model$",
+        ):
+            index.rerank("query", candidates, top_k=4)
+
+    # The count and warnings land before the raise, so the failure is
+    # observable in the run's diagnostics.
+    assert index.rerank_unscored == 3
+    skip_warnings = [r for r in caplog.records if "unscored by reranker" in r.message]
+    assert len(skip_warnings) == 3
+
+
+def test_rerank_half_unscored_does_not_raise(monkeypatch):
+    """Exactly half unscored is not a majority: candidates still ride along."""
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan"), 0.8])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
+        ScoredCandidate(risk_id="R-C", risk_name="C", risk_description="c"),
+        ScoredCandidate(risk_id="R-D", risk_name="D", risk_description="d"),
+    ]
+
+    reranked = index.rerank("query", candidates, top_k=4)
+
+    assert [c.risk_id for c in reranked] == ["R-B", "R-D", "R-A", "R-C"]
+    assert index.rerank_unscored == 2
+
+
+def test_rerank_unscored_counter_starts_at_zero():
+    index = RiskIndex([])
+    assert index.rerank_unscored == 0
+
+
+def test_rerank_unscored_accumulates_across_calls(monkeypatch):
+    """The counter accumulates across rerank calls, not resets per call."""
+    index = _index_with_predict(monkeypatch, [float("nan"), 0.9])
+    candidates = [
+        ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
+    ]
+
+    index.rerank("query one", candidates, top_k=2)
+    index.rerank("query two", candidates, top_k=2)
+
+    assert index.rerank_unscored == 2
 
 
 @pytest.mark.slow
@@ -247,7 +358,7 @@ def test_rrf_fuse_first_occurrence_wins():
     assert candidate_data["R-001"].cross_encoder_score == 0.9
 
 
-# --- _rerank_pairs and _scored_candidates tests ---
+# --- _rerank_pairs tests ---
 
 
 def test_rerank_pairs_score_models_reverse_the_pair():
@@ -260,23 +371,6 @@ def test_rerank_pairs_nli_models_statement_second():
     candidates = [_sc("R-001")]
     pairs = _rerank_pairs(is_nli=True, text="chunk text", candidates=candidates)
     assert pairs == [("chunk text", "This text discusses R-001")]
-
-
-def test_scored_candidates_sorts_and_attaches_scores():
-    candidates = [_sc("R-001"), _sc("R-002"), _sc("R-003")]
-    scored = _scored_candidates(candidates, np.array([0.1, 0.9, 0.5]), top_k=2)
-    assert [c.risk_id for c in scored] == ["R-002", "R-003"]
-    assert [c.cross_encoder_score for c in scored] == [0.9, 0.5]
-
-
-def test_scored_candidates_skips_invalid_scores(caplog):
-    candidates = [_sc("R-001"), _sc("R-002")]
-    with caplog.at_level("WARNING", logger="asago_policy_mapper.extract.index"):
-        scored = _scored_candidates(candidates, np.array([np.nan, 0.4]), top_k=2)
-    assert [c.risk_id for c in scored] == ["R-002"]
-    assert scored[0].cross_encoder_score == 0.4
-    # The exact rendered message: the skip is diagnosable from the log.
-    assert [record.getMessage() for record in caplog.records] == ["Skipping candidate R-001 with invalid score"]
 
 
 # --- _make_score_normalizer tests ---
