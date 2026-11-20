@@ -2,8 +2,8 @@
 
 All tests stub the ``laya_mlx`` module in ``sys.modules`` — no checkpoint
 download, no MLX import at collection time. The assessor implements the
-``BinaryAssessor`` protocol from ``extract/decide.py`` and emits
-``Probability`` and ``Unavailable`` outcomes, mirroring the Jev mapping's
+``Assessor`` protocol from ``extract/screening.py`` and emits
+``ProbabilityAnswer`` and ``NoAnswer`` answers, mirroring the Jev mapping's
 semantics: one noul question per case keyed by risk id, ``answers[qid]``
 read as the probability, fail-open on errors.
 """
@@ -14,13 +14,13 @@ import types
 
 import pytest
 
-from asago_policy_mapper.extract.decide import (
-    BinaryTask,
+from asago_policy_mapper.extract.screening import (
     DecisionCase,
-    Probability,
+    ProbabilityAnswer,
+    Question,
 )
 
-TASK = BinaryTask(task_id="grounding-probability", version="1", proposition="Is the risk worth grounding?")
+QUESTION = Question(question_id="grounding-likelihood", version="1", criterion="Is the risk worth grounding?")
 
 
 def _cases(*risk_ids: str) -> list[DecisionCase]:
@@ -96,7 +96,7 @@ def _assessor(agent: _StubAgent, monkeypatch, **overrides):
 
 
 def _p_value(outcome) -> float | None:
-    return outcome.p if isinstance(outcome, Probability) else None
+    return outcome.probability if isinstance(outcome, ProbabilityAnswer) else None
 
 
 # --- endpoint ---
@@ -147,8 +147,8 @@ def test_assessor_id_and_offsite(monkeypatch):
     assessor = _assessor(agent, monkeypatch)
 
     assert assessor.assessor_id == "laya:aac6fef/laya-multilingual-mlx"
-    assert assessor.offsite is False
-    assert Probability in assessor.emits
+    assert assessor.sends_offsite is False
+    assert ProbabilityAnswer in assessor.answer_types
 
 
 def test_injected_agent_is_the_one_used(monkeypatch):
@@ -165,10 +165,10 @@ def test_injected_agent_is_the_one_used(monkeypatch):
     monkeypatch.setitem(sys.modules, "laya_mlx", module)
 
     assessor = LayaProbabilityAssessor(_endpoint(), agent=agent)
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
     assert len(agent.predicts) == 1
-    assert _p_value(batch.outcomes["R-001"][0]) == 0.5
+    assert _p_value(batch.answers["R-001"][0]) == 0.5
 
 
 def test_default_load_uses_the_endpoint_model(monkeypatch):
@@ -210,13 +210,13 @@ def test_empty_cases_return_empty_batch(monkeypatch):
     agent = _StubAgent()
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", [])
+    batch = assessor.assess(QUESTION, "context", [])
 
-    assert batch.outcomes == {}
+    assert batch.answers == {}
     assert batch.unmatched_ids == ()
     assert batch.latency_ms == 0.0
     assert agent.predicts == []
-    assert batch.wire == {"requests": [], "responses": []}
+    assert batch.exchange == {"requests": [], "responses": []}
 
 
 def test_latency_positive_after_a_predict(monkeypatch):
@@ -224,7 +224,7 @@ def test_latency_positive_after_a_predict(monkeypatch):
     agent = _StubAgent([_laya_result(("R-001", 0.5))])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
     assert batch.latency_ms > 0.0
 
@@ -246,7 +246,7 @@ def test_latency_accumulates_across_batches(monkeypatch):
     agent = _StubAgent([_laya_result(("R-001", 0.1)), _laya_result(("R-002", 0.2))])
     assessor = _assessor(agent, monkeypatch, max_batch=1)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001", "R-002"))
 
     # Each batch consumes two clock ticks (start and end): 1000 ms each.
     assert batch.latency_ms == 2000.0
@@ -261,9 +261,9 @@ def test_duplicate_ids_accumulate_outcomes_across_batches(monkeypatch):
         DecisionCase(risk_id="R-1", name="One", description="first"),
         DecisionCase(risk_id="R-1", name="Two", description="second"),
     ]
-    batch = assessor.assess(TASK, "context", cases)
+    batch = assessor.assess(QUESTION, "context", cases)
 
-    assert [_p_value(o) for o in batch.outcomes["R-1"]] == [0.1, 0.9]
+    assert [_p_value(o) for o in batch.answers["R-1"]] == [0.1, 0.9]
 
 
 def test_one_predict_per_batch_with_noul_questions(monkeypatch):
@@ -271,7 +271,7 @@ def test_one_predict_per_batch_with_noul_questions(monkeypatch):
     agent = _StubAgent([_laya_result(("R-001", 0.5))])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "policy context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "policy context", _cases("R-001"))
 
     assert len(agent.predicts) == 1
     state, questions = agent.predicts[0]
@@ -284,7 +284,7 @@ def test_one_predict_per_batch_with_noul_questions(monkeypatch):
     assert "Is the risk worth grounding?" in instructions
     assert "Risk R-001" in instructions
     assert "Description for R-001." in instructions
-    assert _p_value(batch.outcomes["R-001"][0]) == 0.5
+    assert _p_value(batch.answers["R-001"][0]) == 0.5
 
 
 def test_batching_respects_max_batch(monkeypatch):
@@ -292,7 +292,7 @@ def test_batching_respects_max_batch(monkeypatch):
     agent = _StubAgent()
     assessor = _assessor(agent, monkeypatch, max_batch=2)
 
-    assessor.assess(TASK, "context", _cases("R-001", "R-002", "R-003"))
+    assessor.assess(QUESTION, "context", _cases("R-001", "R-002", "R-003"))
 
     assert [sorted(q) for _, q in agent.predicts] == [["R-001", "R-002"], ["R-003"]]
 
@@ -311,7 +311,7 @@ def test_duplicate_risk_ids_never_share_a_request(monkeypatch):
         DecisionCase(risk_id="R-2", name="Two", description="other"),
         DecisionCase(risk_id="R-1", name="One again", description="second"),
     ]
-    assessor.assess(TASK, "context", cases)
+    assessor.assess(QUESTION, "context", cases)
 
     for _, questions in agent.predicts:
         assert len(questions) == len(set(questions))
@@ -323,7 +323,7 @@ def test_batching_preserves_order_for_distinct_ids(monkeypatch):
     agent = _StubAgent()
     assessor = _assessor(agent, monkeypatch, max_batch=2)
 
-    assessor.assess(TASK, "context", _cases("R-001", "R-002", "R-003", "R-004"))
+    assessor.assess(QUESTION, "context", _cases("R-001", "R-002", "R-003", "R-004"))
 
     assert [list(q) for _, q in agent.predicts] == [["R-001", "R-002"], ["R-003", "R-004"]]
 
@@ -333,7 +333,7 @@ def test_min_batch_size_is_one(monkeypatch):
     agent = _StubAgent()
     assessor = _assessor(agent, monkeypatch, max_batch=0)
 
-    assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+    assessor.assess(QUESTION, "context", _cases("R-001", "R-002"))
 
     assert [list(q) for _, q in agent.predicts] == [["R-001"], ["R-002"]]
 
@@ -342,14 +342,14 @@ def test_min_batch_size_is_one(monkeypatch):
 
 
 def test_valid_noul_answers_become_probabilities(monkeypatch):
-    """noul values in [0, 1] map to Probability outcomes keyed by risk id."""
+    """noul values in [0, 1] map to ProbabilityAnswer outcomes keyed by risk id."""
     agent = _StubAgent([_laya_result(("R-001", 0.0), ("R-002", 1.0))])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001", "R-002"))
 
-    assert _p_value(batch.outcomes["R-001"][0]) == 0.0
-    assert _p_value(batch.outcomes["R-002"][0]) == 1.0
+    assert _p_value(batch.answers["R-001"][0]) == 0.0
+    assert _p_value(batch.answers["R-002"][0]) == 1.0
 
 
 def test_out_of_range_noul_is_invalid(monkeypatch):
@@ -357,11 +357,11 @@ def test_out_of_range_noul_is_invalid(monkeypatch):
     agent = _StubAgent([_laya_result(("R-001", 1.5))])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    assert batch.outcomes["R-001"][0].reason == "invalid"
+    assert batch.answers["R-001"][0].reason == "invalid"
     # Readability outcomes carry no detail unless there is one to carry.
-    assert batch.outcomes["R-001"][0].detail == ""
+    assert batch.answers["R-001"][0].detail == ""
 
 
 def test_result_without_answers_marks_missing_with_empty_detail(monkeypatch):
@@ -373,12 +373,12 @@ def test_result_without_answers_marks_missing_with_empty_detail(monkeypatch):
     agent = _StubAgent([{"model": "laya-rl-agent"}])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001", "R-002"))
 
-    assert batch.outcomes["R-001"][0].reason == "missing"
-    assert batch.outcomes["R-001"][0].detail == ""
-    assert batch.outcomes["R-002"][0].reason == "missing"
-    assert batch.outcomes["R-002"][0].detail == ""
+    assert batch.answers["R-001"][0].reason == "missing"
+    assert batch.answers["R-001"][0].detail == ""
+    assert batch.answers["R-002"][0].reason == "missing"
+    assert batch.answers["R-002"][0].detail == ""
 
 
 def test_boolean_and_non_numeric_noul_are_invalid(monkeypatch):
@@ -389,9 +389,9 @@ def test_boolean_and_non_numeric_noul_are_invalid(monkeypatch):
         agent = _StubAgent([result])
         assessor = _assessor(agent, monkeypatch)
 
-        batch = assessor.assess(TASK, "context", _cases("R-001"))
+        batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-        assert batch.outcomes["R-001"][0].reason == "invalid", repr(bad)
+        assert batch.answers["R-001"][0].reason == "invalid", repr(bad)
 
 
 def test_wrong_answer_type_is_invalid(monkeypatch):
@@ -401,9 +401,9 @@ def test_wrong_answer_type_is_invalid(monkeypatch):
     agent = _StubAgent([result])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    assert batch.outcomes["R-001"][0].reason == "invalid"
+    assert batch.answers["R-001"][0].reason == "invalid"
 
 
 def test_partial_answers_mark_missing(monkeypatch):
@@ -411,10 +411,10 @@ def test_partial_answers_mark_missing(monkeypatch):
     agent = _StubAgent([_laya_result(("R-001", 0.9))])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001", "R-002"))
 
-    assert _p_value(batch.outcomes["R-001"][0]) == 0.9
-    assert batch.outcomes["R-002"][0].reason == "missing"
+    assert _p_value(batch.answers["R-001"][0]) == 0.9
+    assert batch.answers["R-002"][0].reason == "missing"
 
 
 def test_missing_answers_key_means_all_missing(monkeypatch):
@@ -422,9 +422,9 @@ def test_missing_answers_key_means_all_missing(monkeypatch):
     agent = _StubAgent([{"model": "laya-rl-agent", "usage": {}}])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001", "R-002"))
 
-    assert all(o.reason == "missing" for outcomes in batch.outcomes.values() for o in outcomes)
+    assert all(o.reason == "missing" for outcomes in batch.answers.values() for o in outcomes)
 
 
 def test_extra_answer_ids_go_to_unmatched(monkeypatch):
@@ -434,10 +434,10 @@ def test_extra_answer_ids_go_to_unmatched(monkeypatch):
     agent = _StubAgent([result])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
     assert batch.unmatched_ids == ("R-999",)
-    assert set(batch.outcomes) == {"R-001"}
+    assert set(batch.answers) == {"R-001"}
 
 
 def test_unmatched_answer_before_a_matched_one_does_not_stop_reading(monkeypatch):
@@ -454,11 +454,11 @@ def test_unmatched_answer_before_a_matched_one_does_not_stop_reading(monkeypatch
     agent = _StubAgent([result])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001", "R-002"))
 
     assert batch.unmatched_ids == ("R-999",)
-    assert _p_value(batch.outcomes["R-001"][0]) == 0.7
-    assert _p_value(batch.outcomes["R-002"][0]) == 0.2
+    assert _p_value(batch.answers["R-001"][0]) == 0.7
+    assert _p_value(batch.answers["R-002"][0]) == 0.2
 
 
 def test_non_dict_answer_is_invalid(monkeypatch):
@@ -468,19 +468,19 @@ def test_non_dict_answer_is_invalid(monkeypatch):
     agent = _StubAgent([result])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    assert batch.outcomes["R-001"][0].reason == "invalid"
+    assert batch.answers["R-001"][0].reason == "invalid"
 
 
 def test_laya_exception_is_error_fail_open(monkeypatch):
-    """Any laya exception marks the batch Unavailable('error'); nothing raises."""
+    """Any laya exception marks the batch NoAnswer('error'); nothing raises."""
     agent = _StubAgent(error=RuntimeError("mlx blew up"))
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001", "R-002"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001", "R-002"))
 
-    assert all(o.reason == "error" for outcomes in batch.outcomes.values() for o in outcomes)
+    assert all(o.reason == "error" for outcomes in batch.answers.values() for o in outcomes)
 
 
 def test_non_dict_result_is_error(monkeypatch):
@@ -488,9 +488,9 @@ def test_non_dict_result_is_error(monkeypatch):
     agent = _StubAgent([None])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    assert batch.outcomes["R-001"][0].reason == "error"
+    assert batch.answers["R-001"][0].reason == "error"
 
 
 def test_non_dict_answers_is_invalid(monkeypatch):
@@ -498,9 +498,9 @@ def test_non_dict_answers_is_invalid(monkeypatch):
     agent = _StubAgent([{"model": "m", "answers": [1, 2], "usage": {}}])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    assert batch.outcomes["R-001"][0].reason == "invalid"
+    assert batch.answers["R-001"][0].reason == "invalid"
 
 
 # --- wire record ---
@@ -514,9 +514,9 @@ def test_wire_records_request_answers_and_usage(monkeypatch):
     agent = _StubAgent([result])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "policy context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "policy context", _cases("R-001"))
 
-    request = batch.wire["requests"][0]
+    request = batch.exchange["requests"][0]
     assert request["model"] == "aac6fef/laya-multilingual-mlx"
     # The state travels as a digest, never verbatim: the request record
     # identifies the grounding context without copying its whole text.
@@ -524,7 +524,7 @@ def test_wire_records_request_answers_and_usage(monkeypatch):
     assert request["state_chars"] == len("policy context")
     assert request["summary"] is True
     assert request["questions"]["R-001"]["type"] == "noul"
-    response = batch.wire["responses"][0]
+    response = batch.exchange["responses"][0]
     assert response["answers"]["R-001"]["noul"] == 0.7
     assert response["usage"]["state_tokens_dropped"] == 263
     assert response["usage"]["truncated"] is True
@@ -539,20 +539,20 @@ def test_wire_keeps_request_on_error(monkeypatch):
     agent = _StubAgent(error=RuntimeError("boom"))
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    assert batch.wire["requests"][0]["questions"]["R-001"]["type"] == "noul"
-    assert batch.wire["responses"] == [{"error": "error", "status": None, "detail": "boom"}]
+    assert batch.exchange["requests"][0]["questions"]["R-001"]["type"] == "noul"
+    assert batch.exchange["responses"] == [{"error": "error", "status": None, "detail": "boom"}]
 
 
 def test_unavailable_error_carries_the_exception_text(monkeypatch):
-    """A laya exception lands in Unavailable.detail, not just the reason."""
+    """A laya exception lands in NoAnswer.detail, not just the reason."""
     agent = _StubAgent(error=RuntimeError("weight load failed"))
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    outcome = batch.outcomes["R-001"][0]
+    outcome = batch.answers["R-001"][0]
     assert outcome.reason == "error"
     assert outcome.detail == "weight load failed"
 
@@ -562,12 +562,12 @@ def test_wire_accumulates_across_batches(monkeypatch):
     agent = _StubAgent([_laya_result(("R-001", 0.1)), _laya_result(("R-003", 0.9))])
     assessor = _assessor(agent, monkeypatch, max_batch=1)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001", "R-003"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001", "R-003"))
 
-    assert [list(r["questions"]) for r in batch.wire["requests"]] == [["R-001"], ["R-003"]]
+    assert [list(r["questions"]) for r in batch.exchange["requests"]] == [["R-001"], ["R-003"]]
     assert [
         r["answers"]["R-001"]["noul"] if "R-001" in r["answers"] else r["answers"]["R-003"]["noul"]
-        for r in batch.wire["responses"]
+        for r in batch.exchange["responses"]
     ] == [0.1, 0.9]
     assert batch.latency_ms >= 0.0
 
@@ -578,25 +578,25 @@ def test_truncation_visible_in_wire(monkeypatch):
     agent = _StubAgent([result])
     assessor = _assessor(agent, monkeypatch)
 
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
-    assert batch.wire["responses"][0]["usage"]["state_tokens_dropped"] == 831
+    assert batch.exchange["responses"][0]["usage"]["state_tokens_dropped"] == 831
 
 
 # --- composition ---
 
 
 def test_prefilter_composition(monkeypatch):
-    """The Laya assessor works through the prefilter seam: ThresholdDrop over its outcomes."""
-    from asago_policy_mapper.extract.gates import ThresholdDrop
-    from asago_policy_mapper.extract.pipeline import PREFILTER_TASK, Prefilter
+    """The Laya assessor works through the prefilter seam: DropThreshold over its answers."""
+    from asago_policy_mapper.extract.screening import DropThreshold
+    from asago_policy_mapper.extract.pipeline import GROUNDING_LIKELIHOOD_QUESTION_V1, GroundingPrefilter
 
     agent = _StubAgent([_laya_result(("R-001", 0.02), ("R-002", 0.9))])
     assessor = _assessor(agent, monkeypatch)
-    rule = ThresholdDrop(assessor, threshold=0.10)
-    prefilter = Prefilter(assessor=assessor, rule=rule)
+    rule = DropThreshold(assessor, threshold=0.10)
+    prefilter = GroundingPrefilter(assessor=assessor, rule=rule)
     cases = _cases("R-001", "R-002")
-    assessment = prefilter.assessor.assess(PREFILTER_TASK, "context", cases)
+    assessment = prefilter.assessor.assess(GROUNDING_LIKELIHOOD_QUESTION_V1, "context", cases)
     decisions = prefilter.rule.decide(cases, assessment)
 
     kept = {d.risk_id for d in decisions if d.keep}
@@ -664,11 +664,11 @@ def test_live_laya_smoke():
             description="The AI system may act without adequate human oversight or control.",
         )
     ]
-    batch = assessor.assess(TASK, "The policy requires human oversight of all AI systems in production.", cases)
+    batch = assessor.assess(QUESTION, "The policy requires human oversight of all AI systems in production.", cases)
 
-    assert batch.outcomes["smoke-1"], "no outcome came back"
-    outcome = batch.outcomes["smoke-1"][0]
-    assert isinstance(outcome, Probability), f"live laya returned {outcome!r}"
-    assert 0.0 <= outcome.p <= 1.0
+    assert batch.answers["smoke-1"], "no outcome came back"
+    outcome = batch.answers["smoke-1"][0]
+    assert isinstance(outcome, ProbabilityAnswer), f"live laya returned {outcome!r}"
+    assert 0.0 <= outcome.probability <= 1.0
     # The recorded response must survive the run's JSON output write.
-    json.dumps(batch.wire["responses"])
+    json.dumps(batch.exchange["responses"])

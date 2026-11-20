@@ -407,8 +407,8 @@ def _build_provider_prefilter(provider: str, profile: dict, path: Path):
     The laya arm accepts only the fields it uses: it runs in process, so
     URL, credential and timeout fields would be silently ignored.
     """
-    from asago_policy_mapper.extract.gates import ThresholdDrop
-    from asago_policy_mapper.extract.pipeline import Prefilter
+    from asago_policy_mapper.extract.pipeline import GroundingPrefilter
+    from asago_policy_mapper.extract.screening import DropThreshold
 
     _LAYA_UNSUPPORTED_FIELDS = ("base_url", "api_key_env", "timeout_s")
     if provider == "laya":
@@ -464,8 +464,8 @@ def _build_provider_prefilter(provider: str, profile: dict, path: Path):
             _fail_validation(
                 f"--prefilter-profile provider 'laya' could not load checkpoint {laya_endpoint.model!r}: {e}"
             )
-    rule = ThresholdDrop(assessor, threshold)
-    return Prefilter(assessor=assessor, rule=rule)
+    rule = DropThreshold(assessor, threshold)
+    return GroundingPrefilter(assessor=assessor, rule=rule)
 
 
 def _require_prefilter_api_key(endpoint, path: Path):
@@ -476,27 +476,8 @@ def _require_prefilter_api_key(endpoint, path: Path):
     key itself is read from the named environment variable at runtime,
     never from the profile.
     """
-    import os
-    from urllib.parse import urlsplit
-
-    from asago_policy_mapper.assessors.http_probability import _is_local_host
-
-    host = None
-    if isinstance(endpoint.base_url, str):
-        try:
-            host = urlsplit(endpoint.base_url).hostname
-        except ValueError:
-            _fail_validation(
-                f"--prefilter-profile {path}: base_url {endpoint.base_url!r} is not a parseable "
-                f"URL; fix the profile before running"
-            )
-    if _is_local_host(host):
-        return
-    if not os.environ.get(endpoint.api_key_env):
-        _fail_validation(
-            f"--prefilter-profile {path}: {endpoint.api_key_env} is not set, but the endpoint "
-            f"at {endpoint.base_url} is offsite; set the variable before running"
-        )
+    _validate_endpoint_base_url(endpoint.base_url, f"--prefilter-profile {path}")
+    _require_endpoint_api_key(endpoint.api_key_env, endpoint.base_url, f"--prefilter-profile {path}")
 
 
 def _build_retrieval_config(

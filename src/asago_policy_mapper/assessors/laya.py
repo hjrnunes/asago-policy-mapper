@@ -7,10 +7,10 @@ from ``answers[qid].noul``. This module maps the seam's ``{context,
 cases}`` input onto one in-process ``agent.predict(state, questions)``
 call per batch and reads each answer's ``noul`` back as the probability.
 
-This is NOT an ``HttpProbabilityAssessor`` subclass: there is no wire, no
-transport and no client lifecycle. The seam semantics are mirrored
-directly — ``Unavailable("error")`` for laya exceptions (fail-open),
-``Unavailable("invalid")`` for unreadable answers, ``Unavailable("missing")``
+This is NOT an ``HttpProbabilityAssessor`` subclass: there is no exchange,
+no transport and no client lifecycle. The seam semantics are mirrored
+directly — ``NoAnswer("error")`` for laya exceptions (fail-open),
+``NoAnswer("invalid")`` for unreadable answers, ``NoAnswer("missing")``
 for questions the result omitted, unmatched ids for extras — and the
 duplicate-id guard (no two same-id cases in one predict call, since laya
 keys answers by question id) replicates the Jev mapping's ``_batches``
@@ -21,7 +21,7 @@ together, and our grounding contexts (~1.2k tokens) exceed the checkpoints'
 limits (512 for the English 421M, 1024 for the multilingual 322M — the
 default). ``predict`` head-truncates an oversized state and reports it in
 ``usage.state_tokens_dropped`` / ``usage.truncated``, which this assessor
-records in its wire so runs can measure the loss. Note that laya budgets
+records in its exchange so runs can measure the loss. Note that laya budgets
 each question row independently: ``state_tokens_dropped`` depends on the
 state length and that question's own instruction length, not on how many
 questions share the pass. The default ``max_batch`` is 16 to bound each
@@ -44,14 +44,14 @@ from dataclasses import dataclass
 
 from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint, _as_float
 from asago_policy_mapper.assessors.replay import context_sha256
-from asago_policy_mapper.extract.decide import (
-    AssessmentBatch,
-    BinaryAssessor,
-    BinaryTask,
+from asago_policy_mapper.extract.screening import (
+    AnswerBatch,
+    Assessor,
     DecisionCase,
-    Outcome,
-    Probability,
-    Unavailable,
+    Answer,
+    NoAnswer,
+    ProbabilityAnswer,
+    Question,
 )
 
 _LAYA_BASE_URL = "http://localhost/laya"
@@ -97,8 +97,8 @@ class LayaProbabilityEndpoint(ProbabilityEndpoint):
     max_batch: int = _LAYA_MAX_BATCH
 
 
-class LayaProbabilityAssessor(BinaryAssessor):
-    """A ``BinaryAssessor`` that scores cases through local laya noul questions.
+class LayaProbabilityAssessor:
+    """An ``Assessor`` that scores cases through local laya noul questions.
 
     The model loads once, in the constructor (the first ever load downloads
     the checkpoint; later loads use the local cache), and the agent is
@@ -106,7 +106,7 @@ class LayaProbabilityAssessor(BinaryAssessor):
     ``ImportError`` with the install hint at construction, not mid-run.
     """
 
-    emits = frozenset({Probability})
+    answer_types = frozenset({ProbabilityAnswer})
     in_process = True
     """Marks the assessor as in-process: no URL, no endpoint host."""
 
@@ -117,7 +117,8 @@ class LayaProbabilityAssessor(BinaryAssessor):
             raise ImportError(f"{e}; {self._install_hint()}") from e
         self.endpoint = endpoint
         self.assessor_id = f"laya:{endpoint.model}"
-        self.offsite = False
+        self.sends_offsite = False
+        self.prompt_name = "laya-noul"
         # The import must succeed even when an agent is injected (the stub
         # tests inject one; the real constructor always loads the model).
         self._agent = agent if agent is not None else laya_mlx.load(endpoint.model)
@@ -126,31 +127,34 @@ class LayaProbabilityAssessor(BinaryAssessor):
     def _install_hint() -> str:
         return _LAYA_INSTALL_HINT
 
-    def assess(self, task: BinaryTask, context: str, cases: Sequence[DecisionCase]) -> AssessmentBatch:
+    def assess(self, question: Question, context: str, cases: Sequence[DecisionCase]) -> AnswerBatch:
         if not cases:
             # Built inline, never shared: a caller mutating one result's
             # lists must not change what a later assessment records.
-            return AssessmentBatch(
-                outcomes={}, unmatched_ids=(), latency_ms=0.0, wire={"requests": [], "responses": []}
+            return AnswerBatch(
+                answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []}
             )
-        outcomes: dict[str, tuple[Outcome, ...]] = {}
+        answers_out: dict[str, tuple[Answer, ...]] = {}
         unmatched: list[str] = []
-        wires: list[dict] = []
+        exchanges: list[dict] = []
         latency_ms = 0.0
         for batch in self._batches(cases):
             t0 = time.perf_counter()
-            wire, batch_outcomes, batch_unmatched = self._assess_batch(task, context, batch)
+            exchange, batch_answers, batch_unmatched = self._assess_batch(question, context, batch)
             latency_ms += (time.perf_counter() - t0) * 1000
-            wires.append(wire)
+            exchanges.append(exchange)
             unmatched.extend(batch_unmatched)
-            for rid, outcome in batch_outcomes.items():
-                entry = outcomes.get(rid)
-                outcomes[rid] = (entry or ()) + (outcome,)
-        return AssessmentBatch(
-            outcomes=outcomes,
+            for rid, answer in batch_answers.items():
+                entry = answers_out.get(rid)
+                answers_out[rid] = (entry or ()) + (answer,)
+        return AnswerBatch(
+            answers=answers_out,
             unmatched_ids=tuple(unmatched),
             latency_ms=latency_ms,
-            wire={"requests": [w["request"] for w in wires], "responses": [w["response"] for w in wires]},
+            exchange={
+                "requests": [w["request"] for w in exchanges],
+                "responses": [w["response"] for w in exchanges],
+            },
         )
 
     def _batches(self, cases: Sequence[DecisionCase]) -> list[list[DecisionCase]]:
@@ -178,9 +182,9 @@ class LayaProbabilityAssessor(BinaryAssessor):
         return batches
 
     def _assess_batch(
-        self, task: BinaryTask, context: str, cases: Sequence[DecisionCase]
-    ) -> tuple[dict, dict[str, Outcome], list[str]]:
-        questions = {c.risk_id: self._question(task, c) for c in cases}
+        self, question: Question, context: str, cases: Sequence[DecisionCase]
+    ) -> tuple[dict, dict[str, Answer], list[str]]:
+        questions = {c.risk_id: self._question(question, c) for c in cases}
         # The state is not recorded verbatim (it is the whole chunk context);
         # its digest and length let a run match the recorded request against
         # the grounding context it filtered, the same key replay uses.
@@ -202,10 +206,10 @@ class LayaProbabilityAssessor(BinaryAssessor):
                 self._mark_all(cases, "error", detail=str(e)),
                 [],
             )
-        outcomes, unmatched = self._outcomes_from_result(result, cases)
-        return {"request": request_body, "response": result}, outcomes, unmatched
+        answers, unmatched = self._answers_from_result(result, cases)
+        return {"request": request_body, "response": result}, answers, unmatched
 
-    def _question(self, task: BinaryTask, case: DecisionCase) -> dict:
+    def _question(self, question: Question, case: DecisionCase) -> dict:
         """One noul question with compact string instructions.
 
         Laya's context counts instructions against the state, so the
@@ -215,13 +219,13 @@ class LayaProbabilityAssessor(BinaryAssessor):
         """
         return {
             "type": "noul",
-            "instructions": f"{task.proposition} Risk: {case.name} — {case.description}",
+            "instructions": f"{question.criterion} Risk: {case.name} — {case.description}",
         }
 
-    def _outcomes_from_result(
+    def _answers_from_result(
         self, result: object, cases: Sequence[DecisionCase]
-    ) -> tuple[dict[str, Outcome], list[str]]:
-        """Read laya's result into outcomes, keyed by risk id.
+    ) -> tuple[dict[str, Answer], list[str]]:
+        """Read laya's result into answers, keyed by risk id.
 
         An answer that is not a readable noul is invalid; a question the
         result omitted is missing; ids outside the batch go to
@@ -235,20 +239,20 @@ class LayaProbabilityAssessor(BinaryAssessor):
                 return self._mark_all(cases, "missing"), []
             return self._mark_all(cases, "invalid"), []
         case_ids = frozenset({c.risk_id for c in cases})
-        outcomes: dict[str, Outcome] = {}
+        matched: dict[str, Answer] = {}
         unmatched: list[str] = []
         for qid, answer in answers.items():
             if qid not in case_ids:
                 unmatched.append(qid)
                 continue
             number = _noul_probability(answer)
-            outcomes[qid] = Probability(number) if number is not None else Unavailable("invalid")
-        missing = {c.risk_id: Unavailable("missing") for c in cases if c.risk_id not in outcomes}
-        outcomes.update(missing)
-        return outcomes, unmatched
+            matched[qid] = ProbabilityAnswer(number) if number is not None else NoAnswer("invalid")
+        missing = {c.risk_id: NoAnswer("missing") for c in cases if c.risk_id not in matched}
+        matched.update(missing)
+        return matched, unmatched
 
-    def _mark_all(self, cases: Sequence[DecisionCase], reason, detail: str = "") -> dict[str, Outcome]:
-        return {c.risk_id: Unavailable(reason, detail) for c in cases}
+    def _mark_all(self, cases: Sequence[DecisionCase], reason, detail: str = "") -> dict[str, Answer]:
+        return {c.risk_id: NoAnswer(reason, detail) for c in cases}
 
 
 def _noul_probability(answer: object) -> float | None:

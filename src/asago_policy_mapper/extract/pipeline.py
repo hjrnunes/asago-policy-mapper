@@ -1257,19 +1257,19 @@ def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> d
 
 
 def _prefilter_responses(assessment) -> list:
-    """What the assessor recorded as answered, when its wire carries it.
+    """What the assessor recorded as answered, when its exchange carries it.
 
-    Assessors whose wire carries ``responses`` (the provider assessors)
+    Assessors whose exchange carries ``responses`` (the provider assessors)
     answer with readouts the run needs after the fact — laya's usage
     block (``state_tokens_dropped``, ``truncated``) and Jev's token
     usage. Assessors that record nothing (replay, the generic seam stub)
     stay empty, so their serialized output is unchanged. Credentials
-    never appear: the wire records bodies, and the key travels in a
+    never appear: the exchange records bodies, and the key travels in a
     header the body never sees.
     """
-    wire = getattr(assessment, "wire", None)
-    if isinstance(wire, dict) and isinstance(wire.get("responses"), list):
-        return list(wire["responses"])
+    exchange = getattr(assessment, "exchange", None)
+    if isinstance(exchange, dict) and isinstance(exchange.get("responses"), list):
+        return list(exchange["responses"])
     return []
 
 

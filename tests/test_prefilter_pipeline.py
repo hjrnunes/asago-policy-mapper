@@ -357,13 +357,13 @@ def _run_extraction_with_assessor(assessor, mock_config, tmp_path, monkeypatch, 
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=rule),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=rule),
         ocr=False,
     )
 
 
 def test_prefilter_records_wire_responses_when_the_assessor_has_them(mock_config, tmp_path, monkeypatch):
-    """A wire with responses lands in the call record: usage readouts survive.
+    """An exchange with responses lands in the call record: usage readouts survive.
 
     Provider assessors answer with readouts the run needs after the fact
     (laya's token truncation, Jev's token spend); the record must carry
@@ -372,16 +372,16 @@ def test_prefilter_records_wire_responses_when_the_assessor_has_them(mock_config
     from asago_policy_mapper.extract import pipeline
 
     class RespondingAssessor(ScriptedAssessor):
-        """Reports a responses list in its wire, like the provider assessors."""
+        """Reports a responses list in its exchange, like the provider assessors."""
 
-        def assess(self, task, context, cases):
-            self.calls.append((task, context, list(cases)))
-            outcomes = {c.risk_id: (Probability(0.5),) for c in cases}
-            return AssessmentBatch(
-                outcomes=outcomes,
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            answers = {c.risk_id: (ProbabilityAnswer(0.5),) for c in cases}
+            return AnswerBatch(
+                answers=answers,
                 unmatched_ids=(),
                 latency_ms=0.5,
-                wire={
+                exchange={
                     "requests": [{"context": context, "items": [{"id": c.risk_id, "text": "x"}]} for c in cases],
                     "responses": [
                         {
@@ -421,7 +421,7 @@ def test_prefilter_records_wire_responses_when_the_assessor_has_them(mock_config
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=RespondingAssessor({}), rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=RespondingAssessor({}), rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -506,11 +506,11 @@ def _run_extraction_with_http_assessor(endpoint, handler, mock_config, tmp_path,
     import httpx
 
     from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
-    from asago_policy_mapper.extract.gates import ThresholdDrop
+    from asago_policy_mapper.extract.screening import DropThreshold
 
     assessor = HttpProbabilityAssessor(endpoint, transport=httpx.MockTransport(handler))
     return _run_extraction_with_assessor(
-        assessor, mock_config, tmp_path, monkeypatch, rule=ThresholdDrop(assessor, threshold)
+        assessor, mock_config, tmp_path, monkeypatch, rule=DropThreshold(assessor, threshold)
     )
 
 
@@ -583,7 +583,6 @@ def test_prefilter_generic_serialization_failure(mock_config, tmp_path, monkeypa
     assert "null" not in dumped.split('"responses"')[1][:80]
 
 
-@pytest.mark.xfail(strict=True, reason="the generic adapter's unmatched-id redaction lands with the #4 fixes")
 def test_prefilter_generic_echoed_key_absent_from_serialized_result(mock_config, tmp_path, monkeypatch):
     """An endpoint echoing the credential as an id must not reach the output.
 
@@ -616,7 +615,6 @@ def test_prefilter_generic_echoed_key_absent_from_serialized_result(mock_config,
     assert "secret-value-123" not in dumped
 
 
-@pytest.mark.xfail(strict=True, reason="the Jev adapter's unmatched-id redaction lands with the #7 fixes")
 def test_prefilter_jev_echoed_key_absent_from_serialized_result(mock_config, tmp_path, monkeypatch):
     """A Jev response echoing the credential as a question id must not reach the output.
 
@@ -628,7 +626,7 @@ def test_prefilter_jev_echoed_key_absent_from_serialized_result(mock_config, tmp
     import httpx
 
     from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
-    from asago_policy_mapper.extract.gates import ThresholdDrop
+    from asago_policy_mapper.extract.screening import DropThreshold
 
     monkeypatch.setenv("PREFILTER_JEV_TEST_KEY", "secret-value-123")
     endpoint = JevProbabilityEndpoint(base_url="http://localhost:9100/v1", api_key_env="PREFILTER_JEV_TEST_KEY")
@@ -640,7 +638,7 @@ def test_prefilter_jev_echoed_key_absent_from_serialized_result(mock_config, tmp
 
     assessor = JevProbabilityAssessor(endpoint, transport=httpx.MockTransport(echo_handler))
     result = _run_extraction_with_assessor(
-        assessor, mock_config, tmp_path, monkeypatch, rule=ThresholdDrop(assessor, 0.10)
+        assessor, mock_config, tmp_path, monkeypatch, rule=DropThreshold(assessor, 0.10)
     )
 
     dumped = json.dumps(result.model_dump())
@@ -2007,7 +2005,7 @@ def test_prefilter_in_process_assessor_records_no_endpoint_host(mock_config, tmp
     class InProcessAssessor(ScriptedAssessor):
         """In-process, carrying the placeholder endpoint shape."""
 
-        offsite = False
+        sends_offsite = False
         in_process = True
 
         def __init__(self, script):
@@ -2022,7 +2020,7 @@ def test_prefilter_in_process_assessor_records_no_endpoint_host(mock_config, tmp
 
     block = result.metadata["prefilter"]
     assert block["endpoint_host"] is None
-    assert block["offsite"] is False
+    assert block["sends_offsite"] is False
 
 
 def test_prefilter_offsite_assessor_records_its_endpoint_host(mock_config, tmp_path, monkeypatch):
@@ -2031,7 +2029,7 @@ def test_prefilter_offsite_assessor_records_its_endpoint_host(mock_config, tmp_p
     class OffsiteAssessor(ScriptedAssessor):
         """Offsite with a real remote endpoint."""
 
-        offsite = True
+        sends_offsite = True
 
         def __init__(self, script):
             super().__init__(script)
@@ -2045,7 +2043,7 @@ def test_prefilter_offsite_assessor_records_its_endpoint_host(mock_config, tmp_p
 
     block = result.metadata["prefilter"]
     assert block["endpoint_host"] == "api.example.invalid"
-    assert block["offsite"] is True
+    assert block["sends_offsite"] is True
 
 
 def test_prefilter_local_http_assessor_records_its_endpoint_host(mock_config, tmp_path, monkeypatch):
@@ -2072,7 +2070,7 @@ def test_prefilter_local_http_assessor_records_its_endpoint_host(mock_config, tm
 
     block = result.metadata["prefilter"]
     assert block["endpoint_host"] == "127.0.0.1"
-    assert block["offsite"] is False
+    assert block["sends_offsite"] is False
 
 
 def test_prefilter_endpoint_host_ignores_non_string_base_url(mock_config, tmp_path, monkeypatch):

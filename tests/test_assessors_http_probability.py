@@ -812,7 +812,7 @@ def test_response_redaction_keeps_both_values_on_key_collision(monkeypatch):
         )
 
     assessor = _assessor(handler)
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
     echo = batch.exchange["responses"][0]["echo"]
     assert sorted(echo.values()) == ["first", "second", "third"]
@@ -837,7 +837,7 @@ def test_response_redaction_collision_numbering_is_stable(monkeypatch):
         )
 
     assessor = _assessor(handler)
-    batch = assessor.assess(TASK, "context", _cases("R-001"))
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
     echo = batch.exchange["responses"][0]["echo"]
     assert echo == {"[redacted]": "a", "[redacted](2)": "b", "[redacted](2)(2)": "c"}

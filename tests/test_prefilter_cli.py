@@ -1223,6 +1223,10 @@ def test_build_prefilter_rejects_unknown_provider(tmp_path, capsys):
     profile = dict(PROFILE)
     profile["provider"] = "gpt"
     path = tmp_path / "unknown.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    err = capsys.readouterr().err
     assert "provider" in err
     assert "jev" in err and "laya" in err
     assert str(path) in err
@@ -1294,7 +1298,7 @@ def test_build_prefilter_jev_offsite_without_key_fails_at_load(tmp_path, capsys,
     with pytest.raises(typer.Exit):
         _build_prefilter(path)
     err = capsys.readouterr().err
-    assert "POLICY_MAPPER_JEV_API_KEY is not set" in err
+    assert "POLICY_MAPPER_JEV_API_KEY is unset" in err
     assert "offsite" in err
 
 
@@ -1333,7 +1337,7 @@ def test_build_prefilter_jev_malformed_base_url_fails_the_key_rule_cleanly(tmp_p
     with pytest.raises(typer.Exit):
         _build_prefilter(path)
     err = capsys.readouterr().err
-    assert "not a parseable URL" in err
+    assert "not a valid URL" in err
     assert "http://[" in err
     assert str(path) in err
 
@@ -1387,7 +1391,7 @@ def test_build_prefilter_laya_provider_builds_laya_assessor(tmp_path, monkeypatc
     assert isinstance(prefilter.assessor, LayaProbabilityAssessor)
     assert prefilter.assessor.endpoint.model == "aac6fef/laya-multilingual-mlx"
     assert prefilter.assessor.endpoint.max_batch == 8
-    assert prefilter.assessor.offsite is False
+    assert prefilter.assessor.sends_offsite is False
     assert prefilter.rule.threshold == 0.05
 
 
