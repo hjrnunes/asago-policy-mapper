@@ -976,17 +976,6 @@ def test_bad_profile_creates_no_output_dir(tmp_path, profile_path, monkeypatch):
 # --- provider dispatch ---
 
 
-def test_build_prefilter_defaults_to_generic_provider(tmp_path, profile_path):
-    """A profile without a provider key builds the generic HTTP assessor."""
-    from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
-    from asago_policy_mapper.cli import _build_prefilter
-
-    prefilter = _build_prefilter(profile_path)
-
-    assert prefilter is not None
-    assert isinstance(prefilter.assessor, HttpProbabilityAssessor)
-
-
 # --- API key presence ---
 
 
@@ -1205,7 +1194,7 @@ def test_bad_profile_creates_no_output_dir(tmp_path, profile_path, monkeypatch):
 # --- provider dispatch ---
 
 
-def test_build_prefilter_defaults_to_generic_provider(tmp_path, profile_path):
+def test_build_prefilter_defaults_to_http_provider(tmp_path, profile_path):
     """A profile without a provider key builds the generic HTTP assessor."""
     from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
     from asago_policy_mapper.cli import _build_prefilter
@@ -1528,8 +1517,8 @@ def test_build_prefilter_jev_missing_key_error_names_the_profile_path(tmp_path, 
     assert str(path) in capsys.readouterr().err
 
 
-def test_build_prefilter_provider_null_behaves_like_generic(tmp_path, profile_path):
-    """provider: null is the explicit generic, same as the key being absent."""
+def test_build_prefilter_provider_null_behaves_like_http(tmp_path, profile_path):
+    """provider: null is the explicit default, same as the key being absent."""
     from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
     from asago_policy_mapper.cli import _build_prefilter
 
@@ -1542,22 +1531,22 @@ def test_build_prefilter_provider_null_behaves_like_generic(tmp_path, profile_pa
     assert isinstance(prefilter.assessor, HttpProbabilityAssessor)
 
 
-def test_build_prefilter_explicit_generic_provider_builds_generic(tmp_path):
-    """provider: generic names the default explicitly and builds the generic assessor."""
+def test_build_prefilter_explicit_http_provider_builds_http(tmp_path):
+    """provider: http names the default explicitly and builds the generic HTTP assessor."""
     from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
     from asago_policy_mapper.cli import _build_prefilter
 
     profile = dict(PROFILE)
-    profile["provider"] = "generic"
-    path = tmp_path / "generic.yaml"
+    profile["provider"] = "http"
+    path = tmp_path / "http.yaml"
     path.write_text(yaml.safe_dump(profile))
     prefilter = _build_prefilter(path)
 
     assert isinstance(prefilter.assessor, HttpProbabilityAssessor)
 
 
-def test_build_prefilter_provider_null_with_minimal_generic_profile(tmp_path):
-    """provider: null does not relax the generic profile's required fields."""
+def test_build_prefilter_provider_null_with_minimal_http_profile(tmp_path):
+    """provider: null does not relax the HTTP profile's required fields."""
     from asago_policy_mapper.cli import _build_prefilter
 
     path = tmp_path / "null-min.yaml"

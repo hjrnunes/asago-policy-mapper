@@ -328,20 +328,20 @@ def _require_endpoint_api_key(api_key_env: str, base_url: str, label: str) -> No
 
 
 def _validate_prefilter_provider(profile: dict, path: Path) -> str | None:
-    """Check the optional provider key: None/generic, jev or laya.
+    """Check the optional provider key: None/http, jev or laya.
 
     An unknown or non-string provider must fail at profile load: a typo
-    would otherwise silently build the generic assessor against a provider
-    profile. The valid set is the implemented mappings.
+    would otherwise silently build the generic HTTP assessor against a
+    provider profile. The valid set is the implemented mappings.
     """
     if "provider" not in profile:
         return None
     provider = profile.get("provider")
     if provider is None:
         return None
-    if not isinstance(provider, str) or provider not in ("generic", "jev", "laya"):
+    if not isinstance(provider, str) or provider not in ("http", "jev", "laya"):
         _fail_validation(
-            f"--prefilter-profile {path}: provider must be one of 'generic', 'jev', 'laya', got {provider!r}"
+            f"--prefilter-profile {path}: provider must be one of 'http', 'jev', 'laya', got {provider!r}"
         )
     return provider
 
@@ -351,7 +351,7 @@ def _build_prefilter(profile_path):
 
     The profile carries the ``ProbabilityEndpoint`` fields plus
     ``threshold`` and an optional ``provider`` key selecting the mapping:
-    absent/``generic`` builds the generic HTTP assessor, ``jev`` the Jev
+    absent/``http`` builds the generic HTTP assessor, ``jev`` the Jev
     mapping (TypeSafe System One), ``laya`` the local in-process arm. The
     API key itself comes from the environment variable the profile names,
     never from the profile. ``None`` (no path) means no filter. Malformed
