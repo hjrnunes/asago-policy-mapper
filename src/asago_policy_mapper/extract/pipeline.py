@@ -337,6 +337,18 @@ def _run_grounding(
     return all_matches, all_filtered, grounding_filtered
 
 
+def _variant_evidence_key(e: EvidenceSpan) -> tuple:
+    """Ordering key that picks the evidence span variants ground against.
+
+    Cross-encoder score decides first (descending); ties break on the
+    lowest chunk index, then text. Spans that tie on all three components
+    keep whichever comes first, but the grounding stage builds spans from
+    a single chunk with shared document, page and section metadata, so
+    such ties select observably identical grounding arguments.
+    """
+    return (-e.cross_encoder_score, e.chunk_index, e.text)
+
+
 def _ground_variants_one(
     parent_match,
     chunks,
@@ -356,7 +368,7 @@ def _ground_variants_one(
     if not evidence:
         return parent_match, {}
 
-    best_ev = max(evidence, key=lambda e: e.cross_encoder_score, default=evidence[0])
+    best_ev = min(evidence, key=_variant_evidence_key)
     ci = best_ev.chunk_index
     text = chunk_contexts[ci] if chunk_contexts and ci < len(chunk_contexts) else chunks[ci].text
     chunk = chunks[ci]
