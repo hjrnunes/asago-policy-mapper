@@ -36,7 +36,7 @@ from asago_policy_mapper.extract.retrieve import (
     judge_borderline,
     retrieve_chunk,
 )
-from asago_policy_mapper.llm import LLMConfig
+from asago_policy_mapper.llm import LLMConfig, StructuredOutputMode
 
 logger = logging.getLogger(__name__)
 
@@ -880,19 +880,27 @@ def _run_matches_stage(
     return all_matches, all_filtered, grounding_filtered
 
 
-def _build_retrieval_stats(chunk_results, chunks, timing, grounding_filtered) -> RetrievalStats:
-    """Aggregate per-chunk counters into the run's retrieval stats."""
+def _build_retrieval_stats(chunk_results, chunks, timing, grounding_filtered, no_judge=False) -> RetrievalStats:
+    """Aggregate per-chunk counters into the run's retrieval stats.
+
+    Under --no-judge the borderline candidates are auto-promoted, not judged,
+    so their count moves from llm_judged to auto_promoted.
+    """
+    judged = sum(len(cr.borderline_judged) for cr in chunk_results)
     return RetrievalStats(
         total_chunks=len(chunks),
         total_candidates_retrieved=sum(cr.stats.get("candidates_retrieved", 0) for cr in chunk_results),
         auto_accepted=sum(cr.stats.get("auto_accepted", 0) for cr in chunk_results),
-        llm_judged=sum(len(cr.borderline_judged) for cr in chunk_results),
+        llm_judged=0 if no_judge else judged,
+        auto_promoted=judged if no_judge else 0,
         grounding_filtered=grounding_filtered,
         timing_ms=timing,
     )
 
 
-def _build_result_metadata(config, retrieval, expansion_stats, query_results, fallback_chunk_indices) -> dict:
+def _build_result_metadata(
+    config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client=None
+) -> dict:
     """Assemble the run metadata recorded alongside the extraction result."""
     metadata = {
         "model": config.model,
@@ -901,6 +909,9 @@ def _build_result_metadata(config, retrieval, expansion_stats, query_results, fa
         "expansion_stats": expansion_stats,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    mode = getattr(client, "mode", None)
+    if isinstance(mode, StructuredOutputMode):
+        metadata["structured_output_mode"] = mode.value
     if retrieval.query_gen:
         metadata["query_gen_queries"] = [
             {"query": qr.query, "chunk_indices": qr.chunk_indices, "section": qr.section} for qr in query_results
@@ -1111,13 +1122,15 @@ def run_extraction(
 
     merged = _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, call_collector, max_workers, timing)
 
-    total_stats = _build_retrieval_stats(chunk_results, chunks, timing, grounding_filtered)
+    total_stats = _build_retrieval_stats(chunk_results, chunks, timing, grounding_filtered, retrieval.no_judge)
 
     return ExtractionResult(
         risks=merged,
         source_documents=[str(d) for d in documents],
         retrieval_stats=total_stats,
-        metadata=_build_result_metadata(config, retrieval, expansion_stats, query_results, fallback_chunk_indices),
+        metadata=_build_result_metadata(
+            config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client
+        ),
         chunks=chunk_summaries,
         llm_calls=call_collector,
         grounding_filtered_candidates=all_filtered,

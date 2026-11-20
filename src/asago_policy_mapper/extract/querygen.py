@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from asago_policy_mapper.extract.models import LLMCallRecord
 from asago_policy_mapper.extract.parse import Chunk
-from asago_policy_mapper.llm import SlimModel
+from asago_policy_mapper.llm import SlimModel, llm_stage
 from asago_policy_mapper.prompts import render_prompt
 
 logger = logging.getLogger(__name__)
@@ -82,19 +82,22 @@ def generate_queries(
         messages = render_prompt("generate_queries", {"chunk_text": chunk_text})
 
         t0 = time.time()
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                response_model=GeneratedQueries,
-                messages=messages,
-            )
-        except Exception:
-            logger.warning(
-                "Query generation failed for group section=%s chunks=%s, falling back",
-                group.section,
-                group.chunk_indices,
-            )
-            return group, None
+        # The stage sits outside the try so a misconfigured stage name fails
+        # loudly instead of degrading into the query-generation fallback.
+        with llm_stage("query_gen"):
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    response_model=GeneratedQueries,
+                    messages=messages,
+                )
+            except Exception:
+                logger.warning(
+                    "Query generation failed for group section=%s chunks=%s, falling back",
+                    group.section,
+                    group.chunk_indices,
+                )
+                return group, None
         duration_ms = (time.time() - t0) * 1000
 
         if call_collector is not None:

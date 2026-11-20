@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -158,6 +159,48 @@ class LLMConfig:
             self.max_tokens = self.max_context - _SAFETY_MARGIN - _SCHEMA_OVERHEAD_TOKENS
 
 
+_stage_local = threading.local()
+
+# The pipeline stages a worker can mark its calls with. llm_stage rejects
+# names outside this tuple, so a typo or an unregistered stage fails loudly
+# instead of silently splitting token usage into a wrong bucket.
+STAGES = (
+    "query_gen",
+    "judge",
+    "grounding",
+    "variant_grounding",
+    "expansion_grounding",
+    "causal_synthesis",
+)
+
+
+def current_llm_stage() -> str | None:
+    """Return the calling thread's pipeline stage, or None outside one."""
+    return getattr(_stage_local, "stage", None)
+
+
+@contextmanager
+def llm_stage(name: str):
+    """Mark the calling thread's LLM calls with a pipeline stage name.
+
+    Stage workers run in parallel, so the marker is thread-local: each
+    worker's token usage and incidents attribute to the call site that
+    made the call, never to a concurrently running one. Set the stage
+    inside the worker, around the ``client.chat.completions.create``
+    call; nesting restores the previous stage on exit. The name must be
+    one of ``STAGES``; anything else raises ``ValueError`` before the
+    stage is set, and the previous stage stays intact.
+    """
+    if name not in STAGES:
+        raise ValueError(f"unknown stage {name!r}: expected one of {', '.join(STAGES)}")
+    previous = current_llm_stage()
+    _stage_local.stage = name
+    try:
+        yield
+    finally:
+        _stage_local.stage = previous
+
+
 @dataclass
 class TokenTracker:
     prompt_tokens: int = 0
@@ -168,7 +211,6 @@ class TokenTracker:
     incidents: list[dict] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _warned_no_usage: bool = field(default=False, repr=False)
-    _current_stage: str | None = field(default=None, repr=False)
     _thread_local: threading.local = field(default_factory=threading.local, repr=False)
 
     @staticmethod
@@ -197,15 +239,12 @@ class TokenTracker:
                 s["total_tokens"] += tt
                 s["calls"] += 1
 
-    def set_stage(self, stage: str | None) -> None:
-        with self._lock:
-            self._current_stage = stage
-
     def record_incident(self, kind: str, detail: str) -> None:
         with self._lock:
             incident: dict = {"kind": kind, "detail": detail}
-            if self._current_stage:
-                incident["stage"] = self._current_stage
+            stage = current_llm_stage()
+            if stage:
+                incident["stage"] = stage
             messages = getattr(self._thread_local, "current_messages", None)
             if messages:
                 incident["messages"] = copy.deepcopy(messages)
@@ -505,7 +544,7 @@ def _track_completion(tracker: TokenTracker, completion) -> None:
         if not tracker._warned_no_usage:
             logger.warning("LLM backend returned no token usage — cost tracking unavailable")
             tracker._warned_no_usage = True
-    tracker.add(usage)
+    tracker.add(usage, stage=current_llm_stage())
 
 
 def _extract_json_span(content: str) -> str:
