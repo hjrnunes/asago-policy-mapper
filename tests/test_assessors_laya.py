@@ -585,8 +585,8 @@ def test_truncation_visible_in_wire(monkeypatch):
 
 def test_prefilter_composition(monkeypatch):
     """The Laya assessor works through the prefilter seam: DropThreshold over its answers."""
-    from asago_policy_mapper.extract.screening import DropThreshold
     from asago_policy_mapper.extract.pipeline import GROUNDING_LIKELIHOOD_QUESTION_V1, GroundingPrefilter
+    from asago_policy_mapper.extract.screening import DropThreshold
 
     agent = _StubAgent([_laya_result(("R-001", 0.02), ("R-002", 0.9))])
     assessor = _assessor(agent, monkeypatch)
@@ -648,7 +648,6 @@ def test_live_laya_smoke():
     function) shows predict() builds its output with Python builtins, so
     this is a guard, not a known bug.
     """
-    import json
 
     pytest.importorskip("laya_mlx")
     from asago_policy_mapper.assessors.laya import LayaModelConfig, LayaProbabilityAssessor

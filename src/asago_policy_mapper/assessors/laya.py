@@ -45,10 +45,9 @@ from dataclasses import dataclass
 from asago_policy_mapper.assessors.http_probability import _as_float
 from asago_policy_mapper.assessors.replay import context_sha256
 from asago_policy_mapper.extract.screening import (
-    AnswerBatch,
-    Assessor,
-    DecisionCase,
     Answer,
+    AnswerBatch,
+    DecisionCase,
     NoAnswer,
     ProbabilityAnswer,
     Question,
@@ -117,9 +116,7 @@ class LayaProbabilityAssessor:
         if not cases:
             # Built inline, never shared: a caller mutating one result's
             # lists must not change what a later assessment records.
-            return AnswerBatch(
-                answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []}
-            )
+            return AnswerBatch(answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []})
         answers_out: dict[str, tuple[Answer, ...]] = {}
         unmatched: list[str] = []
         exchanges: list[dict] = []

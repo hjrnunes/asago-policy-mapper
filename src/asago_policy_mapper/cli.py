@@ -340,9 +340,7 @@ def _validate_prefilter_provider(profile: dict, path: Path) -> str | None:
     if provider is None:
         return None
     if not isinstance(provider, str) or provider not in ("http", "jev", "laya"):
-        _fail_validation(
-            f"--prefilter-profile {path}: provider must be one of 'http', 'jev', 'laya', got {provider!r}"
-        )
+        _fail_validation(f"--prefilter-profile {path}: provider must be one of 'http', 'jev', 'laya', got {provider!r}")
     return provider
 
 

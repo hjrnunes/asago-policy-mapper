@@ -437,23 +437,23 @@ def test_prefilter_records_wire_responses_when_the_assessor_has_them(mock_config
 
 
 def test_prefilter_omits_responses_when_the_assessor_has_none(mock_config, tmp_path, monkeypatch):
-    """A wire without responses leaves the field out: output stays unchanged.
+    """An exchange without responses leaves the field out: output stays unchanged.
 
     Assessors that record no responses (replay, the generic seam stub)
     must produce the same serialized record as before the field existed.
     """
 
     class NoResponsesAssessor(ScriptedAssessor):
-        """A wire with requests but no responses list."""
+        """An exchange with requests but no responses list."""
 
-        def assess(self, task, context, cases):
-            self.calls.append((task, context, list(cases)))
-            outcomes = {c.risk_id: (Probability(0.5),) for c in cases}
-            return AssessmentBatch(
-                outcomes=outcomes,
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            answers = {c.risk_id: (ProbabilityAnswer(0.5),) for c in cases}
+            return AnswerBatch(
+                answers=answers,
                 unmatched_ids=(),
                 latency_ms=0.5,
-                wire={"requests": [{"context": context, "items": [{"id": c.risk_id, "text": "x"}]} for c in cases]},
+                exchange={"requests": [{"context": context, "items": [{"id": c.risk_id, "text": "x"}]} for c in cases]},
             )
 
     result = _run_extraction_with_assessor(NoResponsesAssessor({}), mock_config, tmp_path, monkeypatch)
@@ -464,29 +464,28 @@ def test_prefilter_omits_responses_when_the_assessor_has_none(mock_config, tmp_p
 
 
 def test_prefilter_request_and_responses_tolerate_a_missing_wire_attribute(mock_config, tmp_path, monkeypatch):
-    """An assessment with no wire attribute at all falls back to the defaults.
+    """An assessment with no exchange attribute at all falls back to the defaults.
 
-    The seam contract names ``wire`` a field of ``AssessmentBatch``, but
-    the helpers read it defensively; an assessor returning a batch
-    without the attribute must still record the seam's request shape and
-    no responses, not crash.
+    The helpers read the exchange defensively; an assessor returning a
+    batch without the attribute must still record the seam's request
+    shape and no responses, not crash.
     """
 
     class WirelessAssessor(ScriptedAssessor):
-        """Returns a batch whose wire attribute is deleted entirely."""
+        """Returns a batch whose exchange attribute is deleted entirely."""
 
-        def assess(self, task, context, cases):
-            self.calls.append((task, context, list(cases)))
-            outcomes = {c.risk_id: (Probability(0.5),) for c in cases}
-            batch = AssessmentBatch(
-                outcomes=outcomes,
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            answers = {c.risk_id: (ProbabilityAnswer(0.5),) for c in cases}
+            batch = AnswerBatch(
+                answers=answers,
                 unmatched_ids=(),
                 latency_ms=0.5,
-                wire={"requests": [], "responses": []},
+                exchange={"requests": [], "responses": []},
             )
             # Frozen dataclasses block __delattr__; the base object
             # implementation removes the field regardless.
-            object.__delattr__(batch, "wire")
+            object.__delattr__(batch, "exchange")
             return batch
 
     result = _run_extraction_with_assessor(WirelessAssessor({}), mock_config, tmp_path, monkeypatch)
