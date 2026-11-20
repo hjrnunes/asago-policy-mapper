@@ -692,7 +692,7 @@ def test_variant_match_marks_inherited_scores():
     # stamp the parent as measured: its 0.85 came from a cross-encoder
     parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence_source": "cross_encoder"})
 
-    result = pl._run_variant_grounding(
+    result, _removed = pl._run_variant_grounding(
         [parent],
         _make_chunks(["biometric data was processed."]),
         VARIANT_MAP,
@@ -735,7 +735,7 @@ def test_variant_match_unmeasured_parent_is_null():
     parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence": None, "confidence_source": "none"})
     parent = parent.model_copy(update={"scores": parent.scores.model_copy(update={"cross_encoder_score": None})})
 
-    result = pl._run_variant_grounding(
+    result, _removed = pl._run_variant_grounding(
         [parent],
         _make_chunks(["biometric data was processed."]),
         VARIANT_MAP,
@@ -771,7 +771,7 @@ def test_variant_match_rrf_parent_keeps_ranking_confidence():
     # parent accepted in RRF mode: its confidence is the ranking score
     parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence_source": "rrf"})
 
-    result = pl._run_variant_grounding(
+    result, _removed = pl._run_variant_grounding(
         [parent],
         _make_chunks(["biometric data was processed."]),
         VARIANT_MAP,
@@ -806,7 +806,7 @@ def test_variant_match_colbert_parent_keeps_source():
     # parent reranked by colbert: source label carries over to the variant
     parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence_source": "colbert"})
 
-    result = pl._run_variant_grounding(
+    result, _removed = pl._run_variant_grounding(
         [parent],
         _make_chunks(["biometric data was processed."]),
         VARIANT_MAP,
@@ -848,7 +848,7 @@ def test_variant_match_rrf_parent_keeps_measured_scores():
         update={"confidence_source": "rrf", "confidence": 0.04},
     )
 
-    result = pl._run_variant_grounding(
+    result, _removed = pl._run_variant_grounding(
         [parent],
         _make_chunks(["biometric data was processed."]),
         VARIANT_MAP,

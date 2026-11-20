@@ -29,6 +29,7 @@ from asago_policy_mapper.extract.models import (
     ExtractionResult,
     FilteredCandidate,
     LLMCallRecord,
+    RemovedVariantGroup,
     RetrievalConfig,
     RetrievalScores,
     RetrievalStats,
@@ -106,6 +107,23 @@ def timed(timing, key):
         yield
     finally:
         timing[key] = (time.time() - t0) * 1000
+
+
+def _assert_no_synthetic_parents(merged, variant_map, *, grounding: bool = True) -> None:
+    """Raise when a synthetic parent risk id would reach the output.
+
+    The check uses the variant map's keys — the collapsed parent ids — rather
+    than guessing from the ``---`` delimiter, so it only fires on ids the run
+    actually collapsed. It runs only when variants were collapsed and
+    grounding is on: ungrounded runs emit the expanded variants directly, and
+    a run without collapsed variants has nothing to check.
+    """
+    if not variant_map or not grounding:
+        return
+    parent_ids = set(variant_map)
+    leaked = [m.risk_id for m in merged if m.risk_id in parent_ids]
+    if leaked:
+        raise PipelineInvariantError(f"Synthetic parent risk ids reached the output: {sorted(set(leaked))}")
 
 
 _AGENTIC_PHRASES = {
@@ -427,6 +445,17 @@ def _variant_context_span(evidence: list[EvidenceSpan]) -> EvidenceSpan | None:
     return min(attributed, key=_variant_evidence_key)
 
 
+def _variants_attemptable(evidence) -> bool:
+    """Tell whether variant grounding can run against this evidence.
+
+    Mirrors `_ground_variants_one`'s proceed condition: grounding needs at
+    least one evidence span the group stage could attribute to a chunk.
+    `_variant_context_span` returns None for an empty list, so the no-evidence
+    early return is covered too.
+    """
+    return _variant_context_span(evidence) is not None
+
+
 def _ground_variants_one(
     parent_match,
     chunks,
@@ -444,13 +473,11 @@ def _ground_variants_one(
         return parent_match, {}
 
     evidence = parent_match.evidence
-    if not evidence:
+    if not _variants_attemptable(evidence):
         return parent_match, {}
 
     best_ev = _variant_context_span(evidence)
-    if best_ev is None or best_ev.chunk_index is None:
-        return parent_match, {}
-
+    assert best_ev is not None and best_ev.chunk_index is not None  # for mypy; checked above
     ci = best_ev.chunk_index
     text = chunk_contexts[ci] if chunk_contexts and ci < len(chunk_contexts) else chunks[ci].text
     chunk = chunks[ci]
@@ -515,7 +542,14 @@ def _run_variant_grounding(
     chunk_contexts=None,
     chunk_context_indices=None,
     max_workers=4,
-):
+    stage="grounding",
+) -> tuple[list[RiskMatch], list[RemovedVariantGroup]]:
+    """Replace parent-level matches with their grounded variants.
+
+    Returns (matches, removed): the surviving matches (non-parent matches
+    plus one match per grounded variant) and one RemovedVariantGroup record
+    per distinct parent group that no chunk grounded a variant for.
+    """
     parent_matches = []
     non_parent_matches = []
     for m in grounded_matches:
@@ -525,7 +559,7 @@ def _run_variant_grounding(
             non_parent_matches.append(m)
 
     if not parent_matches:
-        return grounded_matches
+        return grounded_matches, []
 
     logger.info(
         "Variant grounding: %d parent matches (%d non-parent matches kept as-is)",
@@ -534,6 +568,7 @@ def _run_variant_grounding(
     )
 
     variant_matches: list[RiskMatch] = []
+    outcomes: dict[str, _ParentOutcome] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(
@@ -551,11 +586,10 @@ def _run_variant_grounding(
         }
         for future in as_completed(futures):
             parent_match, grounded = future.result()
+            outcome = outcomes.setdefault(parent_match.risk_id, _ParentOutcome())
+            outcome.record(parent_match, grounded)
             for vid, (evidence, confidence) in grounded.items():
-                vinfo = next(
-                    (v for v in variant_map[parent_match.risk_id] if v["risk_id"] == vid),
-                    None,
-                )
+                vinfo = _variant_info(variant_map[parent_match.risk_id], vid)
                 if not vinfo:
                     continue
                 stub = _variant_stub(vid, vinfo, parent_match)
@@ -573,7 +607,69 @@ def _run_variant_grounding(
                     ).model_copy(update={"scores_inherited_from": parent_match.risk_id})
                 )
 
-    return non_parent_matches + variant_matches
+    removed = _removed_group_records(outcomes, variant_map, stage)
+    return non_parent_matches + variant_matches, removed
+
+
+class _ParentOutcome:
+    """Aggregate one parent group's variant grounding across its chunk matches.
+
+    Tracks whether any chunk grounded a variant and whether any chunk sent
+    variants to ground_variants at all, so the removal decision and its
+    reason come from the union over chunks, not from whichever match
+    finished first.
+    """
+
+    def __init__(self):
+        self.grounded_variant_ids: list[str] = []
+        self.attempted = False
+
+    def record(self, parent_match, grounded) -> None:
+        """Fold one chunk's result into the parent's outcome."""
+        if grounded:
+            self.grounded_variant_ids.extend(grounded)
+        if _variants_attemptable(parent_match.evidence):
+            self.attempted = True
+
+    @property
+    def removed_reason(self) -> str | None:
+        """The removal reason, or None when a variant survived somewhere."""
+        if self.grounded_variant_ids:
+            return None
+        return "no_variant_grounded" if self.attempted else "no_parent_evidence"
+
+
+def _removed_group_records(outcomes, variant_map, stage) -> list[RemovedVariantGroup]:
+    """Build one removal record per parent group that grounded no variant.
+
+    A group records ``no_variant_grounded`` with the ids that were sent to
+    ground_variants when at least one chunk had evidence to ground against;
+    otherwise it records ``no_parent_evidence`` with no attempted ids.
+    """
+    removed = []
+    for parent_id, outcome in outcomes.items():
+        reason = outcome.removed_reason
+        if reason is None:
+            continue
+        variants = variant_map[parent_id]
+        attempted = [v["risk_id"] for v in variants] if reason == "no_variant_grounded" else []
+        removed.append(
+            RemovedVariantGroup(
+                parent_id=parent_id,
+                stage=stage,
+                reason=reason,
+                attempted_variant_ids=attempted,
+            )
+        )
+    return removed
+
+
+def _variant_info(variants, variant_id):
+    """Look up one variant's metadata by risk id; None when absent."""
+    for v in variants:
+        if v["risk_id"] == variant_id:
+            return v
+    return None
 
 
 def _run_judge(
@@ -852,7 +948,13 @@ def _run_expansion(
     chunk_contexts=None,
     prefilter_drops: list[FilteredCandidate] | None = None,
     chunk_context_indices=None,
-) -> tuple[list[RiskMatch], dict]:
+) -> tuple[list[RiskMatch], dict, list[RemovedVariantGroup]]:
+    """Expand to sibling risks, ground them, and record removed variant groups.
+
+    Returns (merged, stats, removed): the possibly expanded merged list, the
+    expansion stats, and the removal records for variant groups the expansion
+    path's variant grounding dropped.
+    """
     stats = {"expanded_candidates": 0, "expanded_grounded": 0, "expansion_groups": 0}
     dropped_ids, parent_members = (
         _prefilter_dropped_catalog(prefilter_drops, variant_map)
@@ -872,7 +974,7 @@ def _run_expansion(
     if not expanded:
         if dropped_ids:
             stats["prefilter_reentered_grounded"] = 0
-        return merged, stats
+        return merged, stats, []
 
     logger.info(
         "Expansion: %d sibling candidates in %d groups (%d passes)",
@@ -887,8 +989,9 @@ def _run_expansion(
     if dropped_ids:
         stats["prefilter_reentered_grounded"] = len({m.risk_id for m in expansion_matches} & dropped_ids)
 
+    removed: list[RemovedVariantGroup] = []
     if expansion_matches and variant_map:
-        expansion_matches = _run_variant_grounding(
+        expansion_matches, removed = _run_variant_grounding(
             expansion_matches,
             chunks,
             variant_map,
@@ -898,12 +1001,13 @@ def _run_expansion(
             chunk_contexts=chunk_contexts,
             chunk_context_indices=chunk_context_indices,
             max_workers=max_workers,
+            stage="expansion",
         )
 
     if expansion_matches:
         merged = merge_matches(merged + expansion_matches)
 
-    return merged, stats
+    return merged, stats, removed
 
 
 def _run_causal_synthesis(merged, chunks, client, config, max_workers, call_collector):
@@ -1500,8 +1604,11 @@ def _run_variant_grounding_stage(
     chunk_context_indices,
     max_workers,
     timing,
-):
-    """Variant-ground grounded matches when variants and a client are present."""
+) -> tuple[list[RiskMatch], list[RemovedVariantGroup]]:
+    """Variant-ground grounded matches when variants and a client are present.
+
+    Returns the (possibly variant-grounded) matches and the removal records.
+    """
     if index.variant_map and plan.grounding and client is not None:
         with timed(timing, "variant_grounding_ms"):
             return _run_variant_grounding(
@@ -1515,7 +1622,7 @@ def _run_variant_grounding_stage(
                 chunk_context_indices=chunk_context_indices,
                 max_workers=max_workers,
             )
-    return all_matches
+    return all_matches, []
 
 
 def _run_expansion_stage(
@@ -1535,17 +1642,18 @@ def _run_expansion_stage(
     max_workers,
     timing,
     prefilter_drops=None,
-) -> tuple[list, dict]:
+) -> tuple[list, dict, list[RemovedVariantGroup]]:
     """Expand to sibling risks and ground them; grounded runs only.
 
-    Returns the (possibly expanded) merged list and the expansion stats; the
-    counters stay at zero when the stage is skipped. ``prefilter_drops``
-    carries the prefilter's drop records, whose ids the expansion counts
-    when it proposes them again.
+    Returns the (possibly expanded) merged list, the expansion stats and the
+    removed-variant-group records; the counters stay at zero and the records
+    empty when the stage is skipped. ``prefilter_drops`` carries the
+    prefilter's drop records, whose ids the expansion counts when it proposes
+    them again.
     """
     if plan.expansion and client is not None:
         with timed(timing, "expansion_ms"):
-            merged, expansion_stats = _run_expansion(
+            merged, expansion_stats, removed = _run_expansion(
                 risks,
                 merged,
                 chunk_results,
@@ -1562,8 +1670,8 @@ def _run_expansion_stage(
                 prefilter_drops=prefilter_drops,
                 chunk_context_indices=chunk_context_indices,
             )
-            return merged, expansion_stats
-    return merged, _EMPTY_EXPANSION_STATS.copy()
+            return merged, expansion_stats, removed
+    return merged, _EMPTY_EXPANSION_STATS.copy(), []
 
 
 def _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing):
@@ -1725,7 +1833,7 @@ def run_extraction(
     )
     all_filtered = prefilter_drops + all_filtered
 
-    all_matches = _run_variant_grounding_stage(
+    all_matches, removed_variant_groups = _run_variant_grounding_stage(
         all_matches,
         chunks,
         index,
@@ -1747,7 +1855,7 @@ def run_extraction(
     with timed(timing, "merge_ms"):
         merged = merge_matches(all_matches)
 
-    merged, expansion_stats = _run_expansion_stage(
+    merged, expansion_stats, expansion_removed = _run_expansion_stage(
         merged,
         risks,
         chunk_results,
@@ -1765,8 +1873,11 @@ def run_extraction(
         timing,
         prefilter_drops=prefilter_drops or None,
     )
+    removed_variant_groups.extend(expansion_removed)
 
     merged = _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing)
+
+    _assert_no_synthetic_parents(merged, index.variant_map, grounding=not retrieval.no_grounding)
 
     total_stats = _build_retrieval_stats(
         chunk_results,
@@ -1788,6 +1899,7 @@ def run_extraction(
         llm_calls=call_collector,
         grounding_filtered_candidates=all_filtered,
         decision_calls=decision_calls,
+        removed_variant_groups=removed_variant_groups,
     )
 
 

@@ -128,7 +128,7 @@ def _run(parents, chunks, monkeypatch, executor_cls, as_completed):
     monkeypatch.setattr(pipeline, "ground_variants", _stub_ground_variants)
     monkeypatch.setattr(pipeline, "ThreadPoolExecutor", executor_cls)
     monkeypatch.setattr(pipeline, "as_completed", as_completed)
-    return _run_variant_grounding(
+    matches, _removed = _run_variant_grounding(
         parents,
         chunks,
         VARIANT_MAP,
@@ -137,6 +137,7 @@ def _run(parents, chunks, monkeypatch, executor_cls, as_completed):
         None,
         max_workers=4,
     )
+    return matches
 
 
 def _quotes(result):
