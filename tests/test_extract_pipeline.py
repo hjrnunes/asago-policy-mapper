@@ -1,6 +1,6 @@
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from llm_errors import (
@@ -30,6 +30,7 @@ from asago_policy_mapper.extract.pipeline import (
     _build_retrieval_stats,
     _cap_accepted_candidates,
     _run_causal_synthesis,
+    _run_causal_synthesis_stage,
     _run_grounding,
     _run_judge,
     build_risk_match,
@@ -1079,6 +1080,196 @@ def test_run_causal_synthesis_propagates_api_errors(make_error):
         _run_causal_synthesis(merged, chunks, client, config, 4, [])
 
     assert excinfo.value is error
+
+
+def test_run_causal_synthesis_marks_status_and_generated_provenance():
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a"])
+    client = _causal_client("none-matches", None)
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+
+    result = _run_causal_synthesis(merged, chunks, client, config, 4, [])
+
+    risk = result[0]
+    assert risk.causal_status == "generated"
+    assert risk.threat == "Threat"
+    assert risk.causal_provenance == {
+        "threat": "generated",
+        "threat_source": "generated",
+        "vulnerability": "generated",
+        "consequence": "generated",
+        "impact": "generated",
+    }
+
+
+def test_run_causal_synthesis_marks_empty_answer_status():
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a"])
+    client = MagicMock()
+    client.chat.completions.create.return_value = _CausalChains(
+        items=[_CausalChain(threat="", threat_source="", vulnerability="", consequence="", impact="")]
+    )
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+
+    result = _run_causal_synthesis(merged, chunks, client, config, 4, [])
+
+    risk = result[0]
+    assert risk.causal_status == "empty_answer"
+    assert risk.threat is None
+    assert risk.causal_provenance == {}
+
+
+def test_run_causal_synthesis_marks_no_evidence_status():
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a"])
+    client = MagicMock()
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+
+    # Evidence points at a chunk that does not exist in chunk_texts.
+    merged[0].evidence[0].chunk_index = 9
+
+    result = _run_causal_synthesis(merged, chunks, client, config, 4, [])
+
+    risk = result[0]
+    assert risk.causal_status == "no_evidence"
+    assert risk.causal_provenance == {}
+    client.chat.completions.create.assert_not_called()
+
+
+def test_run_causal_synthesis_marks_validation_exhausted_status(caplog):
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a"])
+    client = _causal_client("atlas-a", validation_exhaustion())
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+
+    with caplog.at_level(logging.WARNING, logger="asago_policy_mapper.extract.attribute"):
+        result = _run_causal_synthesis(merged, chunks, client, config, 4, [])
+
+    risk = result[0]
+    assert risk.causal_status == "validation_exhausted"
+    assert risk.threat is None
+    assert risk.causal_provenance == {}
+
+
+def test_run_causal_synthesis_generated_fields_not_overwritten_by_later_merge():
+    """A partially-empty chain marks only the fields that carry content."""
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a"])
+    client = MagicMock()
+    client.chat.completions.create.return_value = _CausalChains(
+        items=[_CausalChain(threat="Threat", threat_source="", vulnerability="Vuln", consequence="", impact="")]
+    )
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+
+    result = _run_causal_synthesis(merged, chunks, client, config, 4, [])
+
+    risk = result[0]
+    assert risk.causal_status == "generated"
+    assert risk.threat == "Threat"
+    assert risk.vulnerability == "Vuln"
+    assert risk.threat_source is None
+    assert risk.consequence is None
+    assert risk.impact is None
+    assert risk.causal_provenance == {"threat": "generated", "vulnerability": "generated"}
+
+
+def _causal_plan(retrieval):
+    from asago_policy_mapper.extract.plan import resolve_plan
+
+    return resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+
+
+def test_run_causal_synthesis_stage_marks_disabled_when_grounding_off():
+    """Grounding off forces causal synthesis off, whatever the causal flag says.
+
+    An ungrounded match carries no evidence, so there is nothing to
+    synthesize from: the plan's truth table gates causal synthesis on
+    grounding, and every match records ``disabled``.
+    """
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a", "atlas-b"])
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+    # Causal synthesis is NOT turned off here; grounding off alone must gate it.
+    retrieval = RetrievalConfig(query_gen=False, no_grounding=True)
+    client = MagicMock()
+
+    result = _run_causal_synthesis_stage(merged, chunks, client, config, _causal_plan(retrieval), [], 4, {})
+
+    assert all(r.causal_status == "disabled" for r in result)
+    client.chat.completions.create.assert_not_called()
+
+
+def test_run_causal_synthesis_stage_marks_disabled_when_synthesis_off():
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a", "atlas-b"])
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+    retrieval = RetrievalConfig(query_gen=False, no_causal_synthesis=True)
+    client = MagicMock()
+
+    result = _run_causal_synthesis_stage(merged, chunks, client, config, _causal_plan(retrieval), [], 4, {})
+
+    assert all(r.causal_status == "disabled" for r in result)
+    client.chat.completions.create.assert_not_called()
+
+
+def test_run_causal_synthesis_stage_marks_disabled_when_client_none():
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a", "atlas-b"])
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+    retrieval = RetrievalConfig(query_gen=False)
+
+    result = _run_causal_synthesis_stage(merged, chunks, None, config, _causal_plan(retrieval), [], 4, {})
+
+    assert all(r.causal_status == "disabled" for r in result)
+
+
+def test_run_causal_synthesis_stage_runs_synthesis_and_times_it():
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a", "atlas-b"])
+    client = _causal_client("none-matches", None)
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+    retrieval = RetrievalConfig(query_gen=False)
+    timing: dict[str, float] = {}
+    collector: list[LLMCallRecord] = []
+
+    with patch("asago_policy_mapper.extract.pipeline._run_causal_synthesis", autospec=True) as run_synth:
+        run_synth.return_value = merged
+        result = _run_causal_synthesis_stage(
+            merged, chunks, client, config, _causal_plan(retrieval), collector, 7, timing
+        )
+
+    run_synth.assert_called_once_with(merged, chunks, client, config, 7, collector)
+    assert result is merged
+    assert "causal_synthesis_ms" in timing
+
+
+def test_run_causal_synthesis_stage_end_to_end_generated():
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a"])
+    client = _causal_client("none-matches", None)
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+    retrieval = RetrievalConfig(query_gen=False)
+    timing: dict[str, float] = {}
+    collector: list[LLMCallRecord] = []
+
+    result = _run_causal_synthesis_stage(merged, chunks, client, config, _causal_plan(retrieval), collector, 4, timing)
+
+    assert result[0].causal_status == "generated"
+    assert result[0].threat == "Threat"
+    # The stage times itself under causal_synthesis_ms and records the call.
+    assert "causal_synthesis_ms" in timing
+    assert len(collector) == 1
+    assert collector[0].stage == "causal_synthesis"
 
 
 # --- query-gen integration test ---

@@ -166,12 +166,20 @@ def _resolve_mitigations(risk_id: str, index: dict[str, list[MitigationRef]], ri
 
 
 def _fill_causal_fields(risk, data_dict, fields: tuple[str, ...]) -> None:
-    """Fill the risk's causal fields from data_dict where they are None."""
+    """Fill the risk's causal fields from data_dict where they are None.
+
+    Marks each field the catalog actually supplied as ``catalog`` in
+    ``risk.causal_provenance``; a field that already carries a value (a
+    generated one) keeps both the value and its provenance.
+    """
     if not data_dict:
         return
     for field in fields:
         if getattr(risk, field) is None:
-            setattr(risk, field, data_dict.get(field))
+            value = data_dict.get(field)
+            if value:
+                setattr(risk, field, value)
+                risk.causal_provenance[field] = "catalog"
 
 
 def enrich_with_mitigations(

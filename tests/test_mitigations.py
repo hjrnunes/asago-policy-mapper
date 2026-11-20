@@ -521,3 +521,103 @@ def test_enrich_fills_none_causal_fields_from_yaml(sample_index_path):
     assert risk.threat == "LLM threat"
     assert risk.threat_source == "YAML source"
     assert risk.vulnerability == "YAML vulnerability"
+
+
+# ---------------------------------------------------------------------------
+# Tests for causal provenance marking
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_fill_marks_provenance(sample_index_path):
+    """Fields the YAML tables supply are marked catalog; absent ones are not marked."""
+    index = load_mitigation_index(sample_index_path)
+    threats = {
+        "atlas-hallucination": {
+            "threat": "YAML threat",
+            "vulnerability": "YAML vulnerability",
+        }
+    }
+    consequences = {
+        "atlas-hallucination": {
+            "consequence": "YAML consequence",
+        }
+    }
+
+    risk = _make_risk("atlas-hallucination")
+    enrich_with_mitigations([risk], index, risk_threats=threats, risk_consequences=consequences)
+
+    assert risk.causal_provenance == {
+        "threat": "catalog",
+        "vulnerability": "catalog",
+        "consequence": "catalog",
+    }
+    # threat_source and impact stay None and unmarked.
+    assert risk.threat_source is None
+    assert risk.impact is None
+
+
+def test_catalog_fill_marks_provenance_via_crossmap(sample_index_path):
+    """A field resolved through a crossmap atlas ID still counts as catalog."""
+    index = load_mitigation_index(sample_index_path)
+    threats = {
+        "atlas-hallucination": {
+            "threat": "YAML threat",
+        }
+    }
+    crossmap = {"credo-risk-020": {"atlas-hallucination"}}
+
+    risk = _make_risk("credo-risk-020")
+    enrich_with_mitigations([risk], index, risk_crossmap=crossmap, risk_threats=threats)
+
+    assert risk.threat == "YAML threat"
+    assert risk.causal_provenance == {"threat": "catalog"}
+
+
+def test_generated_fields_not_overwritten_and_marked(sample_index_path):
+    """Generated fields keep their value and their generated provenance; catalog fills only the rest."""
+    index = load_mitigation_index(sample_index_path)
+    threats = {
+        "atlas-hallucination": {
+            "threat": "YAML threat",
+            "threat_source": "YAML source",
+            "vulnerability": "YAML vulnerability",
+        }
+    }
+
+    risk = _make_risk("atlas-hallucination")
+    risk.threat = "LLM-synthesized threat"
+    risk.causal_status = "generated"
+    risk.causal_provenance = {"threat": "generated"}
+
+    enrich_with_mitigations([risk], index, risk_threats=threats)
+
+    assert risk.threat == "LLM-synthesized threat"
+    assert risk.causal_provenance == {
+        "threat": "generated",
+        "threat_source": "catalog",
+        "vulnerability": "catalog",
+    }
+
+
+def test_catalog_fill_marks_nothing_when_tables_lack_the_risk(sample_index_path):
+    """No catalog entry resolves, so nothing is filled and nothing is marked."""
+    index = load_mitigation_index(sample_index_path)
+    threats = {"atlas-hallucination": {"threat": "YAML threat"}}
+
+    risk = _make_risk("atlas-unrelated")
+    enrich_with_mitigations([risk], index, risk_threats=threats)
+
+    assert risk.threat is None
+    assert risk.causal_provenance == {}
+
+
+def test_catalog_fill_does_not_mark_empty_string_values(sample_index_path):
+    """An empty catalog value supplies nothing, so it is not marked."""
+    index = load_mitigation_index(sample_index_path)
+    threats = {"atlas-hallucination": {"threat": ""}}
+
+    risk = _make_risk("atlas-hallucination")
+    enrich_with_mitigations([risk], index, risk_threats=threats)
+
+    assert risk.threat is None
+    assert risk.causal_provenance == {}

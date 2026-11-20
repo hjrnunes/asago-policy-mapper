@@ -15,11 +15,12 @@ from asago_policy_mapper.extract.attribute import (
     ground_and_extract_evidence,
     ground_risk_group,
     ground_variants,
-    synthesize_causal_chain,
+    synthesize_causal_chain_with_status,
 )
 from asago_policy_mapper.extract.index import RiskIndex
 from asago_policy_mapper.extract.merge import merge_matches
 from asago_policy_mapper.extract.models import (
+    CausalSynthesisResult,
     ChunkSummary,
     DecisionCallRecord,
     DecisionItem,
@@ -33,7 +34,6 @@ from asago_policy_mapper.extract.models import (
     RetrievalStats,
     RiskMatch,
     ScoredCandidate,
-    _CausalChain,
 )
 from asago_policy_mapper.extract.parse import chunk_documents, parse_document
 from asago_policy_mapper.extract.plan import RunPlan, resolve_plan
@@ -57,6 +57,9 @@ from asago_policy_mapper.extract.screening import (
 from asago_policy_mapper.llm import LLMConfig, StructuredOutputMode
 
 logger = logging.getLogger(__name__)
+
+# The causal-chain fields RiskMatch carries, in chain order.
+_CAUSAL_FIELDS = ("threat", "threat_source", "vulnerability", "consequence", "impact")
 
 
 class PipelineInvariantError(RuntimeError):
@@ -907,7 +910,7 @@ def _run_causal_synthesis(merged, chunks, client, config, max_workers, call_coll
     chunk_texts = {i: chunks[i].text for i in range(len(chunks))}
 
     def _synthesize_one(risk_match):
-        return risk_match.risk_id, synthesize_causal_chain(
+        return risk_match.risk_id, synthesize_causal_chain_with_status(
             risk_match=risk_match,
             chunk_texts=chunk_texts,
             client=client,
@@ -915,22 +918,26 @@ def _run_causal_synthesis(merged, chunks, client, config, max_workers, call_coll
             call_collector=call_collector,
         )
 
-    results: dict[str, _CausalChain | None] = {}
+    outcomes: dict[str, CausalSynthesisResult] = {}
     logger.info("Causal synthesis: %d risks", len(merged))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_synthesize_one, m): m for m in merged}
         for future in as_completed(futures):
-            risk_id, chain = future.result()
-            results[risk_id] = chain
+            risk_id, outcome = future.result()
+            outcomes[risk_id] = outcome
 
     for m in merged:
-        chain = results.get(m.risk_id)
+        # Every merged risk contributed a collected future, so its risk_id
+        # is always present in outcomes.
+        outcome = outcomes[m.risk_id]
+        m.causal_status = outcome.status
+        chain = outcome.chain
         if chain:
-            m.threat = chain.threat or None
-            m.threat_source = chain.threat_source or None
-            m.vulnerability = chain.vulnerability or None
-            m.consequence = chain.consequence or None
-            m.impact = chain.impact or None
+            for field in _CAUSAL_FIELDS:
+                value = getattr(chain, field) or None
+                if value is not None:
+                    setattr(m, field, value)
+                    m.causal_provenance[field] = "generated"
 
     return merged
 
@@ -1559,7 +1566,12 @@ def _run_expansion_stage(
 
 
 def _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing):
-    """Synthesize causal chains for each merged risk when a client is present."""
+    """Synthesize causal chains for each merged risk when the plan runs the stage.
+
+    The plan's truth table gates causal synthesis on grounding: an ungrounded
+    run has no verified evidence to synthesize from, so every match records
+    ``disabled`` instead.
+    """
     if plan.causal_synthesis and client is not None:
         with timed(timing, "causal_synthesis_ms"):
             return _run_causal_synthesis(
@@ -1570,6 +1582,8 @@ def _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_colle
                 max_workers,
                 call_collector,
             )
+    for m in merged:
+        m.causal_status = "disabled"
     return merged
 
 

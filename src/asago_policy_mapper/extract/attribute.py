@@ -6,6 +6,8 @@ import time
 from asago_policy_mapper.extract.calllog import append_with_call_id
 from asago_policy_mapper.extract.evidence import locate_quote
 from asago_policy_mapper.extract.models import (
+    CausalSynthesisResult,
+    CausalSynthesisStatus,
     EvidenceSpan,
     LLMCallRecord,
     RiskMatch,
@@ -480,6 +482,87 @@ def _downgrade_empty_chain(chain: _CausalChain | None, risk_id: str) -> _CausalC
     return chain
 
 
+def _outcome_status(chain: _CausalChain | None, retry_exhausted: bool) -> CausalSynthesisStatus:
+    """Map (chain, retry_exhausted) to the no-chain reason when there is no chain."""
+    if retry_exhausted:
+        return "validation_exhausted"
+    if chain is None:
+        return "empty_answer"
+    return "generated"
+
+
+def _record_causal_call(
+    call_collector: list[LLMCallRecord],
+    *,
+    risk_match: RiskMatch,
+    messages,
+    chain: _CausalChain | None,
+    retry_exhausted: bool,
+    duration_ms: float,
+) -> None:
+    # Synthesis only runs when some evidence names a chunk in chunk_texts,
+    # so a reachable record always has an attributed span; the fallback
+    # guards spans whose chunk never made it into the record's int field.
+    first_chunk = next(
+        (e.chunk_index for e in risk_match.evidence if e.chunk_index is not None),
+        -1,
+    )
+    append_with_call_id(
+        call_collector,
+        counts=lambda record: record.stage == "causal_synthesis",
+        build=lambda number: LLMCallRecord(
+            call_id=f"causal-{number:03d}",
+            stage="causal_synthesis",
+            chunk_index=first_chunk,
+            risk_ids=[risk_match.risk_id],
+            messages=messages,
+            response=chain.model_dump() if chain else {},
+            duration_ms=duration_ms,
+            result_summary="synthesized" if chain else "retry_exhausted" if retry_exhausted else "empty",
+            prompt_shortenings=last_call_shortenings(),
+        ),
+    )
+
+
+def synthesize_causal_chain_with_status(
+    risk_match: RiskMatch,
+    chunk_texts: dict[int, str],
+    client,
+    model: str,
+    *,
+    call_collector: list[LLMCallRecord] | None = None,
+) -> CausalSynthesisResult:
+    """Synthesize one risk's causal chain, keeping the no-chain reasons apart.
+
+    Returns a ``CausalSynthesisResult`` whose ``status`` distinguishes the
+    three ways a chain can be missing; the chain itself (or None) rides in
+    ``chain``. Non-validation errors propagate unchanged.
+    """
+    evidence_chunks = _evidence_chunk_texts(risk_match, chunk_texts)
+
+    if not evidence_chunks:
+        return CausalSynthesisResult(status="no_evidence")
+
+    combined_text = "\n\n---\n\n".join(evidence_chunks)
+
+    messages, results, retry_exhausted, duration_ms = _request_causal_chain(risk_match, combined_text, client, model)
+
+    chain = _downgrade_empty_chain(results[0] if results else None, risk_match.risk_id)
+    status = _outcome_status(chain, retry_exhausted)
+
+    if call_collector is not None:
+        _record_causal_call(
+            call_collector,
+            risk_match=risk_match,
+            messages=messages,
+            chain=chain,
+            retry_exhausted=retry_exhausted,
+            duration_ms=duration_ms,
+        )
+
+    return CausalSynthesisResult(status=status, chain=chain)
+
+
 def synthesize_causal_chain(
     risk_match: RiskMatch,
     chunk_texts: dict[int, str],
@@ -488,39 +571,11 @@ def synthesize_causal_chain(
     *,
     call_collector: list[LLMCallRecord] | None = None,
 ) -> _CausalChain | None:
-    evidence_chunks = _evidence_chunk_texts(risk_match, chunk_texts)
-
-    if not evidence_chunks:
-        return None
-
-    combined_text = "\n\n---\n\n".join(evidence_chunks)
-
-    messages, results, retry_exhausted, duration_ms = _request_causal_chain(risk_match, combined_text, client, model)
-
-    chain = _downgrade_empty_chain(results[0] if results else None, risk_match.risk_id)
-
-    if call_collector is not None:
-        # Synthesis only runs when some evidence names a chunk in chunk_texts,
-        # so a reachable record always has an attributed span; the fallback
-        # guards spans whose chunk never made it into the record's int field.
-        first_chunk = next(
-            (e.chunk_index for e in risk_match.evidence if e.chunk_index is not None),
-            -1,
-        )
-        append_with_call_id(
-            call_collector,
-            counts=lambda record: record.stage == "causal_synthesis",
-            build=lambda number: LLMCallRecord(
-                call_id=f"causal-{number:03d}",
-                stage="causal_synthesis",
-                chunk_index=first_chunk,
-                risk_ids=[risk_match.risk_id],
-                messages=messages,
-                response=chain.model_dump() if chain else {},
-                duration_ms=duration_ms,
-                result_summary="synthesized" if chain else "retry_exhausted" if retry_exhausted else "empty",
-                prompt_shortenings=last_call_shortenings(),
-            ),
-        )
-
-    return chain
+    """Legacy view of ``synthesize_causal_chain_with_status``: the chain, or None."""
+    return synthesize_causal_chain_with_status(
+        risk_match=risk_match,
+        chunk_texts=chunk_texts,
+        client=client,
+        model=model,
+        call_collector=call_collector,
+    ).chain
