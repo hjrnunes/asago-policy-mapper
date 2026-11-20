@@ -1389,8 +1389,8 @@ def test_build_prefilter_laya_provider_builds_laya_assessor(tmp_path, monkeypatc
 
     assert prefilter is not None
     assert isinstance(prefilter.assessor, LayaProbabilityAssessor)
-    assert prefilter.assessor.endpoint.model == "aac6fef/laya-multilingual-mlx"
-    assert prefilter.assessor.endpoint.max_batch == 8
+    assert prefilter.assessor.config.model == "aac6fef/laya-multilingual-mlx"
+    assert prefilter.assessor.config.max_batch == 8
     assert prefilter.assessor.sends_offsite is False
     assert prefilter.rule.threshold == 0.05
 

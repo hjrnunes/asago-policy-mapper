@@ -42,7 +42,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint, _as_float
+from asago_policy_mapper.assessors.http_probability import _as_float
 from asago_policy_mapper.assessors.replay import context_sha256
 from asago_policy_mapper.extract.screening import (
     AnswerBatch,
@@ -54,20 +54,9 @@ from asago_policy_mapper.extract.screening import (
     Question,
 )
 
-_LAYA_BASE_URL = "http://localhost/laya"
-"""A placeholder kept for ``ProbabilityEndpoint`` field-shape compatibility
-only: the assessor never opens a client, and metadata records no host for
-an in-process run."""
-
 _LAYA_MODEL = "aac6fef/laya-multilingual-mlx"
 """The default checkpoint: 1024-token context (the English 421M has 512,
 which our grounding contexts overflow far harder)."""
-
-_LAYA_API_KEY_ENV = "POLICY_MAPPER_LAYA_API_KEY"
-"""No key exists for a local model; kept for profile-shape compatibility."""
-
-_LAYA_TIMEOUT_S = 30.0
-"""Generous: measured 0.1–2.5s per predict; laya raises rather than hangs."""
 
 _LAYA_MAX_BATCH = 16
 """Bounds the question count per forward pass (and so per-pass latency).
@@ -81,19 +70,16 @@ _LAYA_INSTALL_HINT = (
 
 
 @dataclass(frozen=True)
-class LayaProbabilityEndpoint(ProbabilityEndpoint):
-    """The Laya endpoint: the generic fields with the local arm's defaults.
+class LayaModelConfig:
+    """The local arm's configuration: which checkpoint, how many questions per pass.
 
-    ``base_url`` is a placeholder (in-process), ``api_key_env`` names an
-    unset variable (no key), and ``model`` is the laya checkpoint id. Every
-    field keeps its override; ``repr`` and ``to_dict`` stay
-    credential-free by construction.
+    Laya runs in process — there is no endpoint, so there is no URL, no
+    credential and no timeout to configure. The assessor reads exactly
+    these two fields; ``max_batch`` bounds the question count per forward
+    pass (and so per-pass latency).
     """
 
-    base_url: str = _LAYA_BASE_URL
     model: str = _LAYA_MODEL
-    api_key_env: str = _LAYA_API_KEY_ENV
-    timeout_s: float = _LAYA_TIMEOUT_S
     max_batch: int = _LAYA_MAX_BATCH
 
 
@@ -110,18 +96,18 @@ class LayaProbabilityAssessor:
     in_process = True
     """Marks the assessor as in-process: no URL, no endpoint host."""
 
-    def __init__(self, endpoint: LayaProbabilityEndpoint, agent=None):
+    def __init__(self, config: LayaModelConfig, agent=None):
         try:
             import laya_mlx
         except ImportError as e:
             raise ImportError(f"{e}; {self._install_hint()}") from e
-        self.endpoint = endpoint
-        self.assessor_id = f"laya:{endpoint.model}"
+        self.config = config
+        self.assessor_id = f"laya:{config.model}"
         self.sends_offsite = False
         self.prompt_name = "laya-noul"
         # The import must succeed even when an agent is injected (the stub
         # tests inject one; the real constructor always loads the model).
-        self._agent = agent if agent is not None else laya_mlx.load(endpoint.model)
+        self._agent = agent if agent is not None else laya_mlx.load(config.model)
 
     @staticmethod
     def _install_hint() -> str:
@@ -166,7 +152,7 @@ class LayaProbabilityAssessor:
         replicates the Jev mapping's ``_batches`` (which lives on the HTTP
         adapter this class deliberately does not subclass).
         """
-        size = max(1, self.endpoint.max_batch)
+        size = max(1, self.config.max_batch)
         batches: list[list[DecisionCase]] = []
         current: list[DecisionCase] = []
         keys: set[str] = set()
@@ -189,7 +175,7 @@ class LayaProbabilityAssessor:
         # its digest and length let a run match the recorded request against
         # the grounding context it filtered, the same key replay uses.
         request_body = {
-            "model": self.endpoint.model,
+            "model": self.config.model,
             "state_sha256": context_sha256(context),
             "state_chars": len(context),
             "summary": True,
