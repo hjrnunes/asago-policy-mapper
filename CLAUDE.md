@@ -62,7 +62,7 @@ Per-PR procedure:
 2. Inspect survivors with `.venv/bin/mutmut show <id>`. `mutmut results` lists results for the whole source tree, not just your module, so read the entries for the changed module; `.venv/bin/mutmut browse` opens an interactive triage TUI over the same data. Default `mutmut results` omits killed mutants from the listing, so a listing with no killed lines does not mean the run had zero kills. Count kills with `mutmut results --all true` or read the run's exit summary (the `🎉`/`🙁` tally) before drawing conclusions.
 3. Gate on **no new surviving mutants in changed code** relative to the run before your changes — not on a score threshold. The existing baseline has too much survival for a threshold to be useful.
 
-Two known macOS artifacts: forking from the post-stats process can segfault child runs (exit code `-11`, concentrated in client-construction paths — treat as unjudged, not kills), and true timeouts are classified separately with a `⏰` marker. The `mutants/` directory is the sandbox cache; delete it to force a cold run.
+Two known macOS artifacts: forking from the post-stats process can segfault child runs (exit code `-11`, concentrated in client-construction paths — treat as unjudged, not kills), and true timeouts are classified separately with a `⏰` marker. The segfault is not random-environment noise: the crash chain runs mutmut's fork → transformers/huggingface_hub → httpx → `getproxies_macosx_sysconf`, and the macOS system-proxy lookup is not fork-safe. Pin it off by exporting dead proxies around the run: `http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 .venv/bin/mutmut run "<scope>" --max-children 8`. The `mutants/` directory is the sandbox cache; delete it to force a cold run.
 
 ### Sandbox isolation and the canary guard
 
@@ -112,7 +112,7 @@ Error semantics, pinned by tests over a stubbed transport: the structured client
 ## Dependency Pins
 
 - `ai-atlas-nexus==1.2.5` (PyPI) — exact pin so catalog and ontology models travel together; upgrade deliberately, then update the expected counts in `tests/test_nexus_pin_equivalence.py`
-- `torch<2.12` and `transformers<5.6` — newer versions introduce an MPS-incompatible `rt_detr_v2` layout model in docling's PDF pipeline on Apple Silicon
+- `torch>=2.11,<2.15` and `transformers>=5.5,<5.20` — the upper bounds keep out an MPS-incompatible `rt_detr_v2` layout model in docling's PDF pipeline on Apple Silicon; the range is otherwise open, so upgrade deliberately and re-check the docling PDF path on Apple Silicon
 - `numpy<2.5` — numpy 2.5.0 ships PEP 695 type stubs that mypy cannot parse when `python_version` targets 3.11
 
 ## LLM Test Diagnostics
