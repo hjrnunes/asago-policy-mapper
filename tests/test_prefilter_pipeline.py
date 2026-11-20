@@ -309,17 +309,340 @@ def test_prefilter_records_exchange_requests_when_assessor_batches(mock_config, 
     )
 
     assert len(result.decision_calls) >= 1
-    request = result.decision_calls[0].request
+    requests = result.decision_calls[0].requests
     # The exchange-reported requests land in the record as a list of bodies,
     # one per batch, with their boundaries preserved: every body carries
     # exactly its own case's id, in order, against the same context.
-    assert isinstance(request, list)
-    assert len(request) == len(MOCK_RISKS)
-    assert [body["items"][0]["id"] for body in request] == [r.id for r in MOCK_RISKS]
-    assert all(body["context"] == request[0]["context"] for body in request)
-    # A list-valued request round-trips through the record's serialized form.
+    assert isinstance(requests, list)
+    assert len(requests) == len(MOCK_RISKS)
+    assert [body["items"][0]["id"] for body in requests] == [r.id for r in MOCK_RISKS]
+    assert all(body["context"] == requests[0]["context"] for body in requests)
+    # A list-valued requests round-trips through the record's serialized form.
     restored = DecisionCallRecord(**result.decision_calls[0].model_dump())
-    assert restored.request == request
+    assert restored.requests == requests
+
+
+def _run_extraction_with_assessor(assessor, mock_config, tmp_path, monkeypatch, rule=None):
+    """Run one extraction with the given prefilter assessor over the stub index."""
+    from asago_policy_mapper.extract import pipeline
+
+    if rule is None:
+        rule = ThresholdRule()
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(
+        pipeline,
+        "ground_and_extract_evidence",
+        lambda **kwargs: {},
+    )
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    return run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=rule),
+        ocr=False,
+    )
+
+
+def test_prefilter_records_wire_responses_when_the_assessor_has_them(mock_config, tmp_path, monkeypatch):
+    """An exchange with responses lands in the call record: usage readouts survive.
+
+    Provider assessors answer with readouts the run needs after the fact
+    (laya's token truncation, Jev's token spend); the record must carry
+    them so a run's output can measure the loss.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class RespondingAssessor(ScriptedAssessor):
+        """Reports a responses list in its exchange, like the provider assessors."""
+
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            answers = {c.risk_id: (ProbabilityAnswer(0.5),) for c in cases}
+            return AnswerBatch(
+                answers=answers,
+                unmatched_ids=(),
+                latency_ms=0.5,
+                exchange={
+                    "requests": [{"context": context, "items": [{"id": c.risk_id, "text": "x"}]} for c in cases],
+                    "responses": [
+                        {
+                            "model": "laya-multilingual-mlx",
+                            "answers": {c.risk_id: {"type": "noul", "noul": 0.5} for c in cases},
+                            "usage": {"state_tokens": 100, "state_tokens_dropped": 263, "truncated": True},
+                        }
+                    ],
+                },
+            )
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(
+        pipeline,
+        "ground_and_extract_evidence",
+        lambda **kwargs: {},
+    )
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=GroundingPrefilter(assessor=RespondingAssessor({}), rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    assert len(result.decision_calls) >= 1
+    responses = result.decision_calls[0].responses
+    assert isinstance(responses, list)
+    assert len(responses) == 1
+    assert responses[0]["usage"]["state_tokens_dropped"] == 263
+    assert responses[0]["usage"]["truncated"] is True
+    # The responses round-trip through the record's serialized form.
+    dumped = result.decision_calls[0].model_dump()
+    assert dumped["responses"] == responses
+
+
+def test_prefilter_omits_responses_when_the_assessor_has_none(mock_config, tmp_path, monkeypatch):
+    """An exchange without responses leaves the field out: output stays unchanged.
+
+    Assessors that record no responses (replay, the generic seam stub)
+    must produce the same serialized record as before the field existed.
+    """
+
+    class NoResponsesAssessor(ScriptedAssessor):
+        """An exchange with requests but no responses list."""
+
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            answers = {c.risk_id: (ProbabilityAnswer(0.5),) for c in cases}
+            return AnswerBatch(
+                answers=answers,
+                unmatched_ids=(),
+                latency_ms=0.5,
+                exchange={"requests": [{"context": context, "items": [{"id": c.risk_id, "text": "x"}]} for c in cases]},
+            )
+
+    result = _run_extraction_with_assessor(NoResponsesAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    assert len(result.decision_calls) >= 1
+    dumped = result.decision_calls[0].model_dump()
+    assert "responses" not in dumped
+
+
+def test_prefilter_request_and_responses_tolerate_a_missing_wire_attribute(mock_config, tmp_path, monkeypatch):
+    """An assessment with no exchange attribute at all falls back to the defaults.
+
+    The helpers read the exchange defensively; an assessor returning a
+    batch without the attribute must still record the seam's request
+    shape and no responses, not crash.
+    """
+
+    class WirelessAssessor(ScriptedAssessor):
+        """Returns a batch whose exchange attribute is deleted entirely."""
+
+        def assess(self, question, context, cases):
+            self.calls.append((question, context, list(cases)))
+            answers = {c.risk_id: (ProbabilityAnswer(0.5),) for c in cases}
+            batch = AnswerBatch(
+                answers=answers,
+                unmatched_ids=(),
+                latency_ms=0.5,
+                exchange={"requests": [], "responses": []},
+            )
+            # Frozen dataclasses block __delattr__; the base object
+            # implementation removes the field regardless.
+            object.__delattr__(batch, "exchange")
+            return batch
+
+    result = _run_extraction_with_assessor(WirelessAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    assert len(result.decision_calls) >= 1
+    # The fallback request shape: the seam's {context, items} body.
+    requests = result.decision_calls[0].requests
+    assert isinstance(requests, list) and len(requests) == 1
+    body = requests[0]
+    assert "context" in body and "items" in body
+    # And no responses recorded.
+    dumped = result.decision_calls[0].model_dump()
+    assert "responses" not in dumped
+
+
+def _run_extraction_with_http_assessor(endpoint, handler, mock_config, tmp_path, monkeypatch, threshold=0.10):
+    """Run one extraction with a real HTTP probability assessor over a mock transport."""
+    import httpx
+
+    from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
+    from asago_policy_mapper.extract.screening import DropThreshold
+
+    assessor = HttpProbabilityAssessor(endpoint, transport=httpx.MockTransport(handler))
+    return _run_extraction_with_assessor(
+        assessor, mock_config, tmp_path, monkeypatch, rule=DropThreshold(assessor, threshold)
+    )
+
+
+def test_prefilter_generic_serialization_success(mock_config, tmp_path, monkeypatch):
+    """A generic HTTP provider run records both request and response bodies.
+
+    The pilot readouts need the response payload persisted; a successful
+    run's call record carries the exact request body and the decoded
+    response, with no credential in the serialized result.
+    """
+    import json
+
+    import httpx
+
+    from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+    endpoint = ProbabilityEndpoint(
+        base_url="http://localhost:9100/v1", model="prob-model", api_key_env="PREFILTER_TEST_KEY"
+    )
+    monkeypatch.setenv("PREFILTER_TEST_KEY", "secret-value-123")
+
+    def echo_handler(request):
+        body = json.loads(request.content)
+        return httpx.Response(200, json={"scores": [{"id": i["id"], "p": 0.5} for i in body["items"]]})
+
+    result = _run_extraction_with_http_assessor(
+        endpoint, echo_handler, mock_config, tmp_path, monkeypatch, threshold=0.10
+    )
+
+    assert len(result.decision_calls) >= 1
+    call = result.decision_calls[0]
+    requests = call.requests
+    assert isinstance(requests, list) and len(requests) >= 1
+    assert requests[0]["items"][0]["id"] == "R-001"
+    responses = call.responses
+    assert isinstance(responses, list) and len(responses) == len(requests)
+    assert responses[0]["scores"][0]["id"] == "R-001"
+    assert responses[0]["scores"][0]["p"] == 0.5
+    # The serialized result carries the responses and no credential.
+    dumped = json.dumps(result.model_dump())
+    assert "secret-value-123" not in dumped
+    assert '"responses"' in dumped
+
+
+def test_prefilter_generic_serialization_failure(mock_config, tmp_path, monkeypatch):
+    """A failed generic batch records an explicit error object, not null."""
+    import httpx
+
+    from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+    endpoint = ProbabilityEndpoint(
+        base_url="http://localhost:9100/v1", model="prob-model", api_key_env="PREFILTER_TEST_KEY"
+    )
+    result = _run_extraction_with_http_assessor(
+        endpoint,
+        lambda request: httpx.Response(500, json={"e": 1}),
+        mock_config,
+        tmp_path,
+        monkeypatch,
+        threshold=0.10,
+    )
+
+    assert len(result.decision_calls) >= 1
+    call = result.decision_calls[0]
+    responses = call.responses
+    assert all(r == {"error": "error", "status": 500} for r in responses)
+    # The serialized record carries the error object; nothing is null.
+    dumped = json.dumps(call.model_dump())
+    assert '"responses"' in dumped
+    assert "null" not in dumped.split('"responses"')[1][:80]
+
+
+def test_prefilter_generic_echoed_key_absent_from_serialized_result(mock_config, tmp_path, monkeypatch):
+    """An endpoint echoing the credential as an id must not reach the output.
+
+    The unmatched-ids path reads ids from the response payload; until the
+    generic adapter redacts unmatched ids the same way it redacts the
+    response, a hostile echo keyed by the secret lands in the serialized
+    result. This test pins the fixed behavior; it goes green when the
+    adapter fix lands.
+    """
+    import httpx
+
+    from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+    endpoint = ProbabilityEndpoint(
+        base_url="http://localhost:9100/v1", model="prob-model", api_key_env="PREFILTER_TEST_KEY"
+    )
+    monkeypatch.setenv("PREFILTER_TEST_KEY", "secret-value-123")
+
+    def echo_handler(request):
+        return httpx.Response(
+            200,
+            json={"scores": [{"id": "secret-value-123", "p": 0.5}]},
+        )
+
+    result = _run_extraction_with_http_assessor(
+        endpoint, echo_handler, mock_config, tmp_path, monkeypatch, threshold=0.10
+    )
+
+    dumped = json.dumps(result.model_dump())
+    assert "secret-value-123" not in dumped
+
+
+def test_prefilter_jev_echoed_key_absent_from_serialized_result(mock_config, tmp_path, monkeypatch):
+    """A Jev response echoing the credential as a question id must not reach the output.
+
+    Same contract as the generic arm: ids the pipeline did not ask for
+    (unmatched) must not carry the credential into the serialized result.
+    This test pins the fixed behavior; it goes green when the Jev
+    adapter's unmatched-id redaction lands.
+    """
+    import httpx
+
+    from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
+    from asago_policy_mapper.extract.screening import DropThreshold
+
+    monkeypatch.setenv("PREFILTER_JEV_TEST_KEY", "secret-value-123")
+    endpoint = JevProbabilityEndpoint(base_url="http://localhost:9100/v1", api_key_env="PREFILTER_JEV_TEST_KEY")
+
+    def echo_handler(request):
+        return httpx.Response(
+            200, json={"model": "jev", "answers": {"secret-value-123": {"type": "noul", "noul": 0.5}}}
+        )
+
+    assessor = JevProbabilityAssessor(endpoint, transport=httpx.MockTransport(echo_handler))
+    result = _run_extraction_with_assessor(
+        assessor, mock_config, tmp_path, monkeypatch, rule=DropThreshold(assessor, 0.10)
+    )
+
+    dumped = json.dumps(result.model_dump())
+    assert "secret-value-123" not in dumped
 
 
 def test_prefilter_drops_at_0_10_keeps_above(mock_config, tmp_path, monkeypatch):
@@ -1178,11 +1501,12 @@ def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, mo
     call = result.decision_calls[0]
     assert call.stage == "prefilter"
     assert call.chunk_index == 0
-    assert isinstance(call.request, dict)
-    assert set(call.request) == {"context", "items", "synthesized"}
-    assert call.request["synthesized"] is True
-    assert [i["id"] for i in call.request["items"]] == [r.id for r in MOCK_RISKS]
-    assert call.request["items"][0]["text"] == f"{MOCK_RISKS[0].name}: {MOCK_RISKS[0].description}"
+    assert isinstance(call.requests, list) and len(call.requests) == 1
+    body = call.requests[0]
+    assert set(body) == {"context", "items", "synthesized"}
+    assert body["synthesized"] is True
+    assert [i["id"] for i in body["items"]] == [r.id for r in MOCK_RISKS]
+    assert body["items"][0]["text"] == f"{MOCK_RISKS[0].name}: {MOCK_RISKS[0].description}"
     # The decision log identifies the task, prompt, assessor and rule.
     log = call.decision
     assert log.question_id == "grounding-likelihood"
@@ -1671,6 +1995,85 @@ def test_prefilter_offsite_without_endpoint_is_none_host(mock_config, tmp_path, 
     assert result.metadata["prefilter"]["endpoint_host"] is None
 
 
+def test_prefilter_in_process_assessor_records_no_endpoint_host(mock_config, tmp_path, monkeypatch):
+    """An in-process assessor with a placeholder URL records no host.
+
+    The local arm runs in process: its configured placeholder URL must
+    not surface as an endpoint host (a ``base_url`` override must not
+    make an in-process run look like it talks to a remote endpoint).
+    """
+
+    class InProcessAssessor(ScriptedAssessor):
+        """In-process, carrying the placeholder endpoint shape."""
+
+        sends_offsite = False
+        in_process = True
+
+        def __init__(self, script):
+            super().__init__(script)
+            from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+            self.endpoint = ProbabilityEndpoint(
+                base_url="http://localhost/laya", model="local", api_key_env="LOCAL_KEY"
+            )
+
+    result = _run_extraction_with_assessor(InProcessAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    block = result.metadata["prefilter"]
+    assert block["endpoint_host"] is None
+    assert block["sends_offsite"] is False
+
+
+def test_prefilter_offsite_assessor_records_its_endpoint_host(mock_config, tmp_path, monkeypatch):
+    """An offsite assessor still records its endpoint host."""
+
+    class OffsiteAssessor(ScriptedAssessor):
+        """Offsite with a real remote endpoint."""
+
+        sends_offsite = True
+
+        def __init__(self, script):
+            super().__init__(script)
+            from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+            self.endpoint = ProbabilityEndpoint(
+                base_url="https://api.example.invalid/v1", model="remote", api_key_env="REMOTE_KEY"
+            )
+
+    result = _run_extraction_with_assessor(OffsiteAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    block = result.metadata["prefilter"]
+    assert block["endpoint_host"] == "api.example.invalid"
+    assert block["sends_offsite"] is True
+
+
+def test_prefilter_local_http_assessor_records_its_endpoint_host(mock_config, tmp_path, monkeypatch):
+    """A local (not offsite) HTTP assessor records its endpoint host.
+
+    Only in-process assessors drop the host: an HTTP assessor pointed at
+    a loopback endpoint still names where it sent requests.
+    """
+
+    class LocalHttpAssessor(ScriptedAssessor):
+        """An HTTP assessor at a loopback endpoint."""
+
+        offsite = False
+
+        def __init__(self, script):
+            super().__init__(script)
+            from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+            self.endpoint = ProbabilityEndpoint(
+                base_url="http://127.0.0.1:9100/v1", model="local-http", api_key_env="LOCAL_KEY"
+            )
+
+    result = _run_extraction_with_assessor(LocalHttpAssessor({}), mock_config, tmp_path, monkeypatch)
+
+    block = result.metadata["prefilter"]
+    assert block["endpoint_host"] == "127.0.0.1"
+    assert block["sends_offsite"] is False
+
+
 def test_prefilter_endpoint_host_ignores_non_string_base_url(mock_config, tmp_path, monkeypatch):
     """A non-string base_url yields a None host, not a traceback.
 
@@ -1697,6 +2100,8 @@ def test_prefilter_endpoint_host_ignores_non_string_base_url(mock_config, tmp_pa
 
     assessor = ScriptedAssessor({})
     assessor.endpoint = SimpleNamespace(base_url=12345)
+    # The scripted assessor is not in-process, so the host derivation runs;
+    # a non-string base_url must yield None, not a traceback.
     doc = tmp_path / "p.md"
     doc.write_text(DOC)
     result = run_extraction(
@@ -1921,7 +2326,7 @@ def test_prefilter_one_chunk_copy_keeps_page_and_section():
     assert [fc.risk_id for fc in drops] == ["R-001"]
     assert drops[0].chunk_index == 4
     assert call.chunk_index == 4
-    assert call.request["context"] == "ctx"
+    assert call.requests[0]["context"] == "ctx"
 
 
 def test_prefilter_stage_context_fallback_for_mismatched_lengths():
@@ -2342,5 +2747,5 @@ def test_prefilter_real_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
     assert "sentinel-secret-key" not in serialized
     # The record holds the request the assessor actually sent.
     record = result.decision_calls[0]
-    assert isinstance(record.request, list)
-    assert record.request[0]["items"][0]["id"] == "R-001"
+    assert isinstance(record.requests, list)
+    assert record.requests[0]["items"][0]["id"] == "R-001"

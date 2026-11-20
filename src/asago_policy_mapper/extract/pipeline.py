@@ -1234,8 +1234,8 @@ def _prefilter_cases(cr: ChunkResult, index) -> list[DecisionCase]:
     ]
 
 
-def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> dict | list:
-    """The request the prefilter sent; no credentials.
+def _prefilter_requests(context: str, cases: list[DecisionCase], assessment) -> list:
+    """The request bodies the prefilter sent, one per batch; no credentials.
 
     Assessors that batch (the HTTP probability assessor splits at
     ``max_batch``) record every request body they actually sent, with the
@@ -1249,11 +1249,30 @@ def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> d
     exchange = getattr(assessment, "exchange", None)
     if isinstance(exchange, dict) and isinstance(exchange.get("requests"), list):
         return list(exchange["requests"])
-    return {
-        "context": context,
-        "items": [{"id": c.risk_id, "text": f"{c.name}: {c.description}"} for c in cases],
-        "synthesized": True,
-    }
+    return [
+        {
+            "context": context,
+            "items": [{"id": c.risk_id, "text": f"{c.name}: {c.description}"} for c in cases],
+            "synthesized": True,
+        }
+    ]
+
+
+def _prefilter_responses(assessment) -> list:
+    """What the assessor recorded as answered, when its exchange carries it.
+
+    Assessors whose exchange carries ``responses`` (the provider assessors)
+    answer with readouts the run needs after the fact — laya's usage
+    block (``state_tokens_dropped``, ``truncated``) and Jev's token
+    usage. Assessors that record nothing (replay, the generic seam stub)
+    stay empty, so their serialized output is unchanged. Credentials
+    never appear: the exchange records bodies, and the key travels in a
+    header the body never sees.
+    """
+    exchange = getattr(assessment, "exchange", None)
+    if isinstance(exchange, dict) and isinstance(exchange.get("responses"), list):
+        return list(exchange["responses"])
+    return []
 
 
 def _prefilter_decision_log(decisions: list[Decision], assessment, rule, assessor_id: str) -> DecisionLog:
@@ -1356,7 +1375,8 @@ def _prefilter_one_chunk(
     calls_record = DecisionCallRecord(
         stage="prefilter",
         chunk_index=cr.chunk_index,
-        request=_prefilter_request(context, cases, assessment),
+        requests=_prefilter_requests(context, cases, assessment),
+        responses=_prefilter_responses(assessment),
         decision=_prefilter_decision_log(decisions, assessment, prefilter.rule, prefilter.assessor.assessor_id),
     )
     drops = [
@@ -1431,14 +1451,21 @@ def _assessor_endpoint_host(assessor) -> str | None:
 
 
 def _prefilter_metadata(prefilter: GroundingPrefilter) -> dict:
-    """The metadata.prefilter block recorded when the filter is on."""
+    """The metadata.prefilter block recorded when the filter is on.
+
+    An in-process assessor (``in_process = True``) reports no endpoint
+    host at all: it has no URL, and a configured placeholder must not
+    surface as a hostname that suggests one. An HTTP assessor keeps its
+    host whether the endpoint is local or offsite.
+    """
     assessor = prefilter.assessor
     rule = prefilter.rule
+    in_process = bool(getattr(assessor, "in_process", False))
     return {
         "assessor_id": getattr(assessor, "assessor_id", ""),
         "rule_id": getattr(rule, "rule_id", ""),
         "threshold": getattr(rule, "threshold", None),
-        "endpoint_host": _assessor_endpoint_host(assessor),
+        "endpoint_host": None if in_process else _assessor_endpoint_host(assessor),
         "sends_offsite": bool(getattr(assessor, "sends_offsite", False)),
         "fields_sent": _prefilter_fields_sent(assessor),
     }

@@ -5,7 +5,7 @@ The filter adds three optional fields to ``FilteredCandidate`` —
 prefilter dropped the candidate; grounding rejections leave all three
 ``None``. ``ExtractionResult`` gains ``decision_calls``, a list of
 ``DecisionCallRecord`` objects holding the stage, chunk index, decision
-log and exact request for each prefilter call, and ``RetrievalStats``
+log and exact requests for each prefilter call, and ``RetrievalStats``
 gains ``prefilter_dropped``, the count of candidates the filter removed
 (``grounding_filtered`` counts only grounding's own rejections). With
 the filter off, none of the new fields may appear in serialized output,
@@ -68,7 +68,7 @@ def _call_record(**overrides) -> DecisionCallRecord:
     fields = dict(
         stage="prefilter",
         chunk_index=2,
-        request={"context": "policy text", "items": [{"id": "R-001", "text": "Model Bias: errors"}]},
+        requests=[{"context": "policy text", "items": [{"id": "R-001", "text": "Model Bias: errors"}]}],
         decision=_decision_log(),
     )
     fields.update(overrides)
@@ -252,14 +252,14 @@ def test_decision_call_record_holds_stage_chunk_request_and_log():
     record = _call_record()
     assert record.stage == "prefilter"
     assert record.chunk_index == 2
-    assert record.request["items"][0]["id"] == "R-001"
+    assert record.requests[0]["items"][0]["id"] == "R-001"
     assert record.decision.rule_id == "drop-threshold/1"
 
 
 def test_decision_call_record_request_needs_no_credentials():
     """The request is plain data: any dict serializes without a key field."""
     record = _call_record()
-    dumped = json.dumps(record.model_dump()["request"])
+    dumped = json.dumps(record.model_dump()["requests"])
     assert "authorization" not in dumped.lower()
     assert "api_key" not in dumped.lower()
 
@@ -273,10 +273,10 @@ def test_decision_call_record_roundtrip():
 def test_decision_call_record_requires_stage_and_request():
     """Stage, chunk_index and request are required; the log may be absent."""
     with pytest.raises(ValidationError):
-        DecisionCallRecord(chunk_index=0, request={})
+        DecisionCallRecord(chunk_index=0, requests=[])
     with pytest.raises(ValidationError):
         DecisionCallRecord(stage="prefilter", chunk_index=0)
-    bare = DecisionCallRecord(stage="prefilter", chunk_index=0, request={"items": []})
+    bare = DecisionCallRecord(stage="prefilter", chunk_index=0, requests=[{"items": []}])
     assert bare.decision is None
 
 
@@ -311,7 +311,7 @@ def test_extraction_result_decision_calls_roundtrip():
 def test_decision_call_record_accepts_all_stages():
     """The stage field is a plain string, not a closed literal list."""
     for stage in ("prefilter", "judge"):
-        record = DecisionCallRecord(stage=stage, chunk_index=0, request={})
+        record = DecisionCallRecord(stage=stage, chunk_index=0, requests=[])
         assert record.stage == stage
 
 
