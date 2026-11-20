@@ -309,17 +309,17 @@ def test_prefilter_records_exchange_requests_when_assessor_batches(mock_config, 
     )
 
     assert len(result.decision_calls) >= 1
-    request = result.decision_calls[0].request
+    requests = result.decision_calls[0].requests
     # The exchange-reported requests land in the record as a list of bodies,
     # one per batch, with their boundaries preserved: every body carries
     # exactly its own case's id, in order, against the same context.
-    assert isinstance(request, list)
-    assert len(request) == len(MOCK_RISKS)
-    assert [body["items"][0]["id"] for body in request] == [r.id for r in MOCK_RISKS]
-    assert all(body["context"] == request[0]["context"] for body in request)
-    # A list-valued request round-trips through the record's serialized form.
+    assert isinstance(requests, list)
+    assert len(requests) == len(MOCK_RISKS)
+    assert [body["items"][0]["id"] for body in requests] == [r.id for r in MOCK_RISKS]
+    assert all(body["context"] == requests[0]["context"] for body in requests)
+    # A list-valued requests round-trips through the record's serialized form.
     restored = DecisionCallRecord(**result.decision_calls[0].model_dump())
-    assert restored.request == request
+    assert restored.requests == requests
 
 
 def _run_extraction_with_assessor(assessor, mock_config, tmp_path, monkeypatch, rule=None):
@@ -493,9 +493,10 @@ def test_prefilter_request_and_responses_tolerate_a_missing_wire_attribute(mock_
 
     assert len(result.decision_calls) >= 1
     # The fallback request shape: the seam's {context, items} body.
-    request = result.decision_calls[0].request
-    assert isinstance(request, dict)
-    assert "context" in request and "items" in request
+    requests = result.decision_calls[0].requests
+    assert isinstance(requests, list) and len(requests) == 1
+    body = requests[0]
+    assert "context" in body and "items" in body
     # And no responses recorded.
     dumped = result.decision_calls[0].model_dump()
     assert "responses" not in dumped
@@ -542,11 +543,11 @@ def test_prefilter_generic_serialization_success(mock_config, tmp_path, monkeypa
 
     assert len(result.decision_calls) >= 1
     call = result.decision_calls[0]
-    request = call.request
-    assert isinstance(request, list) and len(request) >= 1
-    assert request[0]["items"][0]["id"] == "R-001"
+    requests = call.requests
+    assert isinstance(requests, list) and len(requests) >= 1
+    assert requests[0]["items"][0]["id"] == "R-001"
     responses = call.responses
-    assert isinstance(responses, list) and len(responses) == len(request)
+    assert isinstance(responses, list) and len(responses) == len(requests)
     assert responses[0]["scores"][0]["id"] == "R-001"
     assert responses[0]["scores"][0]["p"] == 0.5
     # The serialized result carries the responses and no credential.
@@ -1501,11 +1502,12 @@ def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, mo
     call = result.decision_calls[0]
     assert call.stage == "prefilter"
     assert call.chunk_index == 0
-    assert isinstance(call.request, dict)
-    assert set(call.request) == {"context", "items", "synthesized"}
-    assert call.request["synthesized"] is True
-    assert [i["id"] for i in call.request["items"]] == [r.id for r in MOCK_RISKS]
-    assert call.request["items"][0]["text"] == f"{MOCK_RISKS[0].name}: {MOCK_RISKS[0].description}"
+    assert isinstance(call.requests, list) and len(call.requests) == 1
+    body = call.requests[0]
+    assert set(body) == {"context", "items", "synthesized"}
+    assert body["synthesized"] is True
+    assert [i["id"] for i in body["items"]] == [r.id for r in MOCK_RISKS]
+    assert body["items"][0]["text"] == f"{MOCK_RISKS[0].name}: {MOCK_RISKS[0].description}"
     # The decision log identifies the task, prompt, assessor and rule.
     log = call.decision
     assert log.question_id == "grounding-likelihood"
@@ -2325,7 +2327,7 @@ def test_prefilter_one_chunk_copy_keeps_page_and_section():
     assert [fc.risk_id for fc in drops] == ["R-001"]
     assert drops[0].chunk_index == 4
     assert call.chunk_index == 4
-    assert call.request["context"] == "ctx"
+    assert call.requests[0]["context"] == "ctx"
 
 
 def test_prefilter_stage_context_fallback_for_mismatched_lengths():
@@ -2746,5 +2748,5 @@ def test_prefilter_real_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
     assert "sentinel-secret-key" not in serialized
     # The record holds the request the assessor actually sent.
     record = result.decision_calls[0]
-    assert isinstance(record.request, list)
-    assert record.request[0]["items"][0]["id"] == "R-001"
+    assert isinstance(record.requests, list)
+    assert record.requests[0]["items"][0]["id"] == "R-001"

@@ -1234,8 +1234,8 @@ def _prefilter_cases(cr: ChunkResult, index) -> list[DecisionCase]:
     ]
 
 
-def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> dict | list:
-    """The request the prefilter sent; no credentials.
+def _prefilter_requests(context: str, cases: list[DecisionCase], assessment) -> list:
+    """The request bodies the prefilter sent, one per batch; no credentials.
 
     Assessors that batch (the HTTP probability assessor splits at
     ``max_batch``) record every request body they actually sent, with the
@@ -1249,11 +1249,13 @@ def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> d
     exchange = getattr(assessment, "exchange", None)
     if isinstance(exchange, dict) and isinstance(exchange.get("requests"), list):
         return list(exchange["requests"])
-    return {
-        "context": context,
-        "items": [{"id": c.risk_id, "text": f"{c.name}: {c.description}"} for c in cases],
-        "synthesized": True,
-    }
+    return [
+        {
+            "context": context,
+            "items": [{"id": c.risk_id, "text": f"{c.name}: {c.description}"} for c in cases],
+            "synthesized": True,
+        }
+    ]
 
 
 def _prefilter_responses(assessment) -> list:
@@ -1373,7 +1375,7 @@ def _prefilter_one_chunk(
     calls_record = DecisionCallRecord(
         stage="prefilter",
         chunk_index=cr.chunk_index,
-        request=_prefilter_request(context, cases, assessment),
+        requests=_prefilter_requests(context, cases, assessment),
         responses=_prefilter_responses(assessment),
         decision=_prefilter_decision_log(decisions, assessment, prefilter.rule, prefilter.assessor.assessor_id),
     )
