@@ -85,8 +85,9 @@ def _unattributed_match(risk_id, confidence, text="Unattributed evidence text.")
         risk_name=f"Risk {risk_id}",
         risk_description=f"Description of {risk_id}.",
         confidence=confidence,
+        confidence_source="cross_encoder" if confidence is not None else "none",
         grounding_confidence="high",
-        accepted_by="expansion",
+        accepted_by="threshold",
         evidence=[
             EvidenceSpan(
                 text=text,
@@ -144,6 +145,7 @@ def test_merge_empty_evidence_ranks_behind_unattributed():
         risk_name="Risk R-001",
         risk_description="Description of R-001.",
         confidence=0.8,
+        confidence_source="cross_encoder",
         grounding_confidence="none",
         accepted_by="threshold",
         evidence=[],

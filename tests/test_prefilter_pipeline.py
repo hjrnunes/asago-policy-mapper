@@ -2130,6 +2130,7 @@ def test_prefilter_assessor_exception_keeps_everything(mock_config, tmp_path, mo
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates}
@@ -2298,6 +2299,7 @@ def test_prefilter_real_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
         section=None,
         call_collector=None,
         max_batch_size=0,
+        source_windows=None,
     ):
         grounded_ids.extend(c.risk_id for c in candidates)
         return {c.risk_id: ([], "medium") for c in candidates}

@@ -664,6 +664,7 @@ def _candidate(risk_id="R-001"):
         cross_encoder_score=0.8,
         rrf_score=0.5,
         rerank_source="cross_encoder",
+        accepted_by="rank",
     )
 
 
@@ -1496,6 +1497,7 @@ def test_ground_variants_one_passes_windows(mock_config):
         risk_description="Parent description",
         taxonomy="tax",
         confidence=0.9,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[
@@ -1531,7 +1533,8 @@ def _match_with_unattributed_evidence():
         risk_name="Bias",
         risk_description="Bias risk.",
         taxonomy="tax",
-        confidence=0.9,
+        confidence=None,
+        confidence_source="none",
         grounding_confidence="high",
         accepted_by="expansion",
         evidence=[
@@ -1548,8 +1551,9 @@ def test_consumers_skip_unattributed_spans():
     from asago_policy_mapper.extract.pipeline import _build_chunk_risk_map, _build_found_risk_chunks
 
     m = _match_with_unattributed_evidence()
+    plan = _judge_plan()  # grounding on: attribute risks through evidence chunks
 
-    chunk_risk_ids = _build_chunk_risk_map([], [m], no_grounding=False)
+    chunk_risk_ids = _build_chunk_risk_map([], [m], plan)
     assert chunk_risk_ids == {2: ["R-001"]}
 
     found = _build_found_risk_chunks([m], [])
@@ -1577,7 +1581,8 @@ def test_ground_variants_one_skips_unattributed_evidence():
         risk_name="Parent",
         risk_description="Parent description",
         taxonomy="tax",
-        confidence=0.9,
+        confidence=None,
+        confidence_source="none",
         grounding_confidence="high",
         accepted_by="expansion",
         evidence=[
@@ -1629,7 +1634,8 @@ def test_ground_variants_one_all_unattributed_returns_empty():
         risk_name="Parent",
         risk_description="Parent description",
         taxonomy="tax",
-        confidence=0.9,
+        confidence=None,
+        confidence_source="none",
         grounding_confidence="high",
         accepted_by="expansion",
         evidence=[EvidenceSpan(text="unattributed.", document="docA.md", chunk_index=None, verification="not_found")],
