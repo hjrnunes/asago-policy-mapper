@@ -38,8 +38,6 @@ from asago_policy_mapper.extract.screening import (
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 """Hosts that count as on this machine for the ``sends_offsite`` flag."""
 
-_PATH = "/assess"
-
 _NoAnswerReason = Literal["missing", "invalid", "timeout", "error"]
 
 _REDACTED = "[redacted]"
@@ -98,6 +96,9 @@ class HttpProbabilityAssessor:
 
     answer_types = frozenset({ProbabilityAnswer})
 
+    _PATH = "/assess"
+    """The path requests go to; provider mappings override this."""
+
     def __init__(self, endpoint: ProbabilityEndpoint, transport=None):
         import httpx
 
@@ -133,7 +134,7 @@ class HttpProbabilityAssessor:
             client = self._open_client()
             for batch in self._batches(cases):
                 t0 = time.perf_counter()
-                exchange, batch_answers, batch_unmatched = self._assess_batch(context, batch, client)
+                exchange, batch_answers, batch_unmatched = self._assess_batch(question, context, batch, client)
                 latency_ms += (time.perf_counter() - t0) * 1000
                 exchanges.append(exchange)
                 unmatched.extend(batch_unmatched)
@@ -172,16 +173,26 @@ class HttpProbabilityAssessor:
             headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
-    def _assess_batch(
-        self, context: str, cases: Sequence[DecisionCase], client
-    ) -> tuple[dict, dict[str, Answer], list[str]]:
-        request_body = {
+    def _request_body(self, question: Question, context: str, cases: Sequence[DecisionCase]) -> dict:
+        """Build the request body for one batch; provider mappings override this hook.
+
+        The generic shape is ``{"context": str, "items": [{"id", "text"}]}``.
+        The ``question`` rides along for mappings whose wire carries the
+        question being asked; the generic endpoint is configured with the
+        question it scores, so it ignores the parameter.
+        """
+        return {
             "context": context,
             "items": [{"id": c.risk_id, "text": f"{c.name}: {c.description}"} for c in cases],
         }
+
+    def _assess_batch(
+        self, question: Question, context: str, cases: Sequence[DecisionCase], client
+    ) -> tuple[dict, dict[str, Answer], list[str]]:
+        request_body = self._request_body(question, context, cases)
         httpx = self._httpx
         try:
-            response = client.post(_PATH, headers=self._headers(), json=request_body)
+            response = client.post(self._PATH, headers=self._headers(), json=request_body)
         except httpx.TimeoutException:
             return self._exchange(request_body, None), self._mark_all(cases, "timeout"), []
         except (KeyboardInterrupt, SystemExit):
