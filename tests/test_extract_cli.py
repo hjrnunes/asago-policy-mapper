@@ -10,6 +10,8 @@ from ai_atlas_nexus.ai_risk_ontology.datamodel.ai_risk_ontology import Risk
 from typer.testing import CliRunner
 
 from asago_policy_mapper.cli import app
+from asago_policy_mapper.extract.models import RetrievalConfig
+from asago_policy_mapper.extract.plan import resolve_plan
 
 runner = CliRunner()
 
@@ -393,13 +395,33 @@ def _validate_kwargs(tmp_path, **overrides):
         policy_files=[policy],
         base_url="http://localhost:8000/v1",
         model="test-model",
-        no_judge=False,
-        no_grounding=False,
-        expand_siblings=True,
-        query_gen=False,
+        retrieval=RetrievalConfig(query_gen=False),
+        prefilter=False,
+        explicit=frozenset(),
     )
     kwargs.update(overrides)
     return kwargs
+
+
+def test_validate_extract_options_prefilter_defaults_to_off(tmp_path):
+    """The prefilter argument defaults to off.
+
+    A caller that omits ``prefilter`` describes a plain run: with the
+    default flipped, every such call would resolve a prefilter plan
+    (and a no-grounding run would be refused outright).
+    """
+    from asago_policy_mapper.cli import _validate_extract_options
+
+    base = _validate_kwargs(
+        tmp_path,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True, no_grounding=True, expand_siblings=False),
+        base_url=None,
+        model=None,
+    )
+    base.pop("prefilter")
+    plan = _validate_extract_options(**base)
+    assert plan.prefilter is False
+    assert plan.needs_llm is False
 
 
 def test_validate_extract_options_rejects_bad_output_format(tmp_path):
@@ -430,27 +452,31 @@ def test_validate_extract_options_requires_llm_endpoint_when_needed(tmp_path):
 def test_validate_extract_options_allows_missing_endpoint_for_ir_only(tmp_path):
     from asago_policy_mapper.cli import _validate_extract_options
 
-    # Pure IR run: no endpoint needed, needs_llm is False.
-    assert (
-        _validate_extract_options(
-            **_validate_kwargs(
-                tmp_path, base_url=None, model=None, no_judge=True, no_grounding=True, expand_siblings=False
-            )
+    # Pure IR run: no endpoint needed, the plan resolves with no LLM stages.
+    # The default cross-encoder setting is exercised (the judge stays
+    # reachable, but no-grounding plans it out anyway).
+    plan = _validate_extract_options(
+        **_validate_kwargs(
+            tmp_path,
+            base_url=None,
+            model=None,
+            retrieval=RetrievalConfig(query_gen=False, no_judge=True, no_grounding=True, expand_siblings=False),
         )
-        is False
     )
+    assert plan.needs_llm is False
 
 
 def test_validate_extract_options_query_gen_forces_llm(tmp_path):
     from asago_policy_mapper.cli import _validate_extract_options
 
     # The options alone would make an IR-only run; query generation forces an LLM.
-    assert (
-        _validate_extract_options(
-            **_validate_kwargs(tmp_path, query_gen=True, no_judge=True, no_grounding=True, expand_siblings=False)
+    plan = _validate_extract_options(
+        **_validate_kwargs(
+            tmp_path,
+            retrieval=RetrievalConfig(query_gen=True, no_judge=True, no_grounding=True, expand_siblings=False),
         )
-        is True
     )
+    assert plan.needs_llm is True
 
 
 def test_validate_extract_options_ignores_nexus_base_dir(tmp_path):
@@ -458,26 +484,49 @@ def test_validate_extract_options_ignores_nexus_base_dir(tmp_path):
     from asago_policy_mapper.cli import _validate_extract_options
 
     # No nexus_base_dir parameter at all: validation passes for a valid run.
-    assert _validate_extract_options(**_validate_kwargs(tmp_path)) is True
+    assert _validate_extract_options(**_validate_kwargs(tmp_path)).needs_llm is True
 
 
-def test_validate_extract_options_expand_siblings_forces_llm(tmp_path):
+def test_validate_extract_options_expand_siblings_resolved_away_without_grounding(tmp_path):
     from asago_policy_mapper.cli import _validate_extract_options
 
-    # Judge and grounding off, but sibling expansion needs the LLM: the flag
-    # combination needs an endpoint, so a missing one is fatal.
+    # Judge and grounding off, so the plan resolves expansion away (it
+    # grounds its proposals): the run needs no LLM even with an endpoint.
+    plan = _validate_extract_options(
+        **_validate_kwargs(
+            tmp_path,
+            base_url=None,
+            model=None,
+            retrieval=RetrievalConfig(query_gen=False, no_judge=True, no_grounding=True, expand_siblings=True),
+        )
+    )
+    assert plan.needs_llm is False
+
+
+def test_validate_extract_options_expand_siblings_requires_endpoint_with_grounding(tmp_path):
+    from asago_policy_mapper.cli import _validate_extract_options
+
+    # With grounding on, expansion needs the LLM: a missing endpoint is fatal.
     with pytest.raises(typer.Exit) as excinfo:
         _validate_extract_options(
             **_validate_kwargs(
-                tmp_path, no_judge=True, no_grounding=True, expand_siblings=True, base_url=None, model=None
+                tmp_path,
+                base_url=None,
+                model=None,
+                retrieval=RetrievalConfig(query_gen=False, expand_siblings=True),
             )
         )
     assert excinfo.value.exit_code == 1
+
+
+def test_validate_extract_options_expand_siblings_run_passes_with_endpoint(tmp_path):
+    from asago_policy_mapper.cli import _validate_extract_options
+
     # With the endpoint present the same combination passes and reports the need.
-    assert (
-        _validate_extract_options(**_validate_kwargs(tmp_path, no_judge=True, no_grounding=True, expand_siblings=True))
-        is True
+    plan = _validate_extract_options(
+        **_validate_kwargs(tmp_path, retrieval=RetrievalConfig(query_gen=False, expand_siblings=True))
     )
+    assert plan.needs_llm is True
 
 
 def test_validate_extract_options_valid_formats_accepted(tmp_path):
@@ -485,20 +534,44 @@ def test_validate_extract_options_valid_formats_accepted(tmp_path):
 
     # All three formats pass validation (with an LLM endpoint present).
     for fmt in ("json", "yaml", "both"):
-        assert _validate_extract_options(**_validate_kwargs(tmp_path, output_format=fmt)) is True
+        assert _validate_extract_options(**_validate_kwargs(tmp_path, output_format=fmt)).needs_llm is True
 
 
 def test_run_needs_llm_matrix():
-    from asago_policy_mapper.cli import _run_needs_llm
+    from asago_policy_mapper.extract.plan import resolve_plan
 
-    # Pure IR run: the only combination with no LLM.
-    assert _run_needs_llm(no_judge=True, no_grounding=True, expand_siblings=False, query_gen=False) is False
-    # Judge or grounding or expansion each force an LLM.
-    assert _run_needs_llm(no_judge=False, no_grounding=True, expand_siblings=False, query_gen=False) is True
-    assert _run_needs_llm(no_judge=True, no_grounding=False, expand_siblings=False, query_gen=False) is True
-    assert _run_needs_llm(no_judge=True, no_grounding=True, expand_siblings=True, query_gen=False) is True
+    # The plan's needs_llm replaces the old _run_needs_llm truth table.
+    # Without grounding, expansion cannot run (it grounds its proposals),
+    # so the plan counts it out of the LLM stages: the pure IR run is any
+    # no-grounding run with query generation off, regardless of expansion.
+    def _needs_llm(no_judge, no_grounding, expand_siblings, query_gen):
+        retrieval = RetrievalConfig(
+            query_gen=query_gen,
+            no_judge=no_judge,
+            no_grounding=no_grounding,
+            expand_siblings=expand_siblings,
+        )
+        return resolve_plan(retrieval, prefilter=False, explicit=frozenset()).needs_llm
+
+    # Pure IR run: no grounding and no query generation need no LLM.
+    assert _needs_llm(no_judge=True, no_grounding=True, expand_siblings=False, query_gen=False) is False
+    assert _needs_llm(no_judge=True, no_grounding=True, expand_siblings=True, query_gen=False) is False
+    # Judge or grounding each force an LLM.
+    assert _needs_llm(no_judge=False, no_grounding=True, expand_siblings=False, query_gen=False) is True
+    assert _needs_llm(no_judge=True, no_grounding=False, expand_siblings=False, query_gen=False) is True
     # Query generation forces an LLM even on an otherwise pure IR run.
-    assert _run_needs_llm(no_judge=True, no_grounding=True, expand_siblings=False, query_gen=True) is True
+    assert _needs_llm(no_judge=True, no_grounding=True, expand_siblings=False, query_gen=True) is True
+
+
+def test_expand_siblings_needs_llm_with_grounding(tmp_path):
+    """Expansion needs the LLM only while grounding is on (it grounds its proposals)."""
+    from asago_policy_mapper.extract.plan import resolve_plan
+
+    grounded = resolve_plan(
+        RetrievalConfig(query_gen=False, expand_siblings=True), prefilter=False, explicit=frozenset()
+    )
+    assert grounded.expansion is True
+    assert "expansion" in grounded.llm_stages
 
 
 def test_setup_llm_free_run_ignores_malformed_sdk_env(monkeypatch):
@@ -656,17 +729,32 @@ class _RecordingTracker:
     calls = 3
 
 
+def _summary_plan(no_judge, no_grounding, no_cross_encoder, colbert_model=None):
+    retrieval = RetrievalConfig(
+        query_gen=False,
+        no_judge=no_judge,
+        no_grounding=no_grounding,
+        use_cross_encoder=not no_cross_encoder,
+        colbert_model=colbert_model,
+    )
+    return resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+
+
 @pytest.mark.parametrize(
-    "no_judge,no_grounding,no_cross_encoder,expected_summary",
+    "no_judge,no_grounding,no_cross_encoder,colbert_model,expected_summary",
     [
-        (True, True, False, "  3 auto-accepted (IR-only, no LLM stages)"),
-        (False, True, False, "  3 auto-accepted, 1 LLM-judged (no grounding)"),
-        (False, False, True, "  3 RRF-accepted, 2 grounding-filtered (no cross-encoder)"),
-        (False, False, False, "  3 auto-accepted, 1 LLM-judged, 2 grounding-filtered"),
+        (True, True, False, None, "  3 auto-accepted (IR-only, no LLM stages)"),
+        (False, True, False, None, "  3 auto-accepted, 1 LLM-judged (no grounding)"),
+        (False, False, True, None, "  3 auto-accepted, 2 grounding-filtered (no cross-encoder)"),
+        (False, False, False, None, "  3 auto-accepted, 1 LLM-judged, 2 grounding-filtered"),
+        # ColBERT replaces the cross-encoder, so the rerank label is
+        # "colbert", not "none": the branch must key on the judge mode,
+        # not the reranker, to land on the no-judge line.
+        (False, False, True, "colbert-ir", "  3 auto-accepted, 2 grounding-filtered (no cross-encoder)"),
     ],
 )
 def test_write_extraction_outputs_summary_lines(
-    tmp_path, capsys, no_judge, no_grounding, no_cross_encoder, expected_summary
+    tmp_path, capsys, no_judge, no_grounding, no_cross_encoder, colbert_model, expected_summary
 ):
     from asago_policy_mapper.cli import _write_extraction_outputs
 
@@ -678,11 +766,8 @@ def test_write_extraction_outputs_summary_lines(
         result_data,
         tmp_path,
         output_format="json",
-        needs_llm=False,
+        plan=_summary_plan(no_judge, no_grounding, no_cross_encoder, colbert_model),
         tracker=_RecordingTracker(),
-        no_judge=no_judge,
-        no_grounding=no_grounding,
-        no_cross_encoder=no_cross_encoder,
     )
 
     written = json.loads((tmp_path / "risk-extraction.json").read_text())
@@ -702,11 +787,8 @@ def test_write_extraction_outputs_yaml_format(tmp_path):
         result_data,
         tmp_path,
         output_format="yaml",
-        needs_llm=False,
+        plan=_summary_plan(True, True, False),
         tracker=_RecordingTracker(),
-        no_judge=True,
-        no_grounding=True,
-        no_cross_encoder=False,
     )
 
     assert (tmp_path / "risk-extraction.yaml").exists()
@@ -725,11 +807,8 @@ def test_write_extraction_outputs_both_formats(tmp_path):
         result_data,
         tmp_path,
         output_format="both",
-        needs_llm=False,
+        plan=_summary_plan(True, True, False),
         tracker=_RecordingTracker(),
-        no_judge=True,
-        no_grounding=True,
-        no_cross_encoder=False,
     )
 
     assert json.loads((tmp_path / "risk-extraction.json").read_text()) == result_data
@@ -747,11 +826,8 @@ def test_write_extraction_outputs_token_usage_only_when_llm_needed(tmp_path, cap
         result_data,
         tmp_path,
         output_format="json",
-        needs_llm=True,
+        plan=_summary_plan(False, True, False),
         tracker=_RecordingTracker(),
-        no_judge=False,
-        no_grounding=True,
-        no_cross_encoder=False,
     )
 
     out = capsys.readouterr().out
@@ -762,11 +838,8 @@ def test_write_extraction_outputs_token_usage_only_when_llm_needed(tmp_path, cap
         result_data,
         tmp_path,
         output_format="json",
-        needs_llm=False,
+        plan=_summary_plan(True, True, False),
         tracker=_RecordingTracker(),
-        no_judge=True,
-        no_grounding=True,
-        no_cross_encoder=False,
     )
 
     out = capsys.readouterr().out

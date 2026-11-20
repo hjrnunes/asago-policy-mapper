@@ -146,7 +146,7 @@ class _VariantIndex:
 
     risks = []
 
-    def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+    def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
         return [
             ScoredCandidate(
                 risk_id="unauthorized-processing",
@@ -306,7 +306,7 @@ def test_prefilter_reentry_zero_when_nothing_reproposed(mock_config, tmp_path, m
         variant_map = {}
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
                 for r in plain_risks
@@ -374,7 +374,7 @@ def test_prefilter_reentry_parents_zero_when_expansion_empty(mock_config, tmp_pa
         }
         risks = []
 
-        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
             return [
                 ScoredCandidate(
                     risk_id="unauthorized-processing",

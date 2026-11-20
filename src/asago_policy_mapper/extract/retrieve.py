@@ -110,6 +110,7 @@ def _join_context(chunks: list[Chunk], ordered: list[int]) -> str:
 def build_chunk_contexts(
     chunks: list[Chunk],
     max_context_tokens: int = 1024,
+    only: set[int] | None = None,
 ) -> list[str]:
     """Build enriched context text for each chunk by expanding to neighbors.
 
@@ -118,9 +119,15 @@ def build_chunk_contexts(
     section headings at section transitions between included chunks.
 
     Returns a list parallel to chunks — one context string per chunk.
+    ``only`` builds contexts for those chunk indexes alone (the others get
+    empty strings); neighbors still resolve against the full chunk list,
+    so a subset's contexts match the full build's for the same indexes.
     """
     contexts: list[str] = []
     for i, chunk in enumerate(chunks):
+        if only is not None and i not in only:
+            contexts.append("")
+            continue
         core_tokens = len(chunk.text.split())
         budget = max_context_tokens - core_tokens
 
@@ -416,6 +423,7 @@ def retrieve_chunk(
         top_k=top_k,
         bm25_rescue_rank=bm25_rescue_rank,
         rrf_min_score=rrf_min_score,
+        rerank=use_cross_encoder,
     )
 
     if not use_cross_encoder:

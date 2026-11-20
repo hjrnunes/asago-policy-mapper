@@ -29,6 +29,7 @@ class EmbeddingRetriever(dspy.Module):
                 text,
                 top_k=self._top_k,
                 rrf_min_score=self._rrf_min_score,
+                rerank=False,
             )
             for c in candidates:
                 retrieved_ids.add(c.risk_id)
