@@ -1288,4 +1288,79 @@ single live-run comparisons on this endpoint cannot separate a small
 determinism gain from noise.
 
 
+---
 
+## 2026-11-16: Score Sources and Truthful accepted_by Labels — Battery on gemma4
+
+**Description:** Measured the effect of score-source and label semantics
+(issue #150 part 2) on the full 27-policy `risk-selected` battery. The change
+makes every score say where it came from: `RiskMatch.confidence` becomes
+nullable with a `confidence_source` label (cross_encoder/colbert/rrf/none),
+never-calculated scores report null instead of 0.0, `accepted_by` records the
+label at selection time (rank/threshold/rrf/query_gen/llm_judge/
+auto_promoted/expansion), variant matches mark `scores_inherited_from`, and
+the result version bumps to 0.4. One run on the internal gemma serving
+endpoint at temperature 0, compared against the two deterministic-merge
+reference runs (#150 part 1) on the same endpoint and battery.
+
+**MLflow:** disabled (`--no-mlflow`; no server configured for this run).
+
+**Runs:** score-source run `extract-runs/risk-selected_20261116_011615`;
+deterministic-merge references `risk-selected_20261115_151106` (run 1) and
+`risk-selected_20261115_155449` (run 2).
+
+**Macro F1:** reference run 1 0.657, reference run 2 0.679, score-source
+0.673 — inside the same-code band of the endpoint.
+
+**Per-policy |ΔF1|:** mean 0.029 vs run 1, 0.025 vs run 2; two policies
+exceed the 0.08 per-policy figure against one reference run each
+(cisco-supplier 0.089 vs run 1, st-johns 0.083 vs run 1) while sitting at
+0.041 and 0.025 against the other run — the same non-reproducible-excursion
+pattern the deterministic-merge entry documented for camden-borough-work
+(0.090) on this endpoint.
+
+**Kept-risk set (matched ids):** 86.6% overlap with reference run 1, 86.3%
+with run 2, versus the run1↔run2 same-code floor of 84.5% — the kept-risk set
+is unchanged within noise.
+
+**Output semantics spot-check (ars, first policy):** version 0.4;
+`accepted_by` {query_gen: 31, expansion: 6}; `confidence_source` {none: 37};
+37/37 confidences null, 0 measured-as-0.0 — no `confidence: 0.0` for
+never-calculated scores and no `threshold` label where no threshold ran,
+which is the issue's acceptance condition.
+
+**Conclusion:** The schema and label change costs no extraction quality;
+every metric sits inside the endpoint's same-code noise band.
+
+## 2026-11-19: Review round 1 — snapshot harness run after the score-source fix
+
+**Description:** Re-ran the deterministic snapshot harness (faked models,
+ten scenario configurations) after the review fixes to the score-source
+change: BM25-rescued candidates now keep their measured cross-encoder score
+and `rerank_source` stamp, unstamped candidates raise instead of falling
+back to a `threshold` label, and `accepted_by` is a typed label. The
+harness's fake retrieval previously returned candidates without a selection
+label, which the fallback masked; the fake now stamps the label the same
+way real retrieval does, so rank-mode scenarios report `rank` instead of
+the fallback's `threshold`.
+
+**MLflow:** disabled (harness runs offline with faked models).
+
+**Runs:** review-round snapshot; pre-change baselines under the same
+harness.
+
+**Calls:** identical call sequences in all ten scenarios — the fixes do
+not change what the pipeline calls.
+
+**Serialized state:** versus the pre-change baseline, every scenario adds
+`confidence_source` and `scores_inherited_from`, bumps `version` 0.3→0.4,
+reports never-calculated `cross_encoder_score` and `confidence` as null
+instead of 0.0, keeps numeric confidence with `confidence_source: "rrf"`
+in RRF-only scenarios, and reports `accepted_by: "rank"` on cross-encoder
+scenarios where the fallback previously mislabeled them `threshold`.
+Rescued candidates in the harness carry no `rerank_source` stamp because
+the harness fakes retrieval entirely; the measured-score stamping is
+covered by unit tests instead.
+
+**Conclusion:** The review fixes change serialized state only in the
+intended places; the call sequence is unchanged.

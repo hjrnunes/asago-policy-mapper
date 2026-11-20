@@ -865,6 +865,7 @@ def _make_risk_match(risk_id="atlas-bias", chunk_indices=None):
         risk_description="Systematic bias in AI outputs.",
         taxonomy="ibm-risk-atlas",
         confidence=0.85,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[

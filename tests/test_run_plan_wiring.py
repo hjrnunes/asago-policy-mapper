@@ -629,9 +629,9 @@ def test_hybrid_search_explicit_rerank_overrides_floor(monkeypatch, tmp_path):
     candidates = [ScoredCandidate(risk_id="R-001", risk_name="n", risk_description="d", rrf_score=0.03)]
 
     def fake_rerank(text, rrf_candidates, top_k=50):
-        return [c.model_copy(update={"cross_encoder_score": 0.5}) for c in rrf_candidates]
+        return [c.model_copy(update={"cross_encoder_score": 0.5}) for c in rrf_candidates], {"R-001": 0.5}
 
-    monkeypatch.setattr(index, "rerank", fake_rerank)
+    monkeypatch.setattr(index, "_rerank_with_scores", fake_rerank)
     monkeypatch.setattr("asago_policy_mapper.extract.index.RiskIndex.search_bm25", lambda self, text, top_k=100: [])
     monkeypatch.setattr(
         "asago_policy_mapper.extract.index.RiskIndex.search_semantic", lambda self, text, top_k=100: candidates

@@ -359,8 +359,9 @@ def test_causal_synthesis_real_llm(llm_client, llm_config):
         risk_name="Algorithmic Bias",
         risk_description="Systematic errors in AI outputs that favor or disadvantage certain groups",
         confidence=0.9,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
-        accepted_by="grounding",
+        accepted_by="threshold",
         evidence=[
             EvidenceSpan(
                 text="must evaluate and mitigate risks of algorithmic bias",

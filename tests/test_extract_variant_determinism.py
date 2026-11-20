@@ -45,6 +45,7 @@ def _parent_match(spans):
         risk_description="Processing of personal data without legal basis or consent.",
         taxonomy="ai-risk-taxonomy",
         confidence=0.85,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=list(spans),

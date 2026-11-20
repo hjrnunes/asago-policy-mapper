@@ -77,6 +77,7 @@ def _make_parent_match(chunk_index=0):
         risk_description=PARENT_DESC,
         taxonomy="ai-risk-taxonomy",
         confidence=0.85,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[
@@ -103,6 +104,7 @@ def _make_non_parent_match():
         risk_description="Systematic bias in AI outputs.",
         taxonomy="ibm-risk-atlas",
         confidence=0.90,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[
@@ -504,7 +506,7 @@ class TestRunVariantGrounding:
             ]
         )
 
-        parent = _make_parent_match(chunk_index=0)
+        parent = _make_parent_match(chunk_index=0).model_copy(update={"confidence_source": "cross_encoder"})
         chunks = _make_chunks(["health records were accessed."])
 
         result = _run_variant_grounding(
@@ -526,6 +528,7 @@ class TestRunVariantGrounding:
         assert variant.scores.rrf_score == parent.scores.rrf_score
         assert variant.accepted_by == parent.accepted_by
         assert variant.grounding_confidence == "medium"
+        assert variant.scores_inherited_from == parent.risk_id
 
     def test_no_parents_returns_unchanged(self):
         """When no parent matches exist, returns input unchanged."""
@@ -634,6 +637,7 @@ def test_expansion_carries_variant_taxonomy_onto_expanded_variant_risks():
         risk_name="Model bias",
         risk_description="Systematic errors.",
         confidence=0.9,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[EvidenceSpan(text="quote", document="doc.md", chunk_index=0)],
@@ -772,7 +776,7 @@ def test_ground_expansion_group_multi_empty_passes_change_nothing():
 
 
 def test_build_expansion_matches_uses_risk_lookup_and_taxonomy():
-    """Each grounded risk becomes an expansion match with zeroed confidence."""
+    """Each grounded risk becomes an expansion match with null confidence."""
     from asago_policy_mapper.extract import pipeline
 
     grounded = {
@@ -789,7 +793,8 @@ def test_build_expansion_matches_uses_risk_lookup_and_taxonomy():
     assert m.risk_name == "Model Bias"
     assert m.risk_description == "Systematic errors."
     assert m.accepted_by == "expansion"
-    assert m.confidence == 0.0
+    assert m.confidence is None
+    assert m.confidence_source == "none"
     assert m.grounding_confidence == "high"
     assert m.taxonomy == "tax-R-001"
     assert [e.text for e in m.evidence] == ["quote"]
@@ -827,6 +832,7 @@ def test_build_found_risk_chunks_unions_candidates_and_evidence():
             risk_name="a",
             risk_description="",
             confidence=0.9,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[EvidenceSpan(text="q", document="doc.md", chunk_index=2)],
@@ -917,6 +923,7 @@ def test_run_expansion_variant_map_routes_through_variant_grounding():
         risk_name="Model bias",
         risk_description="Systematic errors.",
         confidence=0.9,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[EvidenceSpan(text="quote", document="doc.md", chunk_index=0)],
@@ -969,6 +976,7 @@ def test_run_expansion_without_candidates_returns_merged_unchanged():
         risk_name="Model bias",
         risk_description="Systematic errors.",
         confidence=0.9,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[EvidenceSpan(text="quote", document="doc.md", chunk_index=0)],

@@ -57,6 +57,11 @@ from asago_policy_mapper.llm import LLMConfig, StructuredOutputMode
 
 logger = logging.getLogger(__name__)
 
+
+class PipelineInvariantError(RuntimeError):
+    """A pipeline stage received state that earlier stages guarantee impossible."""
+
+
 _QUERY_GEN_MAX_CANDIDATES = 50
 
 _PREFILTER_FIELDS_SENT = ["chunk_context", "risk_name", "risk_description"]
@@ -186,9 +191,37 @@ def _ground_one(
 
 
 def determine_accepted_by(candidate, *, borderline_judged, use_cross_encoder, no_judge):
+    """Label how a candidate was accepted.
+
+    Judged borderline candidates take their judge label; every other
+    candidate carries the label stamped when it was selected. A candidate
+    with no stamp cannot reach here in production — retrieval and query
+    generation stamp every accepted candidate — so the missing stamp is an
+    invariant failure, not a fallback case.
+    """
     if candidate in borderline_judged:
         return "auto_promoted" if no_judge else "llm_judge"
-    return "threshold" if use_cross_encoder else "rrf"
+    if candidate.accepted_by is not None:
+        return candidate.accepted_by
+    raise PipelineInvariantError(
+        f"candidate {candidate.risk_id} reached acceptance without a selection label; "
+        "retrieval and query generation must stamp every accepted candidate"
+    )
+
+
+def _confidence_from_candidate(candidate, *, use_cross_encoder):
+    """Derive (confidence, source) from the candidate's recorded stamps.
+
+    A reranker-measured score keeps its value and names its reranker. A
+    candidate no reranker scored (rerank_source None in cross-encoder
+    mode) is "not calculated": null confidence, never 0.0. Without the
+    cross-encoder the RRF ranking score is the confidence, labelled rrf.
+    """
+    if not use_cross_encoder:
+        return candidate.rrf_score, "rrf"
+    if candidate.rerank_source is None:
+        return None, "none"
+    return candidate.cross_encoder_score, candidate.rerank_source
 
 
 def build_risk_match(
@@ -199,18 +232,13 @@ def build_risk_match(
     grounding_confidence,
     evidence,
     use_cross_encoder=True,
-    confidence_override=None,
     scores_override=None,
 ):
-    confidence = (
-        confidence_override
-        if confidence_override is not None
-        else (candidate.cross_encoder_score if use_cross_encoder else candidate.rrf_score)
-    )
+    confidence, confidence_source = _confidence_from_candidate(candidate, use_cross_encoder=use_cross_encoder)
     scores = scores_override or RetrievalScores(
         bm25_rank=candidate.bm25_rank,
         embedding_distance=candidate.embedding_distance,
-        cross_encoder_score=candidate.cross_encoder_score,
+        cross_encoder_score=candidate.cross_encoder_score if candidate.rerank_source is not None else None,
         rrf_score=candidate.rrf_score,
     )
     return RiskMatch(
@@ -219,6 +247,7 @@ def build_risk_match(
         risk_description=candidate.risk_description,
         taxonomy=taxonomy,
         confidence=confidence,
+        confidence_source=confidence_source,
         grounding_confidence=grounding_confidence,
         accepted_by=accepted_by,
         evidence=list(evidence),
@@ -390,6 +419,34 @@ def _ground_variants_one(
     return parent_match, grounded
 
 
+def _variant_stub(variant_id, variant_info, parent_match):
+    """Build the candidate a grounded variant stands in for at match time.
+
+    The parent's scores carry over: a reranker measured them for the same
+    matching work, so they still hold. A measured reranker score rides with
+    its source; an unmeasured parent leaves rerank_source unset, so its null
+    confidence stays null instead of posing as a measured 0.0.
+    """
+    stub = ScoredCandidate(
+        risk_id=variant_id,
+        risk_name=variant_info["name"],
+        risk_description=variant_info["description"],
+        bm25_rank=parent_match.scores.bm25_rank,
+        embedding_distance=parent_match.scores.embedding_distance,
+        rrf_score=parent_match.scores.rrf_score,
+    )
+    parent_source = parent_match.confidence_source
+    parent_score = parent_match.scores.cross_encoder_score
+    if parent_score is None:
+        return stub
+    return stub.model_copy(
+        update={
+            "cross_encoder_score": parent_score,
+            "rerank_source": parent_source if parent_source in ("cross_encoder", "colbert") else None,
+        }
+    )
+
+
 def _run_variant_grounding(
     grounded_matches,
     chunks,
@@ -441,15 +498,7 @@ def _run_variant_grounding(
                 )
                 if not vinfo:
                     continue
-                stub = ScoredCandidate(
-                    risk_id=vid,
-                    risk_name=vinfo["name"],
-                    risk_description=vinfo["description"],
-                    bm25_rank=parent_match.scores.bm25_rank,
-                    embedding_distance=parent_match.scores.embedding_distance,
-                    cross_encoder_score=parent_match.scores.cross_encoder_score,
-                    rrf_score=parent_match.scores.rrf_score,
-                )
+                stub = _variant_stub(vid, vinfo, parent_match)
                 variant_matches.append(
                     build_risk_match(
                         stub,
@@ -457,7 +506,11 @@ def _run_variant_grounding(
                         accepted_by=parent_match.accepted_by,
                         grounding_confidence=confidence,
                         evidence=evidence,
-                    )
+                        scores_override=parent_match.scores.model_copy(deep=True),
+                        # an RRF-mode parent inherits its ranking score as
+                        # confidence, exactly like the retrieval path
+                        use_cross_encoder=parent_match.confidence_source != "rrf",
+                    ).model_copy(update={"scores_inherited_from": parent_match.risk_id})
                 )
 
     return non_parent_matches + variant_matches
@@ -590,7 +643,11 @@ def _ground_expansion_group_multi(group, chunks, documents, client, config, call
 
 
 def _build_expansion_matches(grounded, index, risk_lookup) -> list[RiskMatch]:
-    """Convert one group's grounded risks into expansion matches."""
+    """Convert one group's grounded risks into expansion matches.
+
+    Expansion matches carry no retrieval score — nothing was measured, so
+    confidence is null with source none, never a made-up 0.0.
+    """
     matches = []
     for rid, (evidence, confidence) in grounded.items():
         info = risk_lookup.get(rid, {})
@@ -606,7 +663,6 @@ def _build_expansion_matches(grounded, index, risk_lookup) -> list[RiskMatch]:
                 accepted_by="expansion",
                 grounding_confidence=confidence,
                 evidence=evidence,
-                confidence_override=0.0,
             )
         )
     return matches
@@ -879,13 +935,16 @@ def _merge_query_candidates(chunk_results, chunks, qr, candidates):
     """Add a query's candidates to every chunk the query covers.
 
     The first occurrence of a risk id wins; later queries only append risks
-    the chunk has not seen yet.
+    the chunk has not seen yet. Every candidate is stamped query_gen via
+    model_copy — the same candidate objects are shared between chunks, so
+    nothing is mutated in place.
     """
+    stamped = [c.model_copy(update={"accepted_by": "query_gen"}) for c in candidates]
     for ci in qr.chunk_indices:
         chunk = chunks[ci]
         if chunk_results[ci] is not None:
             existing_ids = {c.risk_id for c in chunk_results[ci].accepted}
-            for c in candidates:
+            for c in stamped:
                 if c.risk_id not in existing_ids:
                     chunk_results[ci].accepted.append(c)
                     existing_ids.add(c.risk_id)
@@ -895,12 +954,12 @@ def _merge_query_candidates(chunk_results, chunks, qr, candidates):
                 source=chunk.source,
                 page=chunk.page,
                 section=chunk.section,
-                accepted=list(candidates),
+                accepted=list(stamped),
                 borderline=[],
                 borderline_judged=[],
                 stats={
-                    "candidates_retrieved": len(candidates),
-                    "auto_accepted": len(candidates),
+                    "candidates_retrieved": len(stamped),
+                    "auto_accepted": len(stamped),
                     "borderline": 0,
                     "discarded": 0,
                     "bm25_rescued": 0,

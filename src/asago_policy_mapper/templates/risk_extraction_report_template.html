@@ -214,8 +214,13 @@
           <label class="text-gray-500 text-xs">Accepted by:</label>
           <select x-model="filterAcceptedBy" class="border border-gray-300 rounded px-2 py-1 text-xs bg-white">
             <option value="all">All</option>
+            <option value="rank">Rank</option>
             <option value="threshold">Threshold</option>
+            <option value="rrf">RRF</option>
+            <option value="query_gen">Query Gen</option>
             <option value="llm_judge">LLM Judge</option>
+            <option value="auto_promoted">Auto Promoted</option>
+            <option value="expansion">Expansion</option>
           </select>
         </div>
         <div class="flex items-center gap-1">
@@ -244,7 +249,7 @@
                 <span x-show="sortBy === 'risk_name'" x-text="sortDesc ? ' v' : ' ^'" class="text-indigo-500"></span>
               </th>
               <th class="pb-2 pr-3 cursor-pointer select-none text-right" @click="toggleSort('confidence')">
-                <span class="tip" data-tip="Cross-encoder confidence score (0-1). Higher means the retrieval model is more confident this risk matches the document chunk.">Confidence</span>
+                <span class="tip" data-tip="Confidence score (0-1) of the risk-candidate match. When a reranker (cross-encoder or ColBERT) ran, this is its calibrated score; in RRF-only mode it is the ranking score; null means the score was never calculated.">Confidence</span>
                 <span x-show="sortBy === 'confidence'" x-text="sortDesc ? ' v' : ' ^'" class="text-indigo-500"></span>
               </th>
               <th class="pb-2 pr-3 cursor-pointer select-none" @click="toggleSort('grounding_confidence')">
@@ -252,7 +257,7 @@
                 <span x-show="sortBy === 'grounding_confidence'" x-text="sortDesc ? ' v' : ' ^'" class="text-indigo-500"></span>
               </th>
               <th class="pb-2 pr-3 cursor-pointer select-none" @click="toggleSort('accepted_by')">
-                <span class="tip" data-tip="How this risk was accepted: 'threshold' (auto-accepted above high threshold) or 'llm_judge' (borderline, verified by LLM).">Accepted By</span>
+                <span class="tip" data-tip="How this risk was accepted: 'rank' (top-k by reranker), 'threshold' (above the high threshold), 'rrf' (top-k by RRF ranking when no reranker ran), 'query_gen' (from generated queries), 'llm_judge' (borderline, verified by LLM), 'auto_promoted' (borderline accepted without a judge), or 'expansion' (taxonomy expansion).">Accepted By</span>
                 <span x-show="sortBy === 'accepted_by'" x-text="sortDesc ? ' v' : ' ^'" class="text-indigo-500"></span>
               </th>
               <th class="pb-2 text-right cursor-pointer select-none" @click="toggleSort('evidence_count')">
@@ -281,8 +286,8 @@
                     </div>
                     <div class="w-20 text-right pr-3">
                       <span class="px-2 py-0.5 rounded text-xs font-mono font-semibold"
-                            :class="confidenceColor(risk.confidence)"
-                            x-text="risk.confidence?.toFixed(3) || '?'"></span>
+                            :class="confidenceColor(risk.confidence, risk.confidence_source)"
+                            x-text="confidenceText(risk.confidence, risk.confidence_source)"></span>
                     </div>
                     <div class="w-20 pr-3">
                       <span class="px-2 py-0.5 rounded text-xs font-medium capitalize"
@@ -291,7 +296,7 @@
                     </div>
                     <div class="w-24 pr-3">
                       <span class="px-2 py-0.5 rounded text-xs"
-                            :class="risk.accepted_by === 'threshold' ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'"
+                            :class="acceptedByColor(risk.accepted_by)"
                             x-text="risk.accepted_by"></span>
                     </div>
                     <div class="w-16 text-right pr-3">
@@ -346,10 +351,10 @@
                         <span class="px-2 py-1 rounded bg-purple-50 text-purple-800 font-mono">
                           Emb. dist: <span x-text="risk.scores?.embedding_distance?.toFixed(4) ?? '?'"></span>
                         </span>
-                        <span class="px-2 py-1 rounded bg-green-50 text-green-800 font-mono">
-                          Cross-enc: <span x-text="risk.scores?.cross_encoder_score?.toFixed(4) ?? '?'"></span>
+                        <span class="tip px-2 py-1 rounded bg-green-50 text-green-800 font-mono" data-tip="Cross-encoder reranker score; null means the reranker never scored this candidate.">
+                          Cross-enc: <span x-text="risk.scores?.cross_encoder_score != null ? risk.scores.cross_encoder_score.toFixed(4) : 'not scored'"></span>
                         </span>
-                        <span class="px-2 py-1 rounded bg-orange-50 text-orange-800 font-mono">
+                        <span class="tip px-2 py-1 rounded bg-orange-50 text-orange-800 font-mono" data-tip="Reciprocal Rank Fusion ranking score. This is a ranking score, not a calibrated confidence or a percentage.">
                           RRF: <span x-text="risk.scores?.rrf_score?.toFixed(4) ?? '?'"></span>
                         </span>
                       </div>
@@ -801,11 +806,32 @@ function reportApp() {
       return path.split('/').pop().split('\\').pop();
     },
 
-    confidenceColor(score) {
-      if (score == null) return 'bg-gray-100 text-gray-600';
+    confidenceColor(score, source) {
+      // null is "not calculated"; an RRF value is a ranking score, not a
+      // calibrated confidence, so it renders neutrally instead of red
+      if (score == null || source === 'rrf') return 'bg-gray-100 text-gray-600';
       if (score >= 0.9) return 'bg-green-100 text-green-800';
       if (score >= 0.7) return 'bg-amber-100 text-amber-800';
       return 'bg-red-100 text-red-800';
+    },
+
+    confidenceText(score, source) {
+      if (score == null) return '?';
+      if (source === 'rrf') return 'RRF ' + score.toFixed(3);
+      return score.toFixed(3);
+    },
+
+    acceptedByColor(label) {
+      const colors = {
+        'rank': 'bg-emerald-100 text-emerald-800',
+        'threshold': 'bg-green-100 text-green-800',
+        'rrf': 'bg-orange-100 text-orange-800',
+        'query_gen': 'bg-sky-100 text-sky-800',
+        'llm_judge': 'bg-amber-100 text-amber-800',
+        'auto_promoted': 'bg-lime-100 text-lime-800',
+        'expansion': 'bg-violet-100 text-violet-800',
+      };
+      return colors[label] || 'bg-gray-100 text-gray-600';
     },
 
     groundingColor(level) {
