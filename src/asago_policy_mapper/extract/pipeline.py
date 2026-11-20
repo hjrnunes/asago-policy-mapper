@@ -109,10 +109,6 @@ def timed(timing, key):
         timing[key] = (time.time() - t0) * 1000
 
 
-class PipelineInvariantError(RuntimeError):
-    """A pipeline output invariant failed: the result would be wrong."""
-
-
 def _assert_no_synthetic_parents(merged, variant_map, *, grounding: bool = True) -> None:
     """Raise when a synthetic parent risk id would reach the output.
 
