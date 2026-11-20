@@ -8,6 +8,7 @@ own environment variable is ``POLICY_MAPPER_PREFILTER_PROFILE``.
 Validation fails when the profile is combined with ``--no-grounding``.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,36 @@ from typer.testing import CliRunner
 from asago_policy_mapper.cli import app
 
 runner = CliRunner()
+
+
+def _plain_help(result) -> str:
+    """Return the help text free of ANSI codes and wrap artifacts.
+
+    Rich (which typer uses for help) interleaves escape codes with the
+    option names when it colors its output — on GitHub Actions it
+    always does — and it truncates long option names when the table is
+    narrow. The assertions we care about are about the option set, so
+    ``_help_result`` pins the rendering (a terminal type rich accepts
+    and a wide table) and this helper strips the escape codes and
+    collapses the layout whitespace, so a name can match even where the
+    renderer wrapped it.
+    """
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.stdout)
+    return re.sub(r"\s+", " ", text)
+
+
+def _help_result():
+    """Invoke ``extract --help`` with a deterministic rendering.
+
+    The rendered width must not depend on the machine running the
+    tests: a dumb ``TERM`` makes rich hardcode an 80-column table (too
+    narrow for ``--prefilter-profile``, truncating it), and a forced
+    terminal without a real tty also lands at 80. Pinning ``TERM`` to a
+    non-dumb value and ``COLUMNS`` to a wide table keeps every option
+    name intact regardless of the ambient environment.
+    """
+    return runner.invoke(app, ["extract", "--help"], env={"TERM": "xterm", "COLUMNS": "200"})
+
 
 PROFILE = {
     "base_url": "http://localhost:8080",
@@ -127,11 +158,9 @@ def test_extract_rejects_prefilter_profile_with_no_grounding_cli(tmp_path, profi
 
 def test_extract_help_lists_prefilter_profile():
     """The option appears in the extract command's help."""
-    result = runner.invoke(app, ["extract", "--help"])
+    result = _help_result()
     assert result.exit_code == 0
-    # Typer's rich help renderer truncates long option names at the default
-    # terminal width.
-    assert "--prefilter-prof" in result.stdout
+    assert "--prefilter-profile" in _plain_help(result)
 
 
 def test_extract_prefilter_profile_envvar_attached():
@@ -921,9 +950,9 @@ def test_no_prefilter_flag_beats_explicit_profile(tmp_path, profile_path, monkey
 
 def test_no_prefilter_help_lists_the_flag():
     """The override appears in the extract command's help."""
-    result = runner.invoke(app, ["extract", "--help"])
+    result = _help_result()
     assert result.exit_code == 0
-    assert "--no-prefilter" in result.stdout
+    assert "--no-prefilter" in _plain_help(result)
 
 
 # --- a bad profile must not create the output directory ---
