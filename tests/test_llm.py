@@ -928,16 +928,18 @@ class TestRetryWithValidation:
         # The 201st E must not leak into the logged hint.
         assert "E" * 201 not in warning
 
-    def test_context_overflow_retry_resets_messages_to_original(self):
-        """An overflow retry calls the wire with the original messages deep-copied.
+    def test_context_overflow_retry_resets_to_current_messages(self):
+        """An overflow retry calls the wire with the current messages deep-copied.
 
-        Pins that the retry passes ``original_messages`` (not None) through to
-        the budget reducer: the retry conversation must be the caller's
-        original, not the mutated kwargs copy.
+        Pins that the retry resets to ``current_messages`` — the prompt as it
+        stands, shortened after an incomplete output — so a shortening
+        survives the retry. ``original_messages`` is still accepted (the
+        callers pass it by name) but no longer drives the retry.
         """
         exc = _context_overflow_error()
         do_call = MagicMock(side_effect=[exc, ("ok", "comp")])
         original = [{"role": "user", "content": "original prompt"}]
+        current = [{"role": "user", "content": "current prompt"}]
         kwargs = {"messages": [{"role": "user", "content": "grown prompt"}], "max_tokens": 4096}
         config = self._make_config()
 
@@ -947,15 +949,15 @@ class TestRetryWithValidation:
             config,
             tracker=None,
             original_messages=original,
-            current_messages=[{"role": "user", "content": "current prompt"}],
+            current_messages=current,
             max_retries=1,
         )
 
-        # The retry call used the original messages, and as a deep copy:
+        # The retry call used the current messages, and as a deep copy:
         second_call_messages = do_call.call_args_list[1].args[0]["messages"]
-        assert second_call_messages == [{"role": "user", "content": "original prompt"}]
+        assert second_call_messages == [{"role": "user", "content": "current prompt"}]
         second_call_messages[0]["content"] = "mutated"
-        assert original[0]["content"] == "original prompt"
+        assert current[0]["content"] == "current prompt"
 
     def test_validation_exhausted_incident_carries_message(self):
         exc = _make_retry_exc("persistent validation error")
