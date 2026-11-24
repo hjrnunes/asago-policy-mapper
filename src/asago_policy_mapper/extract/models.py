@@ -217,7 +217,10 @@ class FilteredCandidate(BaseModel):
     risk_id: str
     risk_name: str
     taxonomy: str = ""
-    cross_encoder_score: float
+    # Null means no reranker measured the score before the candidate was
+    # dropped; the 0.0 placeholder a candidate carries unmeasured never
+    # reaches here as a number. Mirrors RiskMatch.scores.
+    cross_encoder_score: float | None
     rrf_score: float = 0.0
     bm25_rank: int = 0
     accepted_by: str

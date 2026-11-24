@@ -373,7 +373,9 @@ def _run_grounding(
                                 risk_id=rid,
                                 risk_name=candidate.risk_name,
                                 taxonomy=index.get_taxonomy(rid),
-                                cross_encoder_score=candidate.cross_encoder_score,
+                                cross_encoder_score=candidate.cross_encoder_score
+                                if candidate.rerank_source is not None
+                                else None,
                                 rrf_score=candidate.rrf_score,
                                 bm25_rank=candidate.bm25_rank,
                                 accepted_by=accepted_by,
@@ -1200,13 +1202,15 @@ def _prefilter_drop_record(candidate, decision, answers, taxonomy, chunk_index, 
 
     ``accepted_by`` keeps the retrieval provenance (threshold, rrf,
     llm_judge) the candidate earned before the prefilter dropped it;
-    ``dropped_by`` names the prefilter separately.
+    ``dropped_by`` names the prefilter separately. The score follows the
+    same rule as the match boundary: a candidate no reranker measured
+    records null, never its 0.0 placeholder.
     """
     return FilteredCandidate(
         risk_id=candidate.risk_id,
         risk_name=candidate.risk_name,
         taxonomy=taxonomy,
-        cross_encoder_score=candidate.cross_encoder_score,
+        cross_encoder_score=candidate.cross_encoder_score if candidate.rerank_source is not None else None,
         rrf_score=candidate.rrf_score,
         bm25_rank=candidate.bm25_rank,
         accepted_by=accepted_by,
