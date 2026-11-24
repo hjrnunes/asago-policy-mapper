@@ -958,8 +958,15 @@ def _merge_query_candidates(chunk_results, chunks, qr, candidates):
             )
 
 
-def _retrieve_chunk_result(chunks, i, index, retrieval) -> ChunkResult:
-    """Run per-chunk hybrid retrieval with the pipeline's retrieval settings."""
+def _retrieve_chunk_result(chunks, i, index, retrieval, plan) -> ChunkResult:
+    """Run per-chunk hybrid retrieval with the pipeline's retrieval settings.
+
+    The RRF floor applies only on the unreranked path, so the plan's
+    rerank decision routes it: a reranked (cross-encoder or ColBERT) run
+    passes 0.0 and never lets the floor behave as a filter beside the
+    reranker.
+    """
+    floor = retrieval.rrf_min_score if plan.rerank == "none" else 0.0
     return retrieve_chunk(
         chunks,
         i,
@@ -969,7 +976,7 @@ def _retrieve_chunk_result(chunks, i, index, retrieval) -> ChunkResult:
         min_score_floor=retrieval.min_score_floor,
         bm25_rescue_rank=retrieval.bm25_rescue_rank,
         use_cross_encoder=retrieval.use_cross_encoder,
-        rrf_min_score=retrieval.effective_rrf_min_score,
+        rrf_min_score=floor,
         threshold_high=retrieval.threshold_high,
         threshold_low=retrieval.threshold_low,
     )
@@ -1002,10 +1009,10 @@ def _run_retrieval(chunks, index, retrieval, query_results, fallback_chunk_indic
 
             retrieval_indices = fallback_chunk_indices | {i for i in range(len(chunks)) if chunk_results[i] is None}
             for i in sorted(retrieval_indices):
-                chunk_results[i] = _retrieve_chunk_result(chunks, i, index, retrieval)
+                chunk_results[i] = _retrieve_chunk_result(chunks, i, index, retrieval, plan)
         else:
             for i in range(len(chunks)):
-                chunk_results[i] = _retrieve_chunk_result(chunks, i, index, retrieval)
+                chunk_results[i] = _retrieve_chunk_result(chunks, i, index, retrieval, plan)
 
     return chunk_results
 

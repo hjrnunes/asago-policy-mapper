@@ -704,6 +704,9 @@ def test_rrf_floor_does_not_toggle_reranking(mock_config, tmp_path, monkeypatch)
     )
     assert index.calls, "per-chunk retrieval must call hybrid_search"
     assert all(call["rerank"] is True for call in index.calls)
+    # A reranked run passes no floor: the plan's rerank decision routes it,
+    # so the value cannot filter beside the reranker.
+    assert all(call["rrf_min_score"] == 0.0 for call in index.calls)
 
     # Query generation on: every query-gen search passes rerank=False.
     index.calls.clear()
@@ -736,6 +739,8 @@ def test_rrf_floor_does_not_toggle_reranking(mock_config, tmp_path, monkeypatch)
     )
     assert index.calls
     assert all(call["rerank"] is False for call in index.calls)
+    # Unreranked, the plan applies the requested floor.
+    assert all(call["rrf_min_score"] == 0.01 for call in index.calls)
 
 
 # --- judge contexts ---
