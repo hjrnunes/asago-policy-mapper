@@ -91,6 +91,11 @@ class RetrievalScores(BaseModel):
     bm25_rank: int
     embedding_distance: float
     cross_encoder_score: float | None
+    # Which reranker measured cross_encoder_score; None means no reranker
+    # measured it (the score is null). Carries the candidate's stamp past
+    # this boundary so a measured score never serializes without its
+    # provenance — the same rule confidence follows.
+    cross_encoder_source: Literal["cross_encoder", "colbert"] | None = None
     rrf_score: float
 
 

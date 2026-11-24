@@ -263,6 +263,7 @@ def build_risk_match(
         bm25_rank=candidate.bm25_rank,
         embedding_distance=candidate.embedding_distance,
         cross_encoder_score=candidate.cross_encoder_score if candidate.rerank_source is not None else None,
+        cross_encoder_source=candidate.rerank_source,
         rrf_score=candidate.rrf_score,
     )
     return RiskMatch(

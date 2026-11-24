@@ -590,6 +590,47 @@ def test_build_risk_match_ce_measured_source():
     assert m.confidence == 0.7
     assert m.confidence_source == "cross_encoder"
     assert m.scores.cross_encoder_score == 0.7
+    # the score record carries the stamp past the boundary
+    assert m.scores.cross_encoder_source == "cross_encoder"
+
+
+def test_scores_serializes_unmeasured_with_null_source():
+    """A measured score never serializes without its provenance.
+
+    The rrf-with-ColBERT run selects on RRF while a reranker measured the
+    candidate: confidence names rrf, but the measured score in the scores
+    record names the reranker that measured it.
+    """
+    import json as _json
+
+    pl = _pipeline()
+    measured = ScoredCandidate(
+        risk_id="R-1",
+        risk_name="n",
+        risk_description="d",
+        cross_encoder_score=0.85,
+        rerank_source="colbert",
+        accepted_by="rrf",
+    )
+    m = pl.build_risk_match(
+        measured, taxonomy="t", accepted_by="rrf", grounding_confidence="high", evidence=[], use_cross_encoder=False
+    )
+    assert m.confidence_source == "rrf"  # selection followed the ranking score
+    assert m.scores.cross_encoder_score == 0.85
+    assert m.scores.cross_encoder_source == "colbert"
+    dumped = _json.loads(m.scores.model_dump_json())
+    assert dumped["cross_encoder_score"] == 0.85
+    assert dumped["cross_encoder_source"] == "colbert"
+
+    unmeasured = ScoredCandidate(risk_id="R-2", risk_name="n", risk_description="d", accepted_by="rrf")
+    m2 = pl.build_risk_match(
+        unmeasured, taxonomy="t", accepted_by="rrf", grounding_confidence="high", evidence=[], use_cross_encoder=False
+    )
+    assert m2.scores.cross_encoder_score is None
+    assert m2.scores.cross_encoder_source is None
+    dumped2 = _json.loads(m2.scores.model_dump_json())
+    assert dumped2["cross_encoder_score"] is None
+    assert dumped2["cross_encoder_source"] is None
 
 
 def test_build_risk_match_never_reranked_is_null():
@@ -855,8 +896,10 @@ def test_variant_match_rrf_parent_keeps_measured_scores():
     variant = result[0]
     assert variant.confidence == 0.04
     assert variant.confidence_source == "rrf"
-    # the measured reranker score survives the transfer verbatim
+    # the measured reranker score survives the transfer verbatim, with its
+    # provenance alongside it
     assert variant.scores.cross_encoder_score == 0.85
+    assert variant.scores.cross_encoder_source == "colbert"
     assert variant.scores.bm25_rank == 3
     assert variant.scores.rrf_score == 0.04
     assert variant.scores_inherited_from is not None

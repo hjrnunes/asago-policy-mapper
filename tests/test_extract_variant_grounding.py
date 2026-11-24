@@ -94,6 +94,7 @@ def _make_parent_match(chunk_index=0):
             bm25_rank=3,
             embedding_distance=0.15,
             cross_encoder_score=0.85,
+            cross_encoder_source="colbert",
             rrf_score=0.04,
         ),
     )
