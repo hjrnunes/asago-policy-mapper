@@ -524,9 +524,13 @@ def _write_extraction_outputs(
         typer.echo(f"  {stats.auto_accepted} auto-accepted (IR-only, query generation)")
     elif not plan.grounding:
         typer.echo(f"  {stats.auto_accepted} auto-accepted, {stats.llm_judged} LLM-judged (no grounding)")
-    elif plan.judge != "llm":
+    elif plan.judge == "none":
         typer.echo(
             f"  {stats.auto_accepted} auto-accepted, {stats.grounding_filtered} grounding-filtered (no cross-encoder)"
+        )
+    elif plan.judge == "auto_promote":
+        typer.echo(
+            f"  {stats.auto_accepted} auto-accepted, {stats.grounding_filtered} grounding-filtered (no LLM judge)"
         )
     else:
         typer.echo(

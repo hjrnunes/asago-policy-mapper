@@ -748,9 +748,16 @@ def _summary_plan(no_judge, no_grounding, no_cross_encoder, colbert_model=None):
         (False, False, True, None, "  3 auto-accepted, 2 grounding-filtered (no cross-encoder)"),
         (False, False, False, None, "  3 auto-accepted, 1 LLM-judged, 2 grounding-filtered"),
         # ColBERT replaces the cross-encoder, so the rerank label is
-        # "colbert", not "none": the branch must key on the judge mode,
-        # not the reranker, to land on the no-judge line.
+        # "colbert", not "none": the no-cross-encoder line must key on
+        # the judge mode, not the reranker.
         (False, False, True, "colbert-ir", "  3 auto-accepted, 2 grounding-filtered (no cross-encoder)"),
+        # --no-judge with the cross-encoder on auto-promotes borderline
+        # candidates instead of judging them: a distinct line, never the
+        # "(no cross-encoder)" one, which would be false here.
+        (True, False, False, None, "  3 auto-accepted, 2 grounding-filtered (no LLM judge)"),
+        # ColBERT with --no-judge: auto-promoted over MaxSim scores,
+        # also not a cross-encoder-off run.
+        (True, False, False, "colbert-ir", "  3 auto-accepted, 2 grounding-filtered (no LLM judge)"),
     ],
 )
 def test_write_extraction_outputs_summary_lines(
