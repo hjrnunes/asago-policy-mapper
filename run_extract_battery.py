@@ -663,8 +663,12 @@ def main():
         sys.exit(1)
 
     config = yaml.safe_load(battery_path.read_text())
-    if args.rrf_min_score < 0:
-        print("Error: --rrf-min-score must not be negative: it is a floor, never a ceiling")
+    from asago_policy_mapper.extract.plan import validate_rrf_min_score
+
+    try:
+        validate_rrf_min_score(args.rrf_min_score)
+    except ValueError as error:
+        print(f"Error: {error}")
         sys.exit(1)
 
     battery_plan = _battery_run_plan(

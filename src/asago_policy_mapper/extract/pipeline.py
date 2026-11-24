@@ -41,7 +41,7 @@ from asago_policy_mapper.extract.models import (
     _CausalChain,
 )
 from asago_policy_mapper.extract.parse import chunk_documents, parse_document
-from asago_policy_mapper.extract.plan import RunPlan, resolve_plan
+from asago_policy_mapper.extract.plan import RunPlan, resolve_plan, validate_rrf_min_score
 from asago_policy_mapper.extract.querygen import generate_queries, group_chunks
 from asago_policy_mapper.extract.retrieve import (
     ChunkResult,
@@ -1552,8 +1552,7 @@ def run_extraction(
     retrieval = retrieval or RetrievalConfig()
     if prefilter is not None and retrieval.no_grounding:
         raise ValueError("prefilter requires grounding; it filters what grounding sees, so --no-grounding refuses it")
-    if retrieval.rrf_min_score is not None and retrieval.rrf_min_score < 0:
-        raise ValueError("--rrf-min-score must not be negative: it is a floor, never a ceiling")
+    validate_rrf_min_score(retrieval.rrf_min_score)
     if plan is None:
         plan = resolve_plan(retrieval, prefilter=prefilter is not None, explicit=frozenset())
     else:

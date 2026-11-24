@@ -95,7 +95,7 @@ def _validate_extract_options(
     error names the stages that call one for this exact combination of
     options (``plan.llm_stages``), so the message follows the flags.
     """
-    from asago_policy_mapper.extract.plan import resolve_plan
+    from asago_policy_mapper.extract.plan import resolve_plan, validate_rrf_min_score
 
     valid_formats = {"json", "yaml", "both"}
     if output_format not in valid_formats:
@@ -106,8 +106,10 @@ def _validate_extract_options(
     if prefilter and retrieval.no_grounding:
         _fail_validation("--prefilter-profile requires grounding; it filters what grounding sees")
 
-    if retrieval.rrf_min_score < 0:
-        _fail_validation("--rrf-min-score must not be negative: it is a floor, never a ceiling")
+    try:
+        validate_rrf_min_score(retrieval.rrf_min_score)
+    except ValueError as error:
+        _fail_validation(str(error))
 
     plan = resolve_plan(retrieval, prefilter=prefilter, explicit=explicit)
     if plan.needs_llm and (not base_url or not model):

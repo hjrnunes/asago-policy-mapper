@@ -29,6 +29,19 @@ from typing import Literal
 
 from asago_policy_mapper.extract.models import RetrievalConfig
 
+RRF_MIN_SCORE_ERROR = "--rrf-min-score must not be negative: it is a floor, never a ceiling"
+
+
+def validate_rrf_min_score(rrf_min_score: float) -> None:
+    """Refuse a negative RRF floor: a floor must never behave as a ceiling.
+
+    One validator for every entry point — the extract command, the
+    pipeline entry and the battery runner — so the message and the rule
+    stay in step.
+    """
+    if rrf_min_score < 0:
+        raise ValueError(RRF_MIN_SCORE_ERROR)
+
 
 @dataclass(frozen=True)
 class RunPlan:
