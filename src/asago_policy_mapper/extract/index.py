@@ -418,10 +418,16 @@ def _rescue_and_merge_scores(
     reranked: list[ScoredCandidate],
     rrf_candidates: list[ScoredCandidate],
     bm25_rescue_rank: int,
-    measured_scores: dict[str, float] | None = None,
+    measured_scores: dict[str, float],
 ) -> list[ScoredCandidate]:
+    """Merge rerank results with BM25 rescue, keeping measured scores.
+
+    ``measured_scores`` is required: a caller that omits it would treat
+    every rescued candidate as unmeasured and stamp the placeholder 0.0 as
+    if the reranker never ran — the exact lie the map exists to prevent.
+    """
     if bm25_rescue_rank > 0:
-        measured = measured_scores or {}
+        measured = measured_scores
         reranked_ids = {c.risk_id for c in reranked}
         for c in rrf_candidates:
             if c.risk_id not in reranked_ids and 0 < c.bm25_rank <= bm25_rescue_rank:

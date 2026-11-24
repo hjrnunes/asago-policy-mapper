@@ -301,6 +301,20 @@ def test_rrf_only_candidates_have_no_rerank_source(monkeypatch):
     assert all(c.rerank_source is None for c in results)
 
 
+def test_rescue_requires_the_measured_scores_map():
+    """_rescue_and_merge_scores refuses to run without the measured map.
+
+    A caller that omits the map would stamp every rescued candidate as
+    unmeasured — the placeholder 0.0 posing as a never-run reranker, the
+    exact lie the map exists to prevent. The parameter is required, so the
+    omission is a TypeError at the call site.
+    """
+    from asago_policy_mapper.extract.index import _rescue_and_merge_scores
+
+    with pytest.raises(TypeError):
+        _rescue_and_merge_scores([], [], bm25_rescue_rank=0)
+
+
 def test_bm25_rescued_candidate_keeps_measured_score(monkeypatch):
     """A BM25-rescued candidate the reranker scored keeps its measured score.
 
