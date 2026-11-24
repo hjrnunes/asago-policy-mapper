@@ -99,3 +99,60 @@ def test_ir_battery_command_carries_no_endpoint_dependence():
     assert "--no-grounding" in cmd
     assert "--no-query-gen" in cmd
     assert "--no-cross-encoder" in cmd
+
+
+def test_battery_plan_builds_retrieval_through_the_cli_builder():
+    """The battery's plan resolves from the CLI's own config builder.
+
+    The endpoint decision must follow the same flag-to-RetrievalConfig
+    mapping the extract command uses, so a change to that mapping (for
+    example a new coupling between the cross-encoder and another flag)
+    reaches the battery without a second hand-synced copy. The resolved
+    plan matches what the CLI would resolve from the same flags.
+    """
+    from asago_policy_mapper.cli import _build_retrieval_config
+    from asago_policy_mapper.extract.models import RetrievalConfig
+    from asago_policy_mapper.extract.plan import resolve_plan
+
+    flags = dict(
+        query_gen=False,
+        no_judge=True,
+        no_grounding=False,
+        expand_siblings=True,
+        colbert_model="colbert-ir",
+        no_cross_encoder=False,
+        rrf_min_score=0.02,
+    )
+    battery_plan = _battery_run_plan(**flags)
+
+    defaults = RetrievalConfig()
+    cli_retrieval = _build_retrieval_config(
+        bi_encoder_model=defaults.bi_encoder_model,
+        bi_encoder_api_key=defaults.bi_encoder_api_key,
+        bi_encoder_model_name=None,
+        query_instruction=None,
+        cross_encoder_model=defaults.cross_encoder_model,
+        cross_encoder_type=defaults.cross_encoder_type,
+        cross_encoder_model_name=None,
+        colbert_model=flags["colbert_model"],
+        chunk_max_tokens=defaults.chunk_max_tokens,
+        top_n_accept=defaults.top_n_accept,
+        top_n_judge=defaults.top_n_judge,
+        min_score_floor=defaults.min_score_floor,
+        threshold_high=None,
+        threshold_low=None,
+        bm25_rescue_rank=defaults.bm25_rescue_rank,
+        rrf_min_score=flags["rrf_min_score"],
+        no_cross_encoder=flags["no_cross_encoder"],
+        no_judge=flags["no_judge"],
+        no_grounding=flags["no_grounding"],
+        judge_prompt=defaults.judge_prompt,
+        judge_context_tokens=defaults.judge_context_tokens,
+        expand_siblings=flags["expand_siblings"],
+        grounding_passes=defaults.grounding_passes,
+        grounding_batch_size=defaults.grounding_batch_size,
+        expansion_passes=defaults.expansion_passes,
+        no_causal_synthesis=False,
+        query_gen=flags["query_gen"],
+    )
+    assert battery_plan == resolve_plan(cli_retrieval, prefilter=False, explicit=frozenset())

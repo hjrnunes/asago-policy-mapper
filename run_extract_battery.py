@@ -200,25 +200,59 @@ def _battery_run_plan(
     colbert_model: str | None,
     no_cross_encoder: bool,
     rrf_min_score: float,
+    chunk_max_tokens: int = 512,
+    top_n_accept: int = 10,
+    top_n_judge: int = 10,
+    min_score_floor: float = 0.70,
+    threshold_high: float | None = None,
+    threshold_low: float | None = None,
+    bm25_rescue_rank: int = 0,
+    judge_prompt: str = "judge_risk",
+    judge_context_tokens: int = 0,
+    grounding_passes: int = 3,
+    expansion_passes: int = 3,
 ):
     """Resolve the run plan the battery's flags produce.
 
-    The retrieval settings mirror what the CLI derives from the same
-    flags: the cross-encoder flag is independent of ColBERT, which
-    replaces the reranker rather than removing it, so a ColBERT run with
-    the cross-encoder on still has its judge.
+    The retrieval settings come from the CLI's own builder, so the
+    battery's endpoint decision follows the same flag-to-config mapping
+    the extract command uses. Fields the battery does not expose keep
+    their ``RetrievalConfig`` defaults, which match the CLI option
+    defaults.
     """
+    from asago_policy_mapper.cli import _build_retrieval_config
     from asago_policy_mapper.extract.models import RetrievalConfig
     from asago_policy_mapper.extract.plan import resolve_plan
 
-    retrieval = RetrievalConfig(
-        query_gen=query_gen,
+    defaults = RetrievalConfig()
+    retrieval = _build_retrieval_config(
+        bi_encoder_model=defaults.bi_encoder_model,
+        bi_encoder_api_key=defaults.bi_encoder_api_key,
+        bi_encoder_model_name=None,
+        query_instruction=None,
+        cross_encoder_model=defaults.cross_encoder_model,
+        cross_encoder_type=defaults.cross_encoder_type,
+        cross_encoder_model_name=None,
+        colbert_model=colbert_model,
+        chunk_max_tokens=chunk_max_tokens,
+        top_n_accept=top_n_accept,
+        top_n_judge=top_n_judge,
+        min_score_floor=min_score_floor,
+        threshold_high=threshold_high,
+        threshold_low=threshold_low,
+        bm25_rescue_rank=bm25_rescue_rank,
+        rrf_min_score=rrf_min_score,
+        no_cross_encoder=no_cross_encoder,
         no_judge=no_judge,
         no_grounding=no_grounding,
+        judge_prompt=judge_prompt,
+        judge_context_tokens=judge_context_tokens,
         expand_siblings=expand_siblings,
-        colbert_model=colbert_model,
-        use_cross_encoder=not no_cross_encoder,
-        rrf_min_score=rrf_min_score,
+        grounding_passes=grounding_passes,
+        grounding_batch_size=defaults.grounding_batch_size,
+        expansion_passes=expansion_passes,
+        no_causal_synthesis=False,
+        query_gen=query_gen,
     )
     return resolve_plan(retrieval, prefilter=False, explicit=frozenset())
 
