@@ -23,6 +23,7 @@ from asago_policy_mapper.extract.models import (
     _RiskEvidence,
     _RiskEvidenceList,
 )
+from asago_policy_mapper.extract.pipeline import PipelineInvariantError
 
 
 def _scores(ce=0.5, rrf=0.03, bm25=1, embed=0.2):
@@ -184,7 +185,7 @@ def test_merge_handles_null_confidence():
 
 
 def test_shared_candidate_not_mutated():
-    """Setting selected_by/rerank_source never mutates a candidate in place."""
+    """Setting accepted_by/rerank_source never mutates a candidate in place."""
     shared = ScoredCandidate(risk_id="R-SHARED", risk_name="n", risk_description="d", rrf_score=0.05)
     tagged = shared.model_copy(update={"accepted_by": "query_gen", "rerank_source": "cross_encoder"})
     assert shared.accepted_by is None
@@ -588,8 +589,6 @@ def test_determine_accepted_by_prefers_stamped_label():
     assert pl.determine_accepted_by(promoted) == "auto_promoted"
     # an unstamped candidate is an invariant failure, not a fallback
     plain = ScoredCandidate(risk_id="R-1", risk_name="n", risk_description="d")
-    from asago_policy_mapper.extract.pipeline import PipelineInvariantError
-
     with pytest.raises(PipelineInvariantError):
         pl.determine_accepted_by(plain)
 

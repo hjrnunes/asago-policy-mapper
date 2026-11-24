@@ -99,6 +99,18 @@ class RetrievalScores(BaseModel):
     rrf_score: float
 
 
+# Confidence sources that name a reranker measurement. The stub's stamp
+# tests against this set: only these sources can become a rerank_source.
+RERANKER_CONFIDENCE_SOURCES = frozenset({"cross_encoder", "colbert"})
+
+# Confidence sources whose value follows the measured-score-or-null path
+# (rather than the RRF ranking score): a reranker measurement, or no
+# measurement at all. The match boundary's mode decision tests against
+# this set. A future source label must join exactly one of the two sets —
+# measurement-backed or ranking-backed — and both sites then agree.
+CONFIDENCE_FOLLOWS_MEASUREMENT = frozenset({"cross_encoder", "colbert", "none"})
+
+
 class RiskMatch(BaseModel):
     risk_id: str
     risk_name: str

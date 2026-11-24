@@ -25,6 +25,8 @@ from asago_policy_mapper.extract.calllog import merge_call_records
 from asago_policy_mapper.extract.index import RiskIndex
 from asago_policy_mapper.extract.merge import _tiebreak_key, merge_matches
 from asago_policy_mapper.extract.models import (
+    CONFIDENCE_FOLLOWS_MEASUREMENT,
+    RERANKER_CONFIDENCE_SOURCES,
     ChunkSummary,
     DecisionCallRecord,
     DecisionItem,
@@ -468,7 +470,7 @@ def _variant_stub(variant_id, variant_info, parent_match):
     return stub.model_copy(
         update={
             "cross_encoder_score": parent_score,
-            "rerank_source": parent_source if parent_source in ("cross_encoder", "colbert") else None,
+            "rerank_source": parent_source if parent_source in RERANKER_CONFIDENCE_SOURCES else None,
         }
     )
 
@@ -536,9 +538,11 @@ def _run_variant_grounding(
                         grounding_confidence=confidence,
                         evidence=evidence,
                         scores_override=parent_match.scores.model_copy(deep=True),
-                        # an RRF-mode parent inherits its ranking score as
-                        # confidence, exactly like the retrieval path
-                        use_cross_encoder=parent_match.confidence_source != "rrf",
+                        # the variant's confidence follows the same path as
+                        # its parent's: a measured score, or null when the
+                        # parent was never measured; only an RRF-backed
+                        # parent inherits the ranking score as confidence
+                        use_cross_encoder=parent_match.confidence_source in CONFIDENCE_FOLLOWS_MEASUREMENT,
                     ).model_copy(update={"scores_inherited_from": parent_match.risk_id})
                 )
     if call_collector is not None:

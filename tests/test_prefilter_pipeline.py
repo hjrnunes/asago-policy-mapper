@@ -1182,7 +1182,6 @@ def test_prefilter_drop_record_nulls_unmeasured_score():
     """
     from types import SimpleNamespace
 
-    from asago_policy_mapper.extract.models import FilteredCandidate
     from asago_policy_mapper.extract.pipeline import _prefilter_drop_record
 
     candidate = ScoredCandidate(risk_id="R-QG", risk_name="n", risk_description="d", accepted_by="query_gen")
@@ -1200,7 +1199,6 @@ def test_prefilter_drop_record_keeps_measured_zero():
     """
     from types import SimpleNamespace
 
-    from asago_policy_mapper.extract.models import FilteredCandidate
     from asago_policy_mapper.extract.pipeline import _prefilter_drop_record
 
     measured_zero = ScoredCandidate(
