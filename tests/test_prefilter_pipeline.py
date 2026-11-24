@@ -1899,6 +1899,61 @@ def test_prefilter_assessor_without_optional_attributes_records_defaults(mock_co
     assert result.decision_calls == []
 
 
+def test_prefilter_bare_assessor_with_candidates_records_empty_id(mock_config, tmp_path, monkeypatch):
+    """An assessor without assessor_id survives a chunk that has candidates.
+
+    The decision log's id read sits outside the fail-open try, so a raw
+    attribute read there would crash the run after the assessor already
+    answered — the fail-open posture must cover non-conforming
+    collaborators, not just raising assessors. The id read falls back to
+    the empty string, matching the metadata block's default.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    # No assessor_id attribute at all, but candidates are present: the
+    # stage records the call with the empty-string id default.
+    bare = SimpleNamespace(
+        assess=lambda question, context, cases: AnswerBatch(
+            answers={c.risk_id: (NoAnswer("missing"),) for c in cases},
+            unmatched_ids=(),
+            latency_ms=0.5,
+            exchange=None,
+        ),
+        answer_types=frozenset(),
+    )
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=GroundingPrefilter(assessor=bare, rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    assert result.decision_calls, "the stage must record the call, not crash"
+    assert all(call.decision.assessor_id == "" for call in result.decision_calls)
+    assert result.metadata["prefilter"]["assessor_id"] == ""
+
+
 def test_prefilter_nonparent_drop_reentry_counted(mock_config, tmp_path, monkeypatch):
     """A dropped plain risk that expansion re-proposes counts as re-entered.
 
