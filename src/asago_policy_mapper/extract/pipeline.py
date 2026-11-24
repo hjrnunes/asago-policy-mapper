@@ -1301,7 +1301,7 @@ def _run_matches_stage(
     chunk_results, chunks, client, config, retrieval, plan, index, call_collector, chunk_contexts, timing
 ) -> tuple[list[RiskMatch], list[FilteredCandidate], int]:
     """Ground accepted candidates, or collect them ungrounded when grounding is disabled."""
-    if not plan.grounding:
+    if not plan.grounding or client is None:
         all_matches = _collect_ungrounded(chunk_results, index, retrieval)
         all_filtered: list[FilteredCandidate] = []
         timing["grounding_ms"] = 0.0

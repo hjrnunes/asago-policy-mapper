@@ -969,6 +969,79 @@ def test_judge_contexts_built_only_for_borderline_chunks(mock_config, monkeypatc
     assert seen[0] == build_chunk_contexts(chunks, max_context_tokens=30)[0]
 
 
+def test_grounding_skipped_without_a_client(mock_config, tmp_path, monkeypatch):
+    """A grounded plan with no client completes with grounding skipped.
+
+    A missing client skips every LLM stage — grounding included, like
+    variant grounding, expansion and causal synthesis. Without the gate,
+    a grounded run with accepted candidates dereferenced
+    ``client.chat`` and crashed before producing any output.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    grounded_calls = []
+
+    def fake_ground(*args, **kwargs):
+        grounded_calls.append(kwargs)
+        raise AssertionError("grounding must not run without a client")
+
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", fake_ground)
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
+            # A cross-encoder-scored candidate above the accept threshold,
+            # so the run has accepted candidates for grounding to see.
+            return [ScoredCandidate(risk_id="R-001", risk_name="n", risk_description="d", cross_encoder_score=0.9)]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+
+    doc = tmp_path / "p.md"
+    doc.write_text("AI policy text about data governance and risk management. Bias detection matters.")
+
+    # Grounded, cross-encoder on: the plan resolves grounding=True and the
+    # candidates exist, so only the missing client can skip the stage.
+    retrieval = RetrievalConfig(query_gen=False)
+    plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+    assert plan.grounding
+
+    result = pipeline.run_extraction(
+        documents=[doc],
+        client=None,
+        config=mock_config,
+        risks=[
+            SimpleNamespace(
+                id="R-001",
+                name="n",
+                description="d",
+                concern="",
+                risk_type="",
+                isDefinedByTaxonomy="t",
+                isPartOf="",
+                exact_mappings=[],
+                close_mappings=[],
+                broad_mappings=[],
+                narrow_mappings=[],
+                related_mappings=[],
+            )
+        ],
+        retrieval=retrieval,
+        ocr=False,
+        plan=plan,
+    )
+
+    assert grounded_calls == []
+    # The ungrounded collection still produced matches from the accepted
+    # candidates; grounding_filtered stayed at zero because nothing ran.
+    assert [m.risk_id for m in result.risks] == ["R-001"]
+    assert result.retrieval_stats.grounding_filtered == 0
+
+
 def test_run_extraction_rejects_negative_rrf_min_score(mock_config, tmp_path):
     """run_extraction refuses a negative --rrf-min-score, like the CLI.
 
