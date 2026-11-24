@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from asago_policy_mapper.extract.models import DecisionCallRecord, RetrievalConfig, ScoredCandidate
-from asago_policy_mapper.extract.pipeline import GroundingPrefilter, run_extraction
+from asago_policy_mapper.extract.pipeline import GROUNDING_LIKELIHOOD_QUESTION_V1, GroundingPrefilter, run_extraction
 from asago_policy_mapper.extract.screening import (
     Answer,
     AnswerBatch,
@@ -24,6 +24,7 @@ from asago_policy_mapper.extract.screening import (
     NoAnswer,
     ProbabilityAnswer,
     Question,
+    answer_payloads,
 )
 
 
@@ -2628,3 +2629,272 @@ def test_prefilter_real_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
     record = result.decision_calls[0]
     assert isinstance(record.request, list)
     assert record.request[0]["items"][0]["id"] == "R-001"
+
+
+def test_prefilter_real_jev_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
+    """The real DropThreshold over the real JevProbabilityAssessor filters.
+
+    The same end-to-end shape as the generic adapter's test, with the Jev
+    mapping in the assessor seat: an ``httpx.MockTransport`` stands in for
+    ``POST /v1/systemone``, everything else is production code. Pins four
+    behaviours: the Jev request body (``{model, state, questions}``, never
+    the generic ``{context, items}``) lands in ``decision_calls``; the key
+    really travels in the Authorization header and never reaches the
+    serialized result; the 0.10 boundary drops at-and-below and keeps
+    above; and the recorded response is the redacted Jev payload.
+    """
+    import httpx
+
+    from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
+    from asago_policy_mapper.extract.screening import DropThreshold
+
+    monkeypatch.setenv("PROB_API_KEY", "sentinel-secret-key")
+    sent_bodies = []
+    sent_headers = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_bodies.append(json.loads(request.content.decode("utf-8")))
+        sent_headers.append(dict(request.headers))
+        # Two Noul answers at 0.10 (dropped: at the threshold) and one at
+        # 0.9 (kept: above it), keyed by risk id as Jev keys them.
+        answers = {
+            "R-001": {"type": "noul", "noul": 0.10},
+            "R-002": {"type": "noul", "noul": 0.10},
+            "R-003": {"type": "noul", "noul": 0.90},
+        }
+        return httpx.Response(200, json={"answers": answers, "usage": {"input_tokens": 10}})
+
+    transport = httpx.MockTransport(handler)
+    endpoint = JevProbabilityEndpoint(base_url="http://localhost:8080", api_key_env="PROB_API_KEY")
+    assessor = JevProbabilityAssessor(endpoint, transport=transport)
+    rule = DropThreshold(assessor, 0.10)
+    prefilter = GroundingPrefilter(assessor=assessor, rule=rule)
+
+    grounded_ids: list[str] = []
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0, rerank=None):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    def fake_ground(
+        chunk_text,
+        candidates,
+        client,
+        model,
+        document,
+        chunk_index,
+        page=None,
+        section=None,
+        records=None,
+        max_batch_size=0,
+    ):
+        grounded_ids.extend(c.risk_id for c in candidates)
+        return {c.risk_id: ([], "medium") for c in candidates}
+
+    from asago_policy_mapper.extract import pipeline
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", fake_ground)
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=prefilter,
+        ocr=False,
+    )
+
+    # Exactly one real exchange happened, through the transport.
+    assert len(sent_bodies) == 1
+    # The exchange was authenticated: the key really traveled in the
+    # Authorization header, so its absence from the result is a real
+    # property of the recording, not an unset variable.
+    assert sent_headers[0].get("authorization") == "Bearer sentinel-secret-key"
+    assert "sentinel-secret-key" not in json.dumps(sent_bodies)
+    # The 0.10 boundary: at-threshold drops, above keeps.
+    assert "R-003" in grounded_ids
+    assert "R-001" not in grounded_ids
+    assert "R-002" not in grounded_ids
+    dropped = {fc.risk_id for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"}
+    assert dropped == {"R-001", "R-002"}
+    assert result.retrieval_stats.prefilter_dropped == 2
+    # The Jev request shape lands in decision_calls — {model, state,
+    # questions}, one Noul question per case keyed by risk id — never
+    # the generic {context, items} shape.
+    assert result.decision_calls
+    serialized = json.dumps(result.model_dump())
+    assert "sentinel-secret-key" not in serialized
+    record = result.decision_calls[0]
+    assert isinstance(record.request, list)
+    body = record.request[0]
+    assert set(body) >= {"model", "state", "questions"}
+    assert "context" not in body and "items" not in body
+    assert set(body["questions"]) == {"R-001", "R-002", "R-003"}
+    assert body["questions"]["R-001"]["type"] == "noul"
+    # The decision log's answers carry the Jev probabilities (the
+    # redacted Jev response shape feeds them), and the whole serialized
+    # result names no credential.
+    log_dump = record.decision.model_dump() if record.decision else {}
+    assert log_dump["items"][0]["answers"] == [{"kind": "probability", "probability": 0.1}]
+
+
+def test_prefilter_jev_error_detail_redacts_under_mid_assess_env_deletion(mock_config, tmp_path, monkeypatch):
+    """Deleting the key variable mid-assess cannot leak it through the error detail.
+
+    The flip's threading, not the base capture, anchors this path. A 200
+    body carrying an error object whose text echoes the credential goes
+    through ``_answers_from_payload``, where the Jev hook's ``secret``
+    parameter redacts the detail; that parameter is the secret the base
+    adapter captured at the top of ``assess`` and threaded through the
+    call. Redaction anchored to a fresh environment read instead sees an
+    empty secret after the mid-assess deletion and skips the
+    replacement, so the raw credential ships in ``NoAnswer.detail`` —
+    which persists into ``decision_calls`` and the serialized run
+    output. A regression to an env re-read in the Jev hook fails this
+    test even when the base exchange redaction stays intact.
+    """
+    import httpx
+
+    from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
+
+    monkeypatch.setenv("PROB_API_KEY", "sentinel-secret-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Mid-assess deletion: the request already carried the secret in
+        # its Authorization header, so the capture predates the deletion.
+        monkeypatch.delenv("PROB_API_KEY", raising=False)
+        return httpx.Response(
+            200,
+            json={
+                "error": "auth failed for key sentinel-secret-key",
+                "usage": {"input_tokens": 10},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    endpoint = JevProbabilityEndpoint(base_url="http://localhost:8080", api_key_env="PROB_API_KEY")
+    assessor = JevProbabilityAssessor(endpoint, transport=transport)
+
+    batch = assessor.assess(
+        GROUNDING_LIKELIHOOD_QUESTION_V1,
+        "context",
+        [DecisionCase(risk_id="R-001", name="Risk R-001", description="Description for R-001.")],
+    )
+
+    # The error detail is redacted against the captured secret, not a
+    # fresh environment read.
+    answer = batch.answers["R-001"][0]
+    assert answer.reason == "error"
+    assert answer.detail == "auth failed for key [redacted]"
+    assert "sentinel-secret-key" not in answer.detail
+    # The raw key appears nowhere the batch records: not in the
+    # exchange, not in the serialized batch.
+    assert "sentinel-secret-key" not in json.dumps(batch.exchange)
+    assert "sentinel-secret-key" not in json.dumps(answer_payloads(batch.answers["R-001"]))
+
+
+def test_prefilter_jev_unmatched_id_redacts_under_mid_assess_env_deletion(mock_config, tmp_path, monkeypatch):
+    """Deleting the key variable mid-assess cannot leak it through an unmatched id.
+
+    The unmatched-id path runs through the base adapter's assembly-point
+    redaction, which consumes the secret captured at the top of
+    ``assess``; the mid-assess deletion cannot make the raw id survive
+    into ``unmatched_ids`` — which persists into the run output.
+    """
+    import httpx
+
+    from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
+
+    monkeypatch.setenv("PROB_API_KEY", "sentinel-secret-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Mid-assess deletion: the request already carried the secret.
+        monkeypatch.delenv("PROB_API_KEY", raising=False)
+        return httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "R-001": {"type": "noul", "noul": 0.9},
+                    "sentinel-secret-key": {"type": "noul", "noul": 0.4},
+                },
+                "usage": {"input_tokens": 10},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    endpoint = JevProbabilityEndpoint(base_url="http://localhost:8080", api_key_env="PROB_API_KEY")
+    assessor = JevProbabilityAssessor(endpoint, transport=transport)
+
+    batch = assessor.assess(
+        GROUNDING_LIKELIHOOD_QUESTION_V1,
+        "context",
+        [DecisionCase(risk_id="R-001", name="Risk R-001", description="Description for R-001.")],
+    )
+
+    # The unmatched id is the redaction marker, never the raw key.
+    assert batch.unmatched_ids == ("[redacted]",)
+    assert "sentinel-secret-key" not in json.dumps(batch.exchange)
+
+
+def test_prefilter_jev_secret_survives_mid_assess_env_deletion(mock_config, tmp_path, monkeypatch):
+    """Deleting the key variable mid-assess cannot leak it through the batch.
+
+    The reviewer's probe: the environment variable is popped inside the
+    transport handler — after the request carried the secret, before the
+    batch is assembled. Redaction anchored to a fresh environment read
+    sees an empty secret and skips the replacement, so the echoed id
+    ships raw into unmatched_ids and the serialized run output. The
+    single-capture contract (the secret is read once at the top of
+    assess() and every downstream redaction uses that captured value)
+    makes the deletion a no-op for redaction; the base adapter threads
+    its captured secret through the Jev mapping, so the composition
+    holds end to end.
+    """
+    import httpx
+
+    from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
+
+    monkeypatch.setenv("PROB_API_KEY", "sentinel-secret-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Mid-assess deletion: the request already carried the secret.
+        monkeypatch.delenv("PROB_API_KEY", raising=False)
+        # A hostile echo: the credential itself as an unmatched id.
+        return httpx.Response(
+            200,
+            json={
+                "answers": {"R-001": {"type": "noul", "noul": 0.9}},
+                "usage": {"input_tokens": 10},
+                "echoed": "sentinel-secret-key",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    endpoint = JevProbabilityEndpoint(base_url="http://localhost:8080", api_key_env="PROB_API_KEY")
+    assessor = JevProbabilityAssessor(endpoint, transport=transport)
+
+    batch = assessor.assess(
+        GROUNDING_LIKELIHOOD_QUESTION_V1,
+        "context",
+        [DecisionCase(risk_id="R-001", name="Risk R-001", description="Description for R-001.")],
+    )
+
+    # The secret must not appear anywhere the batch records: not in the
+    # unmatched ids, not in the exchange, not in the serialized form.
+    dumped = json.dumps(batch.exchange)
+    assert "sentinel-secret-key" not in dumped
+    unmatched = "\n".join(batch.unmatched_ids)
+    assert "sentinel-secret-key" not in unmatched
