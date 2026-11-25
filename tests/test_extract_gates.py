@@ -7,6 +7,8 @@ could not answer (``NoAnswer``) keeps the candidate with a
 risks.
 """
 
+import pytest
+
 from asago_policy_mapper.extract.gates import ThresholdDrop
 from asago_policy_mapper.extract.screening import (
     AnswerBatch,
@@ -274,3 +276,67 @@ def test_keep_reason_uses_repr():
 
     assert decisions[0].keep is True
     assert decisions[0].reason == "p=0.10000001"
+
+
+def test_boolean_beside_probability_keeps():
+    """A boolean beside a droppable probability keeps the candidate (fail-open).
+
+    The rule reduces probabilities only; a BooleanAnswer in the tuple is
+    an answer of a kind it cannot interpret, so the case keeps with
+    no_answer:unsupported rather than dropping on the probability alone —
+    affirmative or not, and regardless of order.
+    """
+    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    batch = _batch(
+        {
+            "R-001": (BooleanAnswer(True, "mentioned"), ProbabilityAnswer(0.01)),
+            "R-002": (ProbabilityAnswer(0.01), BooleanAnswer(False, "too broad")),
+        }
+    )
+    decisions = rule.decide(_cases("R-001", "R-002"), batch)
+
+    assert decisions[0].keep is True
+    assert decisions[0].reason == "no_answer:unsupported"
+    assert decisions[1].keep is True
+    assert decisions[1].reason == "no_answer:unsupported"
+
+
+def test_nan_threshold_is_rejected():
+    """A NaN or out-of-range threshold raises ValueError at construction."""
+    rule_cls = ThresholdDrop
+    for bad in (float("nan"), -0.1, 1.1, float("inf")):
+        with pytest.raises(ValueError, match=r"must be in \[0, 1\]"):
+            rule_cls(_ProbabilityAssessor({}), threshold=bad)
+
+
+def test_huge_integer_threshold_is_rejected():
+    """A JSON-sized huge int threshold fails by value comparison, not OverflowError."""
+    with pytest.raises(ValueError, match=r"must be in \[0, 1\]"):
+        ThresholdDrop(_ProbabilityAssessor({}), threshold=10**400)
+
+
+def test_boolean_threshold_is_rejected():
+    """A boolean threshold raises TypeError, not a silent True == 1."""
+    with pytest.raises(TypeError, match="must be a number"):
+        ThresholdDrop(_ProbabilityAssessor({}), threshold=True)
+
+
+def test_nan_probability_keeps_with_invalid_reason():
+    """A NaN probability cannot be compared, so the case keeps deterministically.
+
+    Without this, max() over a NaN is order-dependent and the same batch
+    could keep or drop depending on outcome order.
+    """
+    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    batch = _batch(
+        {
+            "R-001": (ProbabilityAnswer(float("nan")),),
+            "R-002": (ProbabilityAnswer(0.01), ProbabilityAnswer(float("nan"))),
+        }
+    )
+
+    decisions = rule.decide(_cases("R-001", "R-002"), batch)
+
+    for decision in decisions:
+        assert decision.keep is True
+        assert decision.reason == "no_answer:invalid"
