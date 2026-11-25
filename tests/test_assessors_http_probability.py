@@ -142,11 +142,36 @@ def test_local_without_key_does_not_warn(monkeypatch):
 
 
 def test_assessor_emits_probability():
-    """The assessor declares {Probability} and a stable id naming model and base URL."""
+    """The assessor declares its two answer types and a stable id naming the model."""
     assessor = _assessor(lambda request: httpx.Response(200, json=_scores_body()))
 
     assert ProbabilityAnswer in assessor.answer_types
+    assert NoAnswer in assessor.answer_types
     assert "prob-model" in assessor.assessor_id
+
+
+def test_assessor_provably_emits_no_answer():
+    """Each declared NoAnswer path really emits one, so the declaration is honest.
+
+    ``answer_types`` claims NoAnswer; the timeout, error, invalid and
+    missing paths must all produce it, or a rule relying on the
+    declaration would mis-handle the batch.
+    """
+
+    def invalid_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_scores_body(("R-001", 7.5)))
+
+    def missing_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"scores": []})
+
+    timeout_assessor = _assessor(lambda request: (_ for _ in ()).throw(httpx.ReadTimeout("timed out", request=request)))
+    error_assessor = _assessor(lambda request: (_ for _ in ()).throw(httpx.ConnectError("refused", request=request)))
+    invalid_assessor = _assessor(invalid_handler)
+    missing_assessor = _assessor(missing_handler)
+
+    for assessor in (timeout_assessor, error_assessor, invalid_assessor, missing_assessor):
+        batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+        assert isinstance(batch.answers["R-001"][0], NoAnswer)
 
 
 def test_valid_scores_become_probabilities():
