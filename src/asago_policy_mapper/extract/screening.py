@@ -114,12 +114,18 @@ class AnswerBatch:
     ``response`` field (``list[dict]``); keys beyond
     ``messages``/``response`` are assessor-specific (the HTTP probability
     assessor records ``requests``/``responses``).
+
+    ``latency_recorded`` says whether ``latency_ms`` was measured on a real
+    assessment (a provider round-trip, a recorded row) rather than a
+    fallback the caller should not report as latency; assessors that
+    always measure the real thing set it True.
     """
 
     answers: dict[str, tuple[Answer, ...]]
     unmatched_ids: tuple[str, ...]
     latency_ms: float
     exchange: dict | None
+    latency_recorded: bool = False
 
 
 class Assessor(Protocol):
