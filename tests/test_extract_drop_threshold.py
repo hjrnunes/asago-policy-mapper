@@ -1,6 +1,6 @@
 """Tests for the pre-grounding probability threshold rule in extract/screening.py.
 
-The rule (``ThresholdDrop``) drops a candidate only when every
+The rule (``DropThreshold``) drops a candidate only when every
 probability answer is at or below the threshold; anything the assessor
 could not answer (``NoAnswer``) keeps the candidate with a
 ``no_answer:<reason>`` reason, so a broken provider never silently loses
@@ -9,11 +9,11 @@ risks.
 
 import pytest
 
-from asago_policy_mapper.extract.gates import ThresholdDrop
 from asago_policy_mapper.extract.screening import (
     AnswerBatch,
     BooleanAnswer,
     DecisionCase,
+    DropThreshold,
     NoAnswer,
     ProbabilityAnswer,
 )
@@ -78,11 +78,11 @@ class _BooleanAssessor:
 def test_threshold_exactly_0_10_drops():
     """A probability exactly at the threshold drops; just above keeps.
 
-    ThresholdDrop(threshold=0.10) drops on p <= threshold, so 0.10 drops and
+    DropThreshold(threshold=0.10) drops on p <= threshold, so 0.10 drops and
     0.10 + epsilon keeps, pinning the boundary on both sides.
     """
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
-    assert rule.rule_id == "p-le-drop/1"
+    rule = DropThreshold(_ProbabilityAssessor({}))
+    assert rule.rule_id == "drop-threshold/1"
     assert rule.threshold == 0.10
 
     batch = _batch({"R-001": (ProbabilityAnswer(0.10),), "R-002": (ProbabilityAnswer(0.11),)})
@@ -97,7 +97,7 @@ def test_threshold_exactly_0_10_drops():
 
 def test_unavailable_keeps_with_no_answer_reason():
     """Every NoAnswer answer keeps the candidate with reason no_answer:<reason>."""
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    rule = DropThreshold(_ProbabilityAssessor({}))
     batch = _batch(
         {
             "R-001": (NoAnswer("timeout"),),
@@ -119,7 +119,7 @@ def test_rule_rejects_categorical_assessor():
     """Constructing the rule with an assessor whose answer_types lacks ProbabilityAnswer raises TypeError."""
     assessor = _BooleanAssessor()
     try:
-        ThresholdDrop(assessor)
+        DropThreshold(assessor)
     except TypeError as e:
         message = str(e)
         assert "ProbabilityAnswer" in message
@@ -136,7 +136,7 @@ def test_rule_rejects_assessor_without_answer_types():
         sends_offsite = False
 
     try:
-        ThresholdDrop(_Bare())
+        DropThreshold(_Bare())
     except TypeError as e:
         assert "got answer_types=none" in str(e)
     else:
@@ -146,7 +146,7 @@ def test_rule_rejects_assessor_without_answer_types():
 def test_rule_keeps_its_assessor():
     """The rule retains the assessor it was constructed with, for the pipeline to drive."""
     assessor = _ProbabilityAssessor({})
-    rule = ThresholdDrop(assessor)
+    rule = DropThreshold(assessor)
 
     assert rule.assessor is assessor
 
@@ -159,7 +159,7 @@ def test_duplicate_probabilities_reduce_to_most_conservative():
     reduction: any high probability keeps, mirroring the any-yes keeps
     rule).
     """
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    rule = DropThreshold(_ProbabilityAssessor({}))
     batch = _batch(
         {
             "R-001": (ProbabilityAnswer(0.05), ProbabilityAnswer(0.50)),
@@ -179,7 +179,7 @@ def test_empty_answers_keep_with_missing_reason():
     The assessor omitted the id from the response; keeping it safeguards
     the pipeline against partial answers losing risks.
     """
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    rule = DropThreshold(_ProbabilityAssessor({}))
     decisions = rule.decide(_cases("R-001"), _batch({}))
 
     assert decisions[0].keep is True
@@ -188,7 +188,7 @@ def test_empty_answers_keep_with_missing_reason():
 
 def test_keep_reason_names_probability():
     """A kept candidate's reason carries its probability for the run report."""
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    rule = DropThreshold(_ProbabilityAssessor({}))
     batch = _batch({"R-001": (ProbabilityAnswer(0.42),)})
     decisions = rule.decide(_cases("R-001"), batch)
 
@@ -198,7 +198,7 @@ def test_keep_reason_names_probability():
 
 def test_threshold_default_is_0_10():
     """The rule's default threshold is 0.10, with the drop reason naming it."""
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    rule = DropThreshold(_ProbabilityAssessor({}))
 
     assert rule.threshold == 0.10
 
@@ -209,7 +209,7 @@ def test_threshold_default_is_0_10():
 
 def test_threshold_is_configurable():
     """A stricter threshold drops more candidates and updates the reason."""
-    rule = ThresholdDrop(_ProbabilityAssessor({}), threshold=0.25)
+    rule = DropThreshold(_ProbabilityAssessor({}), threshold=0.25)
 
     batch = _batch({"R-001": (ProbabilityAnswer(0.20),), "R-002": (ProbabilityAnswer(0.30),)})
     decisions = rule.decide(_cases("R-001", "R-002"), batch)
@@ -221,7 +221,7 @@ def test_threshold_is_configurable():
 
 def test_threshold_reason_keeps_full_precision():
     """A threshold that two-decimal formatting would round keeps its exact value in the reason."""
-    rule = ThresholdDrop(_ProbabilityAssessor({}), threshold=0.105)
+    rule = DropThreshold(_ProbabilityAssessor({}), threshold=0.105)
 
     batch = _batch({"R-001": (ProbabilityAnswer(0.104),), "R-002": (ProbabilityAnswer(0.11),)})
     decisions = rule.decide(_cases("R-001", "R-002"), batch)
@@ -233,7 +233,7 @@ def test_threshold_reason_keeps_full_precision():
 
 def test_unsupported_answer_keeps_with_unsupported_reason():
     """A non-empty answer the rule cannot reduce keeps with no_answer:unsupported."""
-    rule = ThresholdDrop(_MixedAssessor())
+    rule = DropThreshold(_MixedAssessor())
     batch = _batch({"R-001": (BooleanAnswer(True, "rationale"),)})
 
     decisions = rule.decide(_cases("R-001"), batch)
@@ -245,7 +245,7 @@ def test_unsupported_answer_keeps_with_unsupported_reason():
 
 def test_answers_for_ids_not_in_cases_are_ignored():
     """Answers and unmatched ids for risks outside the requested cases appear in no decision."""
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    rule = DropThreshold(_ProbabilityAssessor({}))
     batch = _batch(
         {"R-001": (ProbabilityAnswer(0.01),), "R-999": (ProbabilityAnswer(0.99),)},
         unmatched_ids=("R-888",),
@@ -260,22 +260,12 @@ def test_answers_for_ids_not_in_cases_are_ignored():
 
 def test_no_answer_dominates_keeps():
     """A mix of NoAnswer and ProbabilityAnswer keeps the candidate (NoAnswer wins)."""
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    rule = DropThreshold(_ProbabilityAssessor({}))
     batch = _batch({"R-001": (ProbabilityAnswer(0.01), NoAnswer("timeout"))})
     decisions = rule.decide(_cases("R-001"), batch)
 
     assert decisions[0].keep is True
     assert decisions[0].reason == "no_answer:timeout"
-
-
-def test_keep_reason_uses_repr():
-    """A kept probability that :g formatting would round keeps its exact value."""
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
-    batch = _batch({"R-001": (ProbabilityAnswer(0.10000001),)})
-    decisions = rule.decide(_cases("R-001"), batch)
-
-    assert decisions[0].keep is True
-    assert decisions[0].reason == "p=0.10000001"
 
 
 def test_boolean_beside_probability_keeps():
@@ -286,7 +276,7 @@ def test_boolean_beside_probability_keeps():
     no_answer:unsupported rather than dropping on the probability alone —
     affirmative or not, and regardless of order.
     """
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    rule = DropThreshold(_ProbabilityAssessor({}))
     batch = _batch(
         {
             "R-001": (BooleanAnswer(True, "mentioned"), ProbabilityAnswer(0.01)),
@@ -303,7 +293,7 @@ def test_boolean_beside_probability_keeps():
 
 def test_nan_threshold_is_rejected():
     """A NaN or out-of-range threshold raises ValueError at construction."""
-    rule_cls = ThresholdDrop
+    rule_cls = DropThreshold
     for bad in (float("nan"), -0.1, 1.1, float("inf")):
         with pytest.raises(ValueError, match=r"must be in \[0, 1\]"):
             rule_cls(_ProbabilityAssessor({}), threshold=bad)
@@ -312,13 +302,13 @@ def test_nan_threshold_is_rejected():
 def test_huge_integer_threshold_is_rejected():
     """A JSON-sized huge int threshold fails by value comparison, not OverflowError."""
     with pytest.raises(ValueError, match=r"must be in \[0, 1\]"):
-        ThresholdDrop(_ProbabilityAssessor({}), threshold=10**400)
+        DropThreshold(_ProbabilityAssessor({}), threshold=10**400)
 
 
 def test_boolean_threshold_is_rejected():
     """A boolean threshold raises TypeError, not a silent True == 1."""
     with pytest.raises(TypeError, match="must be a number"):
-        ThresholdDrop(_ProbabilityAssessor({}), threshold=True)
+        DropThreshold(_ProbabilityAssessor({}), threshold=True)
 
 
 def test_nan_probability_keeps_with_invalid_reason():
@@ -327,7 +317,7 @@ def test_nan_probability_keeps_with_invalid_reason():
     Without this, max() over a NaN is order-dependent and the same batch
     could keep or drop depending on outcome order.
     """
-    rule = ThresholdDrop(_ProbabilityAssessor({}))
+    rule = DropThreshold(_ProbabilityAssessor({}))
     batch = _batch(
         {
             "R-001": (ProbabilityAnswer(float("nan")),),
@@ -340,3 +330,13 @@ def test_nan_probability_keeps_with_invalid_reason():
     for decision in decisions:
         assert decision.keep is True
         assert decision.reason == "no_answer:invalid"
+
+
+def test_keep_reason_uses_repr():
+    """A kept probability that :g formatting would round keeps its exact value."""
+    rule = DropThreshold(_ProbabilityAssessor({}))
+    batch = _batch({"R-001": (ProbabilityAnswer(0.10000001),)})
+    decisions = rule.decide(_cases("R-001"), batch)
+
+    assert decisions[0].keep is True
+    assert decisions[0].reason == "p=0.10000001"
