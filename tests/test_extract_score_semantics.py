@@ -7,6 +7,7 @@ tests here pin the model-level contract (step 1) and the setter behaviour
 (steps 2-4 build on it).
 """
 
+import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -378,12 +379,13 @@ def test_bm25_rescued_candidate_keeps_measured_score(monkeypatch):
 
 
 def test_bm25_rescued_invalid_measurement_is_null(monkeypatch):
-    """A rescued candidate whose only measurement was invalid stays null.
+    """A candidate whose only measurement was invalid carries the unscored marker.
 
-    Every rescued candidate is in the rerank window and is measured, but
-    an invalid measurement (NaN or infinity) is no measurement: the score
-    is skipped, the candidate falls out of the top-k slice, and rescue
-    re-admits it unmeasured — rerank_source None, null at the boundary.
+    Every candidate in the rerank window is measured, but an invalid
+    measurement (NaN or infinity) is no measurement: the candidate rides
+    along after the scored ones with the NaN marker and no rerank_source,
+    so the selection path can route it to the judge and the boundary
+    serializes it as null confidence.
     """
     from asago_policy_mapper.extract import index as index_mod
 
@@ -436,9 +438,11 @@ def test_bm25_rescued_invalid_measurement_is_null(monkeypatch):
     results = idx.hybrid_search("text", top_k=2, bm25_rescue_rank=5)
 
     by_id = {c.risk_id: c for c in results}
-    # invalid measurement: no score to keep, no source to stamp
+    # invalid measurement: no score to keep, no source to stamp — the
+    # candidate carries the NaN marker so the selection path routes it to
+    # the judge as unscored
     assert by_id["R-003"].rerank_source is None
-    assert by_id["R-003"].cross_encoder_score == 0.0
+    assert math.isnan(by_id["R-003"].cross_encoder_score)
     assert by_id["R-003"].bm25_rank == 3
     # a valid measurement after an invalid one still registers: R-004 is
     # measured despite the NaN ahead of it in the window

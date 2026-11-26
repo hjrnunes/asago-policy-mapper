@@ -1391,6 +1391,61 @@ def _chunk_result_with_borderline(chunk_index=0, borderline_ids=("R-003",)):
     )
 
 
+def test_build_chunk_summaries_reports_rerank_unscored():
+    """The chunk summary carries rerank_unscored from the chunk stats."""
+    from asago_policy_mapper.extract.parse import Chunk
+    from asago_policy_mapper.extract.pipeline import _build_chunk_summaries
+
+    cr = ChunkResult(
+        chunk_index=0,
+        source="doc.md",
+        page=None,
+        section=None,
+        accepted=[],
+        borderline=[],
+        borderline_judged=[],
+        stats={"candidates_retrieved": 5, "auto_accepted": 0, "borderline": 0, "discarded": 0, "rerank_unscored": 2},
+    )
+    chunks = [Chunk(text="Chunk one.", source="doc.md", index=0)]
+
+    summaries = _build_chunk_summaries([cr], chunks)
+
+    assert summaries[0].rerank_unscored == 2
+
+
+def test_build_chunk_summaries_rerank_unscored_defaults_to_zero():
+    """Chunks without the stat serialize rerank_unscored as zero."""
+    from asago_policy_mapper.extract.parse import Chunk
+    from asago_policy_mapper.extract.pipeline import _build_chunk_summaries
+
+    cr = ChunkResult(
+        chunk_index=0,
+        source="doc.md",
+        page=None,
+        section=None,
+        accepted=[],
+        borderline=[],
+        borderline_judged=[],
+        stats={"candidates_retrieved": 5, "auto_accepted": 0, "borderline": 0, "discarded": 0},
+    )
+    chunks = [Chunk(text="Chunk one.", source="doc.md", index=0)]
+
+    summaries = _build_chunk_summaries([cr], chunks)
+    summary = summaries[0]
+
+    assert summary.rerank_unscored == 0
+    assert summary.model_dump()["rerank_unscored"] == 0
+
+    # The model default itself is zero, independent of the summary builder.
+    from asago_policy_mapper.extract.models import ChunkSummary
+
+    bare = ChunkSummary(
+        index=0, source="doc.md", text_preview="p", candidates_retrieved=0, auto_accepted=0, borderline=0, discarded=0
+    )
+    assert bare.rerank_unscored == 0
+    assert bare.model_dump()["rerank_unscored"] == 0
+
+
 def _judge_retrieval(**overrides):
     from asago_policy_mapper.extract.models import RetrievalConfig
 

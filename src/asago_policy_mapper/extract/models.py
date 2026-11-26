@@ -11,10 +11,17 @@ def _reject_nan(value: float | None) -> float | None:
     """Reject NaN scores: they break the merge ordering keys.
 
     NaN compares unequal to everything, including itself, so max() and
-    sort() become input-order dependent wherever a NaN reaches them. A NaN
-    confidence or cross-encoder score is always a bug — a score that was
-    never computed or failed to parse — so the models refuse it up front.
-    A None is "not calculated" and passes through untouched.
+    sort() become input-order dependent wherever a NaN reaches them. On
+    the serialized models (RetrievalScores, RiskMatch) a NaN score is
+    always a bug — a score that was never computed or failed to parse —
+    so they refuse it up front. A None is "not calculated" and passes
+    through untouched.
+
+    ScoredCandidate.cross_encoder_score is the one intentional NaN
+    carrier: between rerank and the chunk boundary, NaN marks a candidate
+    the reranker could not score, and _serialize_score converts it to the
+    0.0 default with rerank_source None before it reaches the serialized
+    models.
     """
     if value is not None and value != value:
         raise ValueError("score must not be NaN")
@@ -238,6 +245,7 @@ class ChunkSummary(BaseModel):
     borderline: int
     discarded: int
     bm25_rescued: int = 0
+    rerank_unscored: int = 0
     accepted_risk_ids: list[str] = []
 
 
