@@ -1515,3 +1515,138 @@ def test_ground_variants_one_passes_windows(mock_config):
     assert e.verification == "verified"
     assert e.found_chunk_index == 0
     assert e.chunk_index == 1
+
+
+# --- unattributed-span consumer guard tests ---
+
+
+def _match_with_unattributed_evidence():
+    """A merged risk whose evidence mixes attributed and unattributed spans."""
+    return RiskMatch(
+        risk_id="R-001",
+        risk_name="Bias",
+        risk_description="Bias risk.",
+        taxonomy="tax",
+        confidence=None,
+        confidence_source="none",
+        grounding_confidence="high",
+        accepted_by="expansion",
+        evidence=[
+            EvidenceSpan(text="attributed quote.", document="docA.md", chunk_index=2, verification="verified"),
+            EvidenceSpan(text="unattributed quote.", document="docA.md", chunk_index=None, verification="not_found"),
+            EvidenceSpan(text="another unattributed.", document="docA.md", chunk_index=None, verification="not_found"),
+        ],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.05),
+    )
+
+
+def test_consumers_skip_unattributed_spans():
+    """chunk-risk map and found-risk chunks ignore spans without a chunk."""
+    from asago_policy_mapper.extract.pipeline import _build_chunk_risk_map, _build_found_risk_chunks
+
+    m = _match_with_unattributed_evidence()
+
+    plan = _judge_plan()  # grounding on: attribute risks through evidence chunks
+    chunk_risk_ids = _build_chunk_risk_map([], [m], plan)
+    assert chunk_risk_ids == {2: ["R-001"]}
+
+    found = _build_found_risk_chunks([m], [])
+    assert found == {"R-001": {2}}
+
+
+def test_ground_variants_one_skips_unattributed_evidence():
+    """Variant grounding picks its context among spans that have a chunk."""
+    from asago_policy_mapper.extract.pipeline import _ground_variants_one
+
+    chunks = _grounding_chunks()
+    contexts = build_chunk_contexts(chunks)
+    indices = build_chunk_context_indices(chunks)
+
+    client = MagicMock()
+    client.for_stage = lambda stage: client
+    client.chat.completions.create.return_value = _grounding_verdict_response(
+        {"child-risk": ["encryption at rest is mandatory."]}
+    )
+
+    # The unattributed span sorts first on the 150a tie-break key (higher
+    # cross-encoder score wins), so the guard has to exclude it before
+    # choosing the grounding context.
+    parent = RiskMatch(
+        risk_id="parent-risk",
+        risk_name="Parent",
+        risk_description="Parent description",
+        taxonomy="tax",
+        confidence=None,
+        confidence_source="none",
+        grounding_confidence="high",
+        accepted_by="expansion",
+        evidence=[
+            EvidenceSpan(
+                text="unattributed quote.",
+                document="docA.md",
+                chunk_index=None,
+                verification="not_found",
+                cross_encoder_score=0.99,
+            ),
+            EvidenceSpan(
+                text="Second chunk: encryption at rest is mandatory.",
+                document="docA.md",
+                chunk_index=1,
+                cross_encoder_score=0.9,
+            ),
+        ],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.05),
+    )
+
+    _, grounded = _ground_variants_one(
+        parent,
+        chunks,
+        {"parent-risk": [{"risk_id": "child-risk", "name": "Child", "description": "Child description"}]},
+        client,
+        "test-model",
+        None,
+        chunk_contexts=contexts,
+        chunk_context_indices=indices,
+    )
+
+    # Grounding ran against the chunk the attributed span points at.
+    sent = client.chat.completions.create.call_args.kwargs["messages"]
+    user_content = next(m_["content"] for m_ in sent if "encryption at rest" in m_["content"])
+    assert contexts[1] in user_content
+    e = grounded["child-risk"][0][0]
+    assert e.chunk_index == 1
+
+
+def test_ground_variants_one_all_unattributed_returns_empty():
+    """A parent backed only by unattributed spans skips variant grounding."""
+    from asago_policy_mapper.extract.pipeline import _ground_variants_one
+
+    chunks = _grounding_chunks()
+    client = MagicMock()
+
+    parent = RiskMatch(
+        risk_id="parent-risk",
+        risk_name="Parent",
+        risk_description="Parent description",
+        taxonomy="tax",
+        confidence=None,
+        confidence_source="none",
+        grounding_confidence="high",
+        accepted_by="expansion",
+        evidence=[EvidenceSpan(text="unattributed.", document="docA.md", chunk_index=None, verification="not_found")],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.05),
+    )
+
+    _, grounded = _ground_variants_one(
+        parent,
+        chunks,
+        {"parent-risk": [{"risk_id": "child-risk", "name": "Child", "description": "Child description"}]},
+        client,
+        "test-model",
+        None,
+        chunk_contexts=None,
+        chunk_context_indices=None,
+    )
+
+    assert grounded == {}
+    client.chat.completions.create.assert_not_called()
