@@ -575,11 +575,11 @@ def _run_extraction_with_http_assessor(endpoint, handler, mock_config, tmp_path,
     import httpx
 
     from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
-    from asago_policy_mapper.extract.gates import ThresholdDrop
+    from asago_policy_mapper.extract.screening import DropThreshold
 
     assessor = HttpProbabilityAssessor(endpoint, transport=httpx.MockTransport(handler))
     return _run_extraction_with_assessor(
-        assessor, mock_config, tmp_path, monkeypatch, rule=ThresholdDrop(assessor, threshold)
+        assessor, mock_config, tmp_path, monkeypatch, rule=DropThreshold(assessor, threshold)
     )
 
 
@@ -611,11 +611,11 @@ def test_prefilter_generic_serialization_success(mock_config, tmp_path, monkeypa
 
     assert len(result.decision_calls) >= 1
     call = result.decision_calls[0]
-    request = call.request
-    assert isinstance(request, list) and len(request) >= 1
-    assert request[0]["items"][0]["id"] == "R-001"
+    requests = call.requests
+    assert isinstance(requests, list) and len(requests) >= 1
+    assert requests[0]["items"][0]["id"] == "R-001"
     responses = call.responses
-    assert isinstance(responses, list) and len(responses) == len(request)
+    assert isinstance(responses, list) and len(responses) == len(requests)
     assert responses[0]["scores"][0]["id"] == "R-001"
     assert responses[0]["scores"][0]["p"] == 0.5
     # The serialized result carries the responses and no credential.
@@ -652,7 +652,6 @@ def test_prefilter_generic_serialization_failure(mock_config, tmp_path, monkeypa
     assert "null" not in dumped.split('"responses"')[1][:80]
 
 
-@pytest.mark.xfail(strict=True, reason="the generic adapter's unmatched-id redaction lands with the #4 fixes")
 def test_prefilter_generic_echoed_key_absent_from_serialized_result(mock_config, tmp_path, monkeypatch):
     """An endpoint echoing the credential as an id must not reach the output.
 
@@ -685,7 +684,6 @@ def test_prefilter_generic_echoed_key_absent_from_serialized_result(mock_config,
     assert "secret-value-123" not in dumped
 
 
-@pytest.mark.xfail(strict=True, reason="the Jev adapter's unmatched-id redaction lands with the #7 fixes")
 def test_prefilter_jev_echoed_key_absent_from_serialized_result(mock_config, tmp_path, monkeypatch):
     """A Jev response echoing the credential as a question id must not reach the output.
 
@@ -697,7 +695,7 @@ def test_prefilter_jev_echoed_key_absent_from_serialized_result(mock_config, tmp
     import httpx
 
     from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
-    from asago_policy_mapper.extract.gates import ThresholdDrop
+    from asago_policy_mapper.extract.screening import DropThreshold
 
     monkeypatch.setenv("PREFILTER_JEV_TEST_KEY", "secret-value-123")
     endpoint = JevProbabilityEndpoint(base_url="http://localhost:9100/v1", api_key_env="PREFILTER_JEV_TEST_KEY")
@@ -709,7 +707,7 @@ def test_prefilter_jev_echoed_key_absent_from_serialized_result(mock_config, tmp
 
     assessor = JevProbabilityAssessor(endpoint, transport=httpx.MockTransport(echo_handler))
     result = _run_extraction_with_assessor(
-        assessor, mock_config, tmp_path, monkeypatch, rule=ThresholdDrop(assessor, 0.10)
+        assessor, mock_config, tmp_path, monkeypatch, rule=DropThreshold(assessor, 0.10)
     )
 
     dumped = json.dumps(result.model_dump())
