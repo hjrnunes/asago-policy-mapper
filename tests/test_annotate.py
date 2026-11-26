@@ -272,6 +272,81 @@ class TestLocateRiskEvidence:
         assert 1 in annotations and annotations[1]
         assert 0 not in annotations or not annotations[0]
 
+    def test_found_chunk_index_hint_wins_over_chunk_index(self):
+        """found_chunk_index names where the quote really is; it hints first."""
+        chunks = [
+            Chunk(text="nothing here", source="p.txt", index=0),
+            Chunk(text="shared quote", source="p.txt", index=1),
+        ]
+        data = {
+            "risks": [
+                {
+                    "risk_id": "r1",
+                    "risk_name": "Risk",
+                    "risk_description": "Desc",
+                    "evidence": [
+                        {"text": "shared quote", "document": "p.txt", "chunk_index": 0, "found_chunk_index": 1}
+                    ],
+                }
+            ]
+        }
+        annotations: dict[int, list[dict]] = {0: [], 1: []}
+        _locate_risk_evidence(data, chunks, annotations, [])
+        assert annotations[1] and not annotations[0]
+
+    def test_found_chunk_index_null_falls_back_to_chunk_index(self):
+        """A null found_chunk_index (not_found quote) hints with chunk_index.
+
+        The quote exists in both chunks, so only the hint can decide; a
+        dict.get default alone would miss the null value and re-locate by
+        scanning from chunk 0.
+        """
+        chunks = [
+            Chunk(text="shared quote appears here", source="p.txt", index=0),
+            Chunk(text="shared quote", source="p.txt", index=1),
+        ]
+        data = {
+            "risks": [
+                {
+                    "risk_id": "r1",
+                    "risk_name": "Risk",
+                    "risk_description": "Desc",
+                    "evidence": [
+                        {
+                            "text": "shared quote",
+                            "document": "p.txt",
+                            "chunk_index": 1,
+                            "found_chunk_index": None,
+                            "verification": "not_found",
+                        }
+                    ],
+                }
+            ]
+        }
+        annotations: dict[int, list[dict]] = {0: [], 1: []}
+        _locate_risk_evidence(data, chunks, annotations, [])
+        assert annotations[1] and not annotations[0]
+
+    def test_found_chunk_index_absent_falls_back_to_chunk_index(self):
+        """A span without the key at all (pre-verification output) uses chunk_index."""
+        chunks = [
+            Chunk(text="shared quote appears here", source="p.txt", index=0),
+            Chunk(text="shared quote", source="p.txt", index=1),
+        ]
+        data = {
+            "risks": [
+                {
+                    "risk_id": "r1",
+                    "risk_name": "Risk",
+                    "risk_description": "Desc",
+                    "evidence": [{"text": "shared quote", "document": "p.txt", "chunk_index": 1}],
+                }
+            ]
+        }
+        annotations: dict[int, list[dict]] = {0: [], 1: []}
+        _locate_risk_evidence(data, chunks, annotations, [])
+        assert annotations[1] and not annotations[0]
+
     def test_none_hint_in_extraction_scans_chunks(self):
         """A null chunk_index in serialized evidence scans all chunks."""
         annotations, totals = self._run(None, ["nothing here", "the quote is found only here"], quote="found only here")

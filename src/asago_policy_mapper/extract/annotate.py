@@ -190,7 +190,16 @@ def _locate_risk_evidence(
         for ev in risk.get("evidence", []):
             total_evidence += 1
             ev_text = ev.get("text", "")
-            hint_ci = ev.get("chunk_index", 0)
+            # The verification stage already located the quote; hint with
+            # where it really is (found_chunk_index) before the context
+            # chunk. A serialized not_found span carries found_chunk_index:
+            # null, which must fall back to chunk_index — dict.get's
+            # default only covers an absent key, not a null value, so the
+            # null case is checked explicitly. Output predating
+            # verification (neither key) scans from the first chunk.
+            hint_ci = ev.get("found_chunk_index")
+            if hint_ci is None:
+                hint_ci = ev.get("chunk_index", 0)
 
             ci, start, end, is_fuzzy = _locate_evidence(ev_text, hint_ci, chunks)
 
