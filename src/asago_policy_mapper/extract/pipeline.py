@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 from asago_policy_mapper.extract.attribute import (
@@ -477,17 +477,6 @@ def _variant_context_span(evidence: list[EvidenceSpan]) -> EvidenceSpan | None:
     return min(attributed, key=_variant_evidence_key)
 
 
-def _variants_attemptable(evidence) -> bool:
-    """Tell whether variant grounding can run against this evidence.
-
-    Mirrors `_ground_variants_one`'s proceed condition: grounding needs at
-    least one evidence span the group stage could attribute to a chunk.
-    `_variant_context_span` returns None for an empty list, so the no-evidence
-    early return is covered too.
-    """
-    return _variant_context_span(evidence) is not None
-
-
 def _ground_variants_one(
     parent_match,
     chunks,
@@ -497,20 +486,25 @@ def _ground_variants_one(
     records,
     chunk_contexts=None,
     chunk_context_indices=None,
-):
-    """Run variant-selective grounding for a single parent-level match."""
+) -> tuple[RiskMatch, dict, bool]:
+    """Run variant-selective grounding for a single parent-level match.
+
+    Returns the parent match, the grounded variants keyed by variant id,
+    and whether variants were sent to ground_variants at all: the caller
+    folds that flag into the group's outcome instead of re-deriving the
+    proceed decision from the worker's input.
+    """
     parent_id = parent_match.risk_id
     variants = variant_map.get(parent_id, [])
-    if not variants:
-        return parent_match, {}
+    best_ev = _variant_context_span(parent_match.evidence) if variants else None
+    if best_ev is None:
+        # no variants, or no evidence span the group stage could attribute
+        # to a chunk — either way nothing was sent to ground_variants
+        return parent_match, {}, False
 
-    evidence = parent_match.evidence
-    if not _variants_attemptable(evidence):
-        return parent_match, {}
-
-    best_ev = _variant_context_span(evidence)
-    assert best_ev is not None and best_ev.chunk_index is not None  # for mypy; checked above
-    ci = best_ev.chunk_index
+    # the span comes from _variant_context_span, whose filter keeps only
+    # spans with a chunk_index; cast once for mypy instead of re-asserting
+    ci = cast(int, best_ev.chunk_index)
     text = chunk_contexts[ci] if chunk_contexts and ci < len(chunk_contexts) else chunks[ci].text
     chunk = chunks[ci]
 
@@ -533,7 +527,7 @@ def _ground_variants_one(
         records=records,
         source_windows=source_windows,
     )
-    return parent_match, grounded
+    return parent_match, grounded, True
 
 
 def _variant_stub(variant_id, variant_info, parent_match):
@@ -620,9 +614,9 @@ def _run_variant_grounding(
             for pos, pm in enumerate(parent_matches)
         }
         for future in as_completed(futures):
-            parent_match, grounded = future.result()
+            parent_match, grounded, attempted = future.result()
             outcome = outcomes.setdefault(parent_match.risk_id, _ParentOutcome())
-            outcome.record(parent_match, grounded)
+            outcome.record(grounded, attempted)
             for vid, (evidence, confidence) in grounded.items():
                 vinfo = _variant_info(variant_map[parent_match.risk_id], vid)
                 if not vinfo:
@@ -664,11 +658,11 @@ class _ParentOutcome:
         self.grounded_variant_ids: list[str] = []
         self.attempted = False
 
-    def record(self, parent_match, grounded) -> None:
+    def record(self, grounded, attempted) -> None:
         """Fold one chunk's result into the parent's outcome."""
         if grounded:
             self.grounded_variant_ids.extend(grounded)
-        if _variants_attemptable(parent_match.evidence):
+        if attempted:
             self.attempted = True
 
     @property

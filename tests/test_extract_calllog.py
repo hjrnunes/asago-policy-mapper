@@ -411,7 +411,7 @@ def test_run_variant_grounding_numbers_records_in_task_order(monkeypatch):
         gate.enter(index)
         records.append(_record("ground-variant-001", stage="variant_grounding", chunk_index=index))
         gate.finish(index)
-        return pm, {}
+        return pm, {}, False
 
     monkeypatch.setattr(pipeline, "_ground_variants_one", fake_ground_variants_one)
     collector: list[LLMCallRecord] = []

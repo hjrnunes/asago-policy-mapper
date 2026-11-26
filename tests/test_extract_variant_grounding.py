@@ -412,7 +412,7 @@ class TestGroundVariantsOne:
         parent = _make_parent_match(chunk_index=0)
         chunks = _make_chunks(["biometric data processing without consent."])
 
-        pm, grounded = _ground_variants_one(
+        pm, grounded, attempted = _ground_variants_one(
             parent,
             chunks,
             VARIANT_MAP,
@@ -423,6 +423,7 @@ class TestGroundVariantsOne:
 
         assert pm is parent
         assert VARIANTS[0]["risk_id"] in grounded
+        assert attempted is True
 
     def test_no_variants_returns_empty(self):
         """Parent with no variants in the map → empty dict."""
@@ -430,7 +431,7 @@ class TestGroundVariantsOne:
         parent = _make_parent_match()
         chunks = _make_chunks(["Some text."])
 
-        pm, grounded = _ground_variants_one(
+        pm, grounded, attempted = _ground_variants_one(
             parent,
             chunks,
             {},
@@ -440,6 +441,7 @@ class TestGroundVariantsOne:
         )
 
         assert grounded == {}
+        assert attempted is False
         mock_client.chat.completions.create.assert_not_called()
 
     def test_no_evidence_returns_empty(self):
@@ -449,7 +451,7 @@ class TestGroundVariantsOne:
         parent.evidence = []
         chunks = _make_chunks(["Some text."])
 
-        pm, grounded = _ground_variants_one(
+        pm, grounded, attempted = _ground_variants_one(
             parent,
             chunks,
             VARIANT_MAP,
@@ -459,6 +461,7 @@ class TestGroundVariantsOne:
         )
 
         assert grounded == {}
+        assert attempted is False
         mock_client.chat.completions.create.assert_not_called()
 
 
@@ -1240,6 +1243,7 @@ def test_parent_with_only_unattributed_evidence_records_no_attempt():
     parent = _make_parent_match(chunk_index=0)
     parent.evidence = [EvidenceSpan(text="quote", document="doc.md", chunk_index=None, cross_encoder_score=0.5)]
     client = MagicMock()
+    client.for_stage = lambda stage: client
 
     matches, removed = _run_variant_grounding(
         [parent],
