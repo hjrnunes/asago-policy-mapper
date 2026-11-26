@@ -407,18 +407,12 @@ def _redacted_exception(error: Exception, secret: str) -> Exception:
 def _redact(value: object, secret: str) -> object:
     """Replace every occurrence of ``secret`` in a decoded response with a marker.
 
-    <<<<<<< HEAD
-        An empty secret (no key configured) returns the value unchanged. The
-        walk covers dict keys as well as values, because an endpoint can echo
-        the credential back as a key.
-    =======
-        The walk covers strings, values AND object keys: a hostile or broken
-        endpoint that echoes the credential in a key position must not land it
-        in the recorded wire (which persists into ``decision_calls`` in the
-        run output). Two keys that redact to the same marker would silently
-        drop one entry, so collided markers are numbered to keep both. An
-        empty secret (no key configured) returns the value unchanged.
-    >>>>>>> 38fe623 (fix(assessors): keep both values when redaction markers collide)
+    The walk covers strings, values AND object keys: a hostile or broken
+    endpoint that echoes the credential in a key position must not land it
+    in the recorded wire (which persists into ``decision_calls`` in the
+    run output). Two keys that redact to the same marker would silently
+    drop one entry, so collided markers are numbered to keep both. An
+    empty secret (no key configured) returns the value unchanged.
     """
     if not secret:
         return value

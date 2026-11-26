@@ -107,6 +107,8 @@ class LayaProbabilityAssessor(Assessor):
     """
 
     answer_types = frozenset({ProbabilityAnswer})
+    in_process = True
+    """Marks the assessor as in-process: no URL, no endpoint host."""
     fields_sent = ("chunk_context", "question", "criterion", "risk_name", "risk_description")
     """What a predict call actually carries: the state (the chunk context)
     plus each question's instructions (the question's criterion and the
