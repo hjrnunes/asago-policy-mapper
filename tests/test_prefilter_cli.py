@@ -1035,11 +1035,12 @@ def test_build_prefilter_rejects_non_string_provider(tmp_path, capsys):
     assert "provider" in capsys.readouterr().err
 
 
-def test_build_prefilter_jev_provider_builds_jev_assessor(tmp_path):
+def test_build_prefilter_jev_provider_builds_jev_assessor(tmp_path, monkeypatch):
     """provider: jev builds the Jev mapping with its endpoint defaults overridable."""
     from asago_policy_mapper.assessors.jev import JevProbabilityAssessor
     from asago_policy_mapper.cli import _build_prefilter
 
+    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "test-key-value")
     profile = {
         "provider": "jev",
         "model": "jev-1.14.0",
@@ -1058,11 +1059,12 @@ def test_build_prefilter_jev_provider_builds_jev_assessor(tmp_path):
     assert prefilter.rule.threshold == 0.05
 
 
-def test_build_prefilter_jev_defaults_without_endpoint_fields(tmp_path):
+def test_build_prefilter_jev_defaults_without_endpoint_fields(tmp_path, monkeypatch):
     """A jev profile can be minimal: endpoint defaults fill every field."""
     from asago_policy_mapper.assessors.jev import JevProbabilityAssessor
     from asago_policy_mapper.cli import _build_prefilter
 
+    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "test-key-value")
     path = tmp_path / "jev-min.yaml"
     path.write_text(yaml.safe_dump({"provider": "jev", "threshold": 0.02}))
     prefilter = _build_prefilter(path)
@@ -1072,13 +1074,14 @@ def test_build_prefilter_jev_defaults_without_endpoint_fields(tmp_path):
     assert prefilter.assessor.endpoint.api_key_env == "POLICY_MAPPER_JEV_API_KEY"
 
 
-def test_build_prefilter_jev_requires_decision_extra(tmp_path, capsys):
+def test_build_prefilter_jev_requires_decision_extra(tmp_path, capsys, monkeypatch):
     """A jev profile without httpx fails with the decision-extra advice."""
     import builtins
     import unittest.mock
 
     import asago_policy_mapper.cli as cli
 
+    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "test-key-value")
     real_import = builtins.__import__
 
     def failing_import(name, *args, **kwargs):
@@ -1215,22 +1218,26 @@ def test_build_prefilter_provider_null_with_minimal_http_profile(tmp_path):
         _build_prefilter(path)
 
 
-def test_provider_validation_messages_name_the_field_and_path(tmp_path, capsys):
+def test_provider_validation_messages_name_the_field_and_path(tmp_path, capsys, monkeypatch):
     """Provider profiles validate endpoint fields with the same messages as generic."""
     from asago_policy_mapper.cli import _build_prefilter
 
-    cases = [
-        ({"timeout_s": "x"}, "timeout_s must be a number"),
-        ({"timeout_s": -1.0}, "timeout_s must be greater than 0.0"),
+    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "test-key-value")
+    shared_cases = [
         ({"max_batch": "x"}, "max_batch must be an integer"),
         ({"max_batch": 16.0}, "max_batch must be an integer"),
         ({"max_batch": 0}, "max_batch must be at least 1.0"),
         ({"threshold": "x"}, "threshold must be a number"),
-        ({"base_url": 123}, "base_url must be a nonempty string"),
         ({"model": 123}, "model must be a nonempty string"),
+    ]
+    jev_only_cases = [
+        ({"timeout_s": "x"}, "timeout_s must be a number"),
+        ({"timeout_s": -1.0}, "timeout_s must be greater than 0.0"),
+        ({"timeout_s": 0}, "timeout_s must be greater than 0.0"),
+        ({"base_url": 123}, "base_url must be a nonempty string"),
         ({"api_key_env": 123}, "api_key_env must be a nonempty string"),
     ]
-    for provider in ("jev", "laya"):
+    for provider, cases in (("jev", shared_cases + jev_only_cases), ("laya", shared_cases)):
         for overrides, fragment in cases:
             profile = {"provider": provider, "threshold": 0.02}
             profile.update(overrides)
