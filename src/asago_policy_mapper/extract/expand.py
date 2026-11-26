@@ -102,12 +102,16 @@ def expand_with_siblings(
     """Expand merged risk IDs to include siblings not already found.
 
     Returns ExpandedRisk entries for risks that are in the expansion set
-    of any found risk but weren't found by retrieval themselves.
+    of any found risk but weren't found by retrieval themselves. A shared
+    sibling (reachable from several found risks) is attributed to the
+    first found risk in sorted order, so the attribution — and the
+    grounding groups it feeds — does not vary with PYTHONHASHSEED across
+    processes.
     """
     already_found = {rid.split(" ")[0].strip() for rid in merged_risk_ids}
     expanded_ids: dict[str, str] = {}
 
-    for rid in already_found:
+    for rid in sorted(already_found):
         siblings = expansion_graph.get(rid, set())
         if not siblings and "---" in rid:
             siblings = expansion_graph.get(rid.rsplit("---", 1)[0], set())

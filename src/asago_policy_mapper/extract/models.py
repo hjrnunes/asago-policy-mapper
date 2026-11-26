@@ -3,7 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, model_serializer
+from pydantic import BaseModel, field_validator, model_serializer
+
+
+def _reject_nan(value: float) -> float:
+    """Reject NaN scores: they break the merge ordering keys.
+
+    NaN compares unequal to everything, including itself, so max() and
+    sort() become input-order dependent wherever a NaN reaches them. A NaN
+    confidence or cross-encoder score is always a bug — a score that was
+    never computed or failed to parse — so the models refuse it up front.
+    """
+    if value != value:
+        raise ValueError("score must not be NaN")
+    return value
 
 
 class ScoredCandidate(BaseModel):
@@ -49,6 +62,8 @@ class EvidenceSpan(BaseModel):
     sentence_index: int = 0
     cross_encoder_score: float = 0.0
 
+    _reject_nan_score = field_validator("cross_encoder_score")(_reject_nan)
+
 
 class RetrievalScores(BaseModel):
     bm25_rank: int
@@ -73,6 +88,8 @@ class RiskMatch(BaseModel):
     vulnerability: str | None = None
     consequence: str | None = None
     impact: str | None = None
+
+    _reject_nan_confidence = field_validator("confidence")(_reject_nan)
 
 
 class RetrievalStats(BaseModel):

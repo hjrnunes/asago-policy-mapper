@@ -23,7 +23,7 @@ from asago_policy_mapper.extract.attribute import (
 )
 from asago_policy_mapper.extract.calllog import merge_call_records
 from asago_policy_mapper.extract.index import RiskIndex
-from asago_policy_mapper.extract.merge import merge_matches
+from asago_policy_mapper.extract.merge import _tiebreak_key, merge_matches
 from asago_policy_mapper.extract.models import (
     ChunkSummary,
     DecisionCallRecord,
@@ -371,6 +371,19 @@ def _run_grounding(
     return all_matches, all_filtered, grounding_filtered
 
 
+def _variant_evidence_key(e: EvidenceSpan) -> tuple:
+    """Ordering key that picks the evidence span variants ground against.
+
+    Cross-encoder score decides first (descending); ties break on the
+    lowest chunk index, then text. The serialization tail — the same one
+    the merge ordering keys use — makes the order total, so ties past
+    those components never fall back to input order even if a future
+    constructor mixes spans from different documents or sections into
+    one parent's evidence.
+    """
+    return (-e.cross_encoder_score, e.chunk_index, e.text, _tiebreak_key(e))
+
+
 def _ground_variants_one(
     parent_match,
     chunks,
@@ -390,7 +403,7 @@ def _ground_variants_one(
     if not evidence:
         return parent_match, {}
 
-    best_ev = max(evidence, key=lambda e: e.cross_encoder_score, default=evidence[0])
+    best_ev = min(evidence, key=_variant_evidence_key)
     ci = best_ev.chunk_index
     text = chunk_contexts[ci] if chunk_contexts and ci < len(chunk_contexts) else chunks[ci].text
     chunk = chunks[ci]
