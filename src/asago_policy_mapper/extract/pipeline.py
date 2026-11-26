@@ -568,9 +568,13 @@ def _run_variant_grounding(
     chunk_contexts=None,
     chunk_context_indices=None,
     max_workers=4,
-    stage="grounding",
+    *,
+    stage,
 ) -> tuple[list[RiskMatch], list[RemovedVariantGroup]]:
     """Replace parent-level matches with their grounded variants.
+
+    ``stage`` labels the records this call emits (grounding or expansion);
+    it is required so a new call site cannot silently mislabel them.
 
     Returns (matches, removed): the surviving matches (non-parent matches
     plus one match per grounded variant) and one RemovedVariantGroup record
@@ -1758,6 +1762,7 @@ def _run_variant_grounding_stage(
                 chunk_contexts=chunk_contexts,
                 chunk_context_indices=chunk_context_indices,
                 max_workers=max_workers,
+                stage="grounding",
             )
     return all_matches, []
 

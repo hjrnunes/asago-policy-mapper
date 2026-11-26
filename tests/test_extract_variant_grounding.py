@@ -499,6 +499,7 @@ class TestRunVariantGrounding:
             mock_client,
             self._make_config(),
             None,
+            stage="grounding",
         )
 
         result_ids = {m.risk_id for m in result}
@@ -531,6 +532,7 @@ class TestRunVariantGrounding:
             mock_client,
             self._make_config(),
             None,
+            stage="grounding",
         )
 
         assert len(result) == 1
@@ -590,6 +592,7 @@ class TestRunVariantGrounding:
             MagicMock(),
             self._make_config(),
             None,
+            stage="grounding",
         )
 
         assert len(result[0]) == 1
@@ -621,6 +624,7 @@ class TestRunVariantGrounding:
             mock_client,
             self._make_config(),
             None,
+            stage="grounding",
         )
 
         assert len(result[0]) == 0
@@ -652,6 +656,7 @@ class TestRunVariantGrounding:
             self._make_config(),
             None,
             chunk_contexts=padded,
+            stage="grounding",
         )
 
         call_args = mock_client.chat.completions.create.call_args
@@ -1084,6 +1089,7 @@ def test_removed_group_recorded_with_reason():
         _client_grounding_nothing(),
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     assert matches == []
@@ -1104,6 +1110,7 @@ def test_removed_group_recorded_once_per_parent():
         _client_grounding_nothing(),
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     assert matches == []
@@ -1124,6 +1131,7 @@ def test_parent_without_evidence_recorded():
         MagicMock(),
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     assert matches == []
@@ -1179,6 +1187,7 @@ def test_removed_group_not_recorded_when_any_chunk_grounded_a_variant():
         _client_grounding_chunk("chunk one text", grounded_delay_s=0.2),
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     # chunk 1 grounded a variant; the parent survives through it
@@ -1203,6 +1212,7 @@ def test_removed_reason_independent_of_completion_order():
             _client_grounding_chunk(marker),
             SimpleNamespace(model="test-model"),
             None,
+            stage="grounding",
         )
         results.append((sorted(m.risk_id for m in matches), [(r.reason, r.attempted_variant_ids) for r in removed]))
 
@@ -1229,6 +1239,7 @@ def test_removed_reason_no_parent_evidence_across_mixed_chunks():
         _client_grounding_nothing(),
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     # chunk 0 had attributed evidence, so the variants were attempted
@@ -1252,6 +1263,7 @@ def test_parent_with_only_unattributed_evidence_records_no_attempt():
         client,
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     assert matches == []

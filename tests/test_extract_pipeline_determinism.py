@@ -136,6 +136,7 @@ def _run(parents, chunks, monkeypatch, executor_cls, as_completed):
         SimpleNamespace(model="test-model"),
         None,
         max_workers=4,
+        stage="grounding",
     )
     return matches
 
@@ -258,6 +259,7 @@ def test_pipeline_reverse_completion_same_removed_record_order(monkeypatch):
             SimpleNamespace(model="test-model"),
             None,
             max_workers=4,
+            stage="grounding",
         )
         return removed
 

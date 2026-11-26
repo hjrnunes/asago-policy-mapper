@@ -436,7 +436,9 @@ def test_run_variant_grounding_numbers_records_in_task_order(monkeypatch):
     }
     config = LLMConfig(base_url="http://test", model="test-model", max_context=0)
 
-    pipeline._run_variant_grounding(matches, [], variant_map, None, config, collector, max_workers=task_count)
+    pipeline._run_variant_grounding(
+        matches, [], variant_map, None, config, collector, max_workers=task_count, stage="grounding"
+    )
 
     assert gate.completion_order == list(range(task_count - 1, -1, -1))
     assert [(r.call_id, r.chunk_index) for r in collector] == [

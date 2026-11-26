@@ -748,6 +748,7 @@ def test_variant_match_marks_inherited_scores():
         mock_client,
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     assert len(result) == 1
@@ -792,6 +793,7 @@ def test_variant_match_unmeasured_parent_is_null():
         mock_client,
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     variant = result[0]
@@ -829,6 +831,7 @@ def test_variant_match_rrf_parent_keeps_ranking_confidence():
         mock_client,
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     variant = result[0]
@@ -865,6 +868,7 @@ def test_variant_match_colbert_parent_keeps_source():
         mock_client,
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     variant = result[0]
@@ -908,6 +912,7 @@ def test_variant_match_rrf_parent_keeps_measured_scores():
         mock_client,
         SimpleNamespace(model="test-model"),
         None,
+        stage="grounding",
     )
 
     variant = result[0]
