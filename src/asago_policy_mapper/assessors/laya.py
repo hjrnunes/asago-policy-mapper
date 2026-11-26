@@ -47,7 +47,6 @@ from asago_policy_mapper.assessors.replay import context_sha256
 from asago_policy_mapper.extract.screening import (
     Answer,
     AnswerBatch,
-    Assessor,
     DecisionCase,
     NoAnswer,
     ProbabilityAnswer,
@@ -97,8 +96,8 @@ class LayaProbabilityEndpoint(ProbabilityEndpoint):
     max_batch: int = _LAYA_MAX_BATCH
 
 
-class LayaProbabilityAssessor(Assessor):
-    """A ``Assessor`` that scores cases through local laya noul questions.
+class LayaProbabilityAssessor:
+    """An ``Assessor`` that scores cases through local laya noul questions.
 
     The model loads once, in the constructor (the first ever load downloads
     the checkpoint; later loads use the local cache), and the agent is
@@ -124,7 +123,8 @@ class LayaProbabilityAssessor(Assessor):
         self.assessor_id = f"laya:{endpoint.model}"
         self.sends_offsite = False
         self.prompt_name = "laya-noul"
-        self.offsite = False
+        self.sends_offsite = False
+        self.prompt_name = "laya-noul"
         # The import must succeed even when an agent is injected (the stub
         # tests inject one; the real constructor always loads the model).
         self._agent = agent if agent is not None else laya_mlx.load(endpoint.model)
@@ -138,7 +138,7 @@ class LayaProbabilityAssessor(Assessor):
             # Built inline, never shared: a caller mutating one result's
             # lists must not change what a later assessment records.
             return AnswerBatch(answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []})
-        answers: dict[str, tuple[Answer, ...]] = {}
+        answers_out: dict[str, tuple[Answer, ...]] = {}
         unmatched: list[str] = []
         exchanges: list[dict] = []
         latency_ms = 0.0
@@ -148,11 +148,11 @@ class LayaProbabilityAssessor(Assessor):
             latency_ms += (time.perf_counter() - t0) * 1000
             exchanges.append(exchange)
             unmatched.extend(batch_unmatched)
-            for rid, outcome in batch_answers.items():
-                entry = answers.get(rid)
-                answers[rid] = (entry or ()) + (outcome,)
+            for rid, answer in batch_answers.items():
+                entry = answers_out.get(rid)
+                answers_out[rid] = (entry or ()) + (answer,)
         return AnswerBatch(
-            answers=answers,
+            answers=answers_out,
             unmatched_ids=tuple(unmatched),
             latency_ms=latency_ms,
             # A real forward pass produced each batch's latency, the same
@@ -161,7 +161,10 @@ class LayaProbabilityAssessor(Assessor):
             # keeps the default False: no pass ran, so there is nothing
             # measured to report.
             latency_recorded=True,
-            exchange={"requests": [w["request"] for w in exchanges], "responses": [w["response"] for w in exchanges]},
+            exchange={
+                "requests": [w["request"] for w in exchanges],
+                "responses": [w["response"] for w in exchanges],
+            },
         )
 
     def _batches(self, cases: Sequence[DecisionCase]) -> list[list[DecisionCase]]:
@@ -221,7 +224,7 @@ class LayaProbabilityAssessor(Assessor):
 
         Laya's context counts instructions against the state, so the
         Jev-style structured instructions (~150 tokens) are too costly at
-        batch sizes we need. The string carries the criterion and the
+        batch sizes we need. The string carries the proposition and the
         risk's name and description — the question's complete meaning.
         """
         return {

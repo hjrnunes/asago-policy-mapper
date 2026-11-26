@@ -345,7 +345,7 @@ class DecisionCallRecord(BaseModel):
     def _omit_empty_responses(self, handler) -> dict[str, Any]:
         """Leave ``responses`` out unless the assessor recorded any.
 
-        Assessors without a response wire (replay, the generic seam stub)
+        Assessors without a response exchange (replay, the generic seam stub)
         keep it empty, and serializing it would change the output of every
         prefilter run those assessors serve; only a provider run carries
         response readouts.

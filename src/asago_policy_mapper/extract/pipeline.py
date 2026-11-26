@@ -1508,10 +1508,13 @@ def _prefilter_one_chunk(
     decision_by_id = {d.risk_id: d for d in decisions}
     accepted_ids = {c.risk_id for c in cr.accepted}
     keep_ids = {d.risk_id for d in decisions if d.keep} | (accepted_ids - set(decision_by_id))
+    request_bodies = _prefilter_requests(
+        context, cases, assessment, prefilter.assessor, GROUNDING_LIKELIHOOD_QUESTION_V1
+    )
     calls_record = DecisionCallRecord(
         stage="prefilter",
         chunk_index=cr.chunk_index,
-        requests=_prefilter_requests(context, cases, assessment, prefilter.assessor, GROUNDING_LIKELIHOOD_QUESTION_V1),
+        requests=request_bodies,
         responses=_prefilter_responses(assessment),
         decision=_prefilter_decision_log(
             decisions, assessment, prefilter.rule, getattr(prefilter.assessor, "assessor_id", "")

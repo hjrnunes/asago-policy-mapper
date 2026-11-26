@@ -2,8 +2,8 @@
 
 All tests stub the ``laya_mlx`` module in ``sys.modules`` — no checkpoint
 download, no MLX import at collection time. The assessor implements the
-``BinaryAssessor`` protocol from ``extract/decide.py`` and emits
-``ProbabilityAnswer`` and ``NoAnswer`` outcomes, mirroring the Jev mapping's
+``Assessor`` protocol from ``extract/screening.py`` and emits
+``ProbabilityAnswer`` and ``NoAnswer`` answers, mirroring the Jev mapping's
 semantics: one noul question per case keyed by risk id, ``answers[qid]``
 read as the probability, fail-open on errors.
 """
@@ -524,11 +524,11 @@ def test_non_dict_answers_is_invalid(monkeypatch):
     assert batch.answers["R-001"][0].reason == "invalid"
 
 
-# --- wire record ---
+# --- exchange record ---
 
 
-def test_wire_records_request_answers_and_usage(monkeypatch):
-    """The wire record carries the request shape, the answers and the full usage block."""
+def test_exchange_records_request_answers_and_usage(monkeypatch):
+    """The exchange record carries the request shape, the answers and the full usage block."""
     from asago_policy_mapper.assessors.replay import context_sha256
 
     result = _laya_result(("R-001", 0.7), truncated=True, dropped=263)
@@ -551,7 +551,7 @@ def test_wire_records_request_answers_and_usage(monkeypatch):
     assert response["usage"]["truncated"] is True
 
 
-def test_wire_keeps_request_on_error(monkeypatch):
+def test_exchange_keeps_request_on_error(monkeypatch):
     """A failed predict records the request and an explicit error object.
 
     A persisted ``null`` response says nothing; the error object carries
@@ -601,7 +601,7 @@ def test_latency_is_flagged_recorded_on_a_real_pass(monkeypatch):
     assert empty.latency_ms == 0.0
 
 
-def test_wire_accumulates_across_batches(monkeypatch):
+def test_exchange_accumulates_across_batches(monkeypatch):
     """Multiple predict calls record one request and one response each, in order."""
     agent = _StubAgent([_laya_result(("R-001", 0.1)), _laya_result(("R-003", 0.9))])
     assessor = _assessor(agent, monkeypatch, max_batch=1)
@@ -616,8 +616,8 @@ def test_wire_accumulates_across_batches(monkeypatch):
     assert batch.latency_ms >= 0.0
 
 
-def test_truncation_visible_in_wire(monkeypatch):
-    """state_tokens_dropped lands in the wire so the pilot can measure context loss."""
+def test_truncation_visible_in_the_exchange(monkeypatch):
+    """state_tokens_dropped lands in the exchange so the pilot can measure context loss."""
     result = _laya_result(("R-001", 0.5), truncated=True, dropped=831)
     agent = _StubAgent([result])
     assessor = _assessor(agent, monkeypatch)
