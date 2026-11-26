@@ -1799,7 +1799,7 @@ def test_ground_variants_one_passes_windows(mock_config):
         scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.05),
     )
 
-    _, grounded = _ground_variants_one(
+    _, grounded, _attempted = _ground_variants_one(
         parent,
         chunks,
         {"parent-risk": [{"risk_id": "child-risk", "name": "Child", "description": "Child description"}]},
@@ -1897,7 +1897,7 @@ def test_ground_variants_one_skips_unattributed_evidence():
         scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.05),
     )
 
-    _, grounded = _ground_variants_one(
+    _, grounded, _attempted = _ground_variants_one(
         parent,
         chunks,
         {"parent-risk": [{"risk_id": "child-risk", "name": "Child", "description": "Child description"}]},
@@ -1936,7 +1936,7 @@ def test_ground_variants_one_all_unattributed_returns_empty():
         scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.05),
     )
 
-    _, grounded = _ground_variants_one(
+    _, grounded, attempted = _ground_variants_one(
         parent,
         chunks,
         {"parent-risk": [{"risk_id": "child-risk", "name": "Child", "description": "Child description"}]},
@@ -1948,4 +1948,5 @@ def test_ground_variants_one_all_unattributed_returns_empty():
     )
 
     assert grounded == {}
+    assert attempted is False
     client.chat.completions.create.assert_not_called()

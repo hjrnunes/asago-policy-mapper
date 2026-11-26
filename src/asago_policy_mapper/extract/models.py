@@ -342,6 +342,15 @@ class DecisionCallRecord(BaseModel):
     synthesized: bool = False
 
 
+class RemovedVariantGroup(BaseModel):
+    """A collapsed variant group that variant grounding removed from the output."""
+
+    parent_id: str
+    stage: Literal["grounding", "expansion"]
+    reason: Literal["no_variant_grounded", "no_parent_evidence"]
+    attempted_variant_ids: list[str]
+
+
 class ExtractionResult(BaseModel):
     version: str = "0.4"
     risks: list[RiskMatch]
@@ -353,12 +362,13 @@ class ExtractionResult(BaseModel):
     llm_calls: list[LLMCallRecord] = []
     grounding_filtered_candidates: list[FilteredCandidate] = []
     decision_calls: list[DecisionCallRecord] = []
+    removed_variant_groups: list[RemovedVariantGroup] = []
     eval: dict | None = None
     prefilter_ran: bool = False
 
     @model_serializer(mode="wrap")
-    def _omit_decision_calls_when_off(self, handler) -> dict[str, Any]:
-        """Leave ``decision_calls`` out unless the prefilter ran.
+    def _omit_empty_records(self, handler) -> dict[str, Any]:
+        """Leave optional record lists out unless they carry a record.
 
         ``decision_calls`` carries the filter's presence the way
         ``prefilter_dropped`` does: the key appears whenever the filter
@@ -366,12 +376,17 @@ class ExtractionResult(BaseModel):
         — and both keys are omitted only when the filter never ran, so
         a filter-off result stays byte-identical to the pre-filter
         output. ``prefilter_ran`` says which of the two worlds the
-        result belongs to and serializes with it.
+        result belongs to and serializes with it. With a stage off its
+        list stays empty, and the serialized result must stay
+        byte-identical to the pre-change output, so a field only appears
+        when it carries a record.
         """
         data: dict[str, Any] = handler(self)
         if not self.prefilter_ran:
             data.pop("decision_calls", None)
             data.pop("prefilter_ran", None)
+        if not data.get("removed_variant_groups"):
+            data.pop("removed_variant_groups", None)
         return data
 
 

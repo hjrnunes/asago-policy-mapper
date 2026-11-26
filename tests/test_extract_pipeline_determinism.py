@@ -128,7 +128,7 @@ def _run(parents, chunks, monkeypatch, executor_cls, as_completed):
     monkeypatch.setattr(pipeline, "ground_variants", _stub_ground_variants)
     monkeypatch.setattr(pipeline, "ThreadPoolExecutor", executor_cls)
     monkeypatch.setattr(pipeline, "as_completed", as_completed)
-    return _run_variant_grounding(
+    matches, _removed = _run_variant_grounding(
         parents,
         chunks,
         VARIANT_MAP,
@@ -136,7 +136,9 @@ def _run(parents, chunks, monkeypatch, executor_cls, as_completed):
         SimpleNamespace(model="test-model"),
         None,
         max_workers=4,
+        stage="grounding",
     )
+    return matches
 
 
 def _quotes(result):
@@ -220,3 +222,56 @@ def test_pipeline_reverse_completion_same_risk_set(two_parents, monkeypatch):
     forward_scores = {m.risk_id: (m.confidence, m.accepted_by) for m in forward}
     reverse_scores = {m.risk_id: (m.confidence, m.accepted_by) for m in reverse}
     assert forward_scores == reverse_scores
+
+
+def test_pipeline_reverse_completion_same_removed_record_order(monkeypatch):
+    """The serialized removal records keep their order under reversed completion.
+
+    Two distinct parents, both rejected by the variant grounder, produce
+    two records; the list order comes from first-completion insertion, so
+    without the sort a reversed completion flips it. The serialized list
+    must stay identical either way.
+    """
+
+    def _parent(pid):
+        return _parent_match([_evidence(f"quote for {pid}", 0)]).model_copy(update={"risk_id": pid})
+
+    parents = [_parent("b-parent"), _parent("a-parent")]
+    variant_map = {
+        "a-parent": VARIANTS,
+        "b-parent": [{**v, "risk_id": v["risk_id"].replace(PARENT_ID, "b-parent")} for v in VARIANTS],
+    }
+
+    def _reject_all(**kwargs):
+        return {}
+
+    def _removed(parents, executor_cls, as_completed):
+        from asago_policy_mapper.extract import pipeline
+
+        monkeypatch.setattr(pipeline, "ground_variants", _reject_all)
+        monkeypatch.setattr(pipeline, "ThreadPoolExecutor", executor_cls)
+        monkeypatch.setattr(pipeline, "as_completed", as_completed)
+        _, removed = _run_variant_grounding(
+            parents,
+            _chunks(["chunk zero"]),
+            variant_map,
+            MagicMock(),
+            SimpleNamespace(model="test-model"),
+            None,
+            max_workers=4,
+            stage="grounding",
+        )
+        return removed
+
+    forward = _removed(parents, _SubmissionOrderExecutor, lambda fs, timeout=None: list(fs))
+    reverse = _removed(
+        parents,
+        _ReverseCompletionExecutor,
+        lambda fs, timeout=None: list(reversed(list(fs))),
+    )
+
+    # submission order is b then a: without the sort, forward completion
+    # lists b first and reversed completion lists a first
+    assert [r.parent_id for r in forward] == ["a-parent", "b-parent"]
+    assert [r.parent_id for r in reverse] == ["a-parent", "b-parent"]
+    assert forward == reverse

@@ -6,6 +6,7 @@ from asago_policy_mapper.extract.models import (
     EvidenceSpan,
     ExtractionResult,
     LLMCallRecord,
+    RemovedVariantGroup,
     RetrievalScores,
     RetrievalStats,
     RiskMatch,
@@ -290,6 +291,79 @@ def test_extraction_result_v04_serialization_roundtrip():
     assert restored.chunks == []
     assert restored.llm_calls == []
     assert restored.eval is None
+
+
+def test_removed_variant_group_absent_when_empty():
+    """No removals: the serialized output stays byte-identical to pre-change runs."""
+    result = ExtractionResult(
+        risks=[],
+        source_documents=["policy.pdf"],
+        retrieval_stats=RetrievalStats(
+            total_chunks=0,
+            total_candidates_retrieved=0,
+            auto_accepted=0,
+            llm_judged=0,
+            grounding_filtered=0,
+        ),
+    )
+    assert result.removed_variant_groups == []
+    assert "removed_variant_groups" not in result.model_dump()
+
+
+def test_removed_variant_group_serialized_when_present():
+    """A removal record round-trips with parent id, stage, reason and attempted variants."""
+    record = RemovedVariantGroup(
+        parent_id="unauthorized-processing",
+        stage="grounding",
+        reason="no_variant_grounded",
+        attempted_variant_ids=[
+            "unauthorized-processing---biometric-data",
+            "unauthorized-processing---location-data",
+        ],
+    )
+    result = ExtractionResult(
+        risks=[],
+        source_documents=["policy.pdf"],
+        retrieval_stats=RetrievalStats(
+            total_chunks=0,
+            total_candidates_retrieved=0,
+            auto_accepted=0,
+            llm_judged=0,
+            grounding_filtered=0,
+        ),
+        removed_variant_groups=[record],
+    )
+    d = result.model_dump()
+    assert d["removed_variant_groups"] == [
+        {
+            "parent_id": "unauthorized-processing",
+            "stage": "grounding",
+            "reason": "no_variant_grounded",
+            "attempted_variant_ids": [
+                "unauthorized-processing---biometric-data",
+                "unauthorized-processing---location-data",
+            ],
+        }
+    ]
+    restored = ExtractionResult(**d)
+    assert restored.removed_variant_groups == [record]
+
+
+def test_removed_variant_group_dump_options_still_apply():
+    """The empty-field omission does not break model_dump options like exclude."""
+    result = ExtractionResult(
+        risks=[],
+        source_documents=["policy.pdf"],
+        retrieval_stats=RetrievalStats(
+            total_chunks=0,
+            total_candidates_retrieved=0,
+            auto_accepted=0,
+            llm_judged=0,
+            grounding_filtered=0,
+        ),
+    )
+    assert "llm_calls" not in result.model_dump(exclude={"llm_calls"})
+    assert "eval" not in result.model_dump(exclude_none=True)
 
 
 def test_causal_chain_model():

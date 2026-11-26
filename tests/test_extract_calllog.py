@@ -411,7 +411,7 @@ def test_run_variant_grounding_numbers_records_in_task_order(monkeypatch):
         gate.enter(index)
         records.append(_record("ground-variant-001", stage="variant_grounding", chunk_index=index))
         gate.finish(index)
-        return pm, {}
+        return pm, {}, False
 
     monkeypatch.setattr(pipeline, "_ground_variants_one", fake_ground_variants_one)
     collector: list[LLMCallRecord] = []
@@ -436,7 +436,9 @@ def test_run_variant_grounding_numbers_records_in_task_order(monkeypatch):
     }
     config = LLMConfig(base_url="http://test", model="test-model", max_context=0)
 
-    pipeline._run_variant_grounding(matches, [], variant_map, None, config, collector, max_workers=task_count)
+    pipeline._run_variant_grounding(
+        matches, [], variant_map, None, config, collector, max_workers=task_count, stage="grounding"
+    )
 
     assert gate.completion_order == list(range(task_count - 1, -1, -1))
     assert [(r.call_id, r.chunk_index) for r in collector] == [
