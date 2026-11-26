@@ -133,7 +133,7 @@ SDK settings: `create_client` always passes `max_retries=` and `timeout=` to `Op
 ## Dependency Pins
 
 - `ai-atlas-nexus==1.2.5` (PyPI) — exact pin so catalog and ontology models travel together; upgrade deliberately, then update the expected counts in `tests/test_nexus_pin_equivalence.py`
-- `torch>=2.11,<2.15` and `transformers>=5.5,<5.20` — the upper bounds keep out an MPS-incompatible `rt_detr_v2` layout model in docling's PDF pipeline on Apple Silicon; the range is otherwise open, so upgrade deliberately and re-check the docling PDF path on Apple Silicon
+- `torch>=2.11,<2.15` and `transformers>=5.5,<5.20` — the bounds were widened by dependabot past the thresholds originally cited for keeping out an MPS-incompatible `rt_detr_v2` layout model in docling's PDF pipeline on Apple Silicon (torch 2.12, transformers 5.6), with no recorded Apple-Silicon re-verification; the `rt_detr_v2` caveat is unverified at the current lock. Treat upgrades as deliberate: re-check the docling PDF path on Apple Silicon.
 - `numpy<2.5` — numpy 2.5.0 ships PEP 695 type stubs that mypy cannot parse when `python_version` targets 3.11
 
 ## LLM Test Diagnostics
