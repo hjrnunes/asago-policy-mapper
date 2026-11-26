@@ -118,6 +118,26 @@ def timed(timing, key):
         timing[key] = (time.time() - t0) * 1000
 
 
+def _assert_no_synthetic_parents(merged, variant_map, *, check: bool) -> None:
+    """Raise when a synthetic parent risk id would reach the output.
+
+    The check uses the variant map's keys — the collapsed parent ids — rather
+    than guessing from the ``---`` delimiter, so it only fires on ids the run
+    actually collapsed. ``check`` is the variant-grounding stage's own gate
+    (variants collapsed, the plan grounds, a client is present): only a run
+    whose stage could replace parents with grounded variants is held to the
+    no-parents-in-output promise. Ungrounded runs emit the expanded variants
+    directly, and a run without a client leaves parent matches in place
+    legitimately, so neither is checked.
+    """
+    if not variant_map or not check:
+        return
+    parent_ids = set(variant_map)
+    leaked = [m.risk_id for m in merged if m.risk_id in parent_ids]
+    if leaked:
+        raise PipelineInvariantError(f"Synthetic parent risk ids reached the output: {sorted(set(leaked))}")
+
+
 _AGENTIC_PHRASES = {
     "agentic",
     "ai agent",
@@ -2003,6 +2023,14 @@ def run_extraction(
     removed_variant_groups.sort(key=lambda r: (r.parent_id, r.stage))
 
     merged = _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing)
+
+    # the invariant holds the run to the stage's own gate: exactly the runs
+    # whose variant-grounding stage could replace parents with variants
+    _assert_no_synthetic_parents(
+        merged,
+        index.variant_map,
+        check=bool(index.variant_map and plan.grounding and client is not None),
+    )
 
     total_stats = _build_retrieval_stats(
         chunk_results,
