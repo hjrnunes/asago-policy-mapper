@@ -293,6 +293,14 @@ def _chunk_result_judged_borderline(count=1, retrieved=None, auto_accepted=0):
     )
 
 
+def _stats_plan(no_judge):
+    """Resolve the plan whose judge mode matches the no_judge flag."""
+    from asago_policy_mapper.extract.plan import resolve_plan
+
+    retrieval = RetrievalConfig(query_gen=False, no_judge=no_judge)
+    return resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+
+
 def test_retrieval_stats_no_judge_counts_auto_promoted():
     """Under --no-judge, llm_judged stays 0 and auto_promoted holds the count."""
     stats = _build_retrieval_stats(
@@ -300,7 +308,7 @@ def test_retrieval_stats_no_judge_counts_auto_promoted():
         [object(), object()],
         {"judge_ms": 1.0},
         7,
-        no_judge=True,
+        _stats_plan(no_judge=True),
     )
     assert stats.llm_judged == 0
     assert stats.auto_promoted == 3
@@ -319,6 +327,7 @@ def test_retrieval_stats_defaults_to_normal_mode():
         [],
         {},
         0,
+        _stats_plan(no_judge=False),
     )
     assert stats.llm_judged == 2
     assert stats.auto_promoted == 0
@@ -329,7 +338,7 @@ def test_retrieval_stats_missing_stat_keys_count_as_zero():
     cr = _chunk_result_judged_borderline(2)
     cr.stats = {}
 
-    stats = _build_retrieval_stats([cr], [object()], {}, 0, no_judge=False)
+    stats = _build_retrieval_stats([cr], [object()], {}, 0, _stats_plan(no_judge=False))
 
     assert stats.total_candidates_retrieved == 0
     assert stats.auto_accepted == 0
@@ -342,7 +351,7 @@ def test_retrieval_stats_normal_mode_keeps_llm_judged():
         [],
         {},
         0,
-        no_judge=False,
+        _stats_plan(no_judge=False),
     )
     assert stats.llm_judged == 3
     assert stats.auto_promoted == 0
@@ -1147,12 +1156,18 @@ def _judge_retrieval(**overrides):
     return RetrievalConfig(query_gen=False, **overrides)
 
 
+def _judge_plan(**overrides):
+    from asago_policy_mapper.extract.plan import resolve_plan
+
+    return resolve_plan(_judge_retrieval(**overrides), prefilter=False, explicit=frozenset())
+
+
 def test_run_judge_no_judge_auto_promotes_borderline(mock_config):
     """With no_judge, every borderline candidate joins accepted and borderline_judged."""
     cr = _chunk_result_with_borderline()
     retrieval = _judge_retrieval(no_judge=True)
 
-    _run_judge([cr], [], MagicMock(), mock_config, retrieval, [])
+    _run_judge([cr], [], MagicMock(), mock_config, retrieval, [], _judge_plan(no_judge=True))
 
     assert [c.risk_id for c in cr.borderline_judged] == ["R-003"]
     assert [c.risk_id for c in cr.accepted] == ["R-001", "R-003"]
@@ -1172,7 +1187,7 @@ def test_run_judge_no_judge_skips_chunks_without_borderline(mock_config):
     )
     retrieval = _judge_retrieval(no_judge=True)
 
-    _run_judge([cr], [], MagicMock(), mock_config, retrieval, [])
+    _run_judge([cr], [], MagicMock(), mock_config, retrieval, [], _judge_plan(no_judge=True))
 
     assert cr.borderline_judged == []
     assert [c.risk_id for c in cr.accepted] == ["R-001"]
@@ -1197,7 +1212,7 @@ def test_run_judge_cross_encoder_judges_via_thread_pool(mock_config, monkeypatch
     retrieval = _judge_retrieval()
     contexts = ["context zero", "context one"]
 
-    _run_judge([cr0, cr1], [], MagicMock(), mock_config, retrieval, [], chunk_contexts=contexts)
+    _run_judge([cr0, cr1], [], MagicMock(), mock_config, retrieval, [], _judge_plan(), chunk_contexts=contexts)
 
     assert judged_by_chunk[0] == ("judge_risk", 15, "context zero")
     assert judged_by_chunk[1] == ("judge_risk", 15, "context one")
@@ -1240,7 +1255,7 @@ def test_run_judge_cross_encoder_without_borderline_makes_no_calls(mock_config, 
     )
     retrieval = _judge_retrieval()
 
-    _run_judge([cr], [], MagicMock(), mock_config, retrieval, [])
+    _run_judge([cr], [], MagicMock(), mock_config, retrieval, [], _judge_plan())
 
     assert submitted == []
     assert cr.stats["auto_accepted"] == 1

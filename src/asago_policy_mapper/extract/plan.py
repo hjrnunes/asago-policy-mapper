@@ -7,8 +7,8 @@ stage gates in ``extract/pipeline.py``, ``retrieve_chunk`` in
 ``extract/retrieve.py``):
 
 - the judge is unreachable without the cross-encoder, because
-  ``retrieve_chunk`` returns early with no borderline candidates and
-  ``_run_judge`` checks ``use_cross_encoder``;
+  ``retrieve_chunk`` returns early with no borderline candidates and the
+  judge stage branches on the plan's judge mode;
 - query generation's fallback chunks go through per-chunk cross-encoder
   retrieval, so the judge stays reachable when query generation is on;
 - expansion, variant grounding, causal synthesis and the prefilter are

@@ -344,22 +344,16 @@ def test_run_judge_numbers_records_in_task_order(monkeypatch):
     monkeypatch.setattr(pipeline, "_judge_one", fake_judge_one)
     collector: list[LLMCallRecord] = []
     config = LLMConfig(base_url="http://test", model="test-model", max_context=0)
-    retrieval = type(
-        "R",
-        (),
-        {
-            "no_judge": False,
-            "use_cross_encoder": True,
-            "judge_prompt": "judge_risk",
-            "grounding_batch_size": 0,
-            "judge_context_tokens": 0,
-        },
-    )()
+    retrieval = type("R", (), {"judge_prompt": "judge_risk", "grounding_batch_size": 0, "judge_context_tokens": 0})()
     chunk_results = _grounding_chunk_results(task_count)
     for cr in chunk_results:
         cr.borderline = list(cr.accepted)
 
-    pipeline._run_judge(chunk_results, [], None, config, retrieval, collector)
+    from asago_policy_mapper.extract.models import RetrievalConfig
+    from asago_policy_mapper.extract.plan import resolve_plan
+
+    plan = resolve_plan(RetrievalConfig(no_judge=False, use_cross_encoder=True), prefilter=False, explicit=frozenset())
+    pipeline._run_judge(chunk_results, [], None, config, retrieval, collector, plan)
 
     assert gate.completion_order == list(range(task_count - 1, -1, -1))
     assert [(r.call_id, r.chunk_index) for r in collector] == [
@@ -379,22 +373,16 @@ def test_run_judge_without_collector_records_nothing(monkeypatch):
 
     monkeypatch.setattr(pipeline, "_judge_one", fake_judge_one)
     config = LLMConfig(base_url="http://test", model="test-model", max_context=0)
-    retrieval = type(
-        "R",
-        (),
-        {
-            "no_judge": False,
-            "use_cross_encoder": True,
-            "judge_prompt": "judge_risk",
-            "grounding_batch_size": 0,
-            "judge_context_tokens": 0,
-        },
-    )()
+    retrieval = type("R", (), {"judge_prompt": "judge_risk", "grounding_batch_size": 0, "judge_context_tokens": 0})()
     chunk_results = _grounding_chunk_results(2)
     for cr in chunk_results:
         cr.borderline = list(cr.accepted)
 
-    pipeline._run_judge(chunk_results, [], None, config, retrieval, None)
+    from asago_policy_mapper.extract.models import RetrievalConfig
+    from asago_policy_mapper.extract.plan import resolve_plan
+
+    plan = resolve_plan(RetrievalConfig(no_judge=False, use_cross_encoder=True), prefilter=False, explicit=frozenset())
+    pipeline._run_judge(chunk_results, [], None, config, retrieval, None, plan)
 
 
 def test_run_variant_grounding_numbers_records_in_task_order(monkeypatch):

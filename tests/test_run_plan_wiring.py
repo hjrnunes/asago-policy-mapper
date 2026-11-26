@@ -773,7 +773,10 @@ def test_judge_context_tokens_used_when_positive(mock_config, monkeypatch, tmp_p
     )
     retrieval = RetrievalConfig(query_gen=False, judge_context_tokens=30)
 
-    pipeline._run_judge([cr], chunks, MagicMock(), mock_config, retrieval, [], chunk_contexts=["grounding context"])
+    plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+    pipeline._run_judge(
+        [cr], chunks, MagicMock(), mock_config, retrieval, [], plan, chunk_contexts=["grounding context"]
+    )
 
     # The judge context is built from the chunks under the token budget,
     # not the grounding context: the 30-token budget keeps the neighbor
@@ -788,13 +791,19 @@ def test_judge_context_tokens_used_when_positive(mock_config, monkeypatch, tmp_p
     # context instead.
     seen.clear()
     retrieval = RetrievalConfig(query_gen=False, judge_context_tokens=1)
-    pipeline._run_judge([cr], chunks, MagicMock(), mock_config, retrieval, [], chunk_contexts=["grounding context"])
+    plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+    pipeline._run_judge(
+        [cr], chunks, MagicMock(), mock_config, retrieval, [], plan, chunk_contexts=["grounding context"]
+    )
     assert seen[0] == build_chunk_contexts(chunks, max_context_tokens=1)[0]
     assert seen[0] != "grounding context"
 
     seen.clear()
     retrieval = RetrievalConfig(query_gen=False, judge_context_tokens=0)
-    pipeline._run_judge([cr], chunks, MagicMock(), mock_config, retrieval, [], chunk_contexts=["grounding context"])
+    plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+    pipeline._run_judge(
+        [cr], chunks, MagicMock(), mock_config, retrieval, [], plan, chunk_contexts=["grounding context"]
+    )
     assert seen[0] == "grounding context"
 
 
@@ -883,6 +892,100 @@ def test_judge_context_budget_does_not_change_grounding_context(mock_config, tmp
     # The judge context is the budget-constrained one, not the grounding
     # context: a leak would show as grounding receiving judge_contexts.
     assert judge_contexts[0] != expected[0]
+
+
+def test_run_extraction_rejects_a_plan_that_mismatches_the_retrieval_settings(mock_config, tmp_path):
+    """A caller-supplied plan must resolve from the same retrieval settings.
+
+    Execution follows the plan, so a plan resolved from different flags
+    would run different stages than the settings ask for; the pipeline
+    refuses it. Warnings may differ (the caller's CLI layer knows which
+    options were explicit), so the plan carries its own.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    doc = tmp_path / "p.md"
+    doc.write_text("AI policy text about data governance and risk management. Bias detection matters.")
+
+    # Grounded plan, but the settings say --no-grounding.
+    plan = resolve_plan(RetrievalConfig(query_gen=False), prefilter=False, explicit=frozenset())
+    with pytest.raises(ValueError, match="does not match the retrieval settings"):
+        pipeline.run_extraction(
+            documents=[doc],
+            client=None,
+            config=mock_config,
+            risks=[],
+            retrieval=RetrievalConfig(query_gen=False, no_grounding=True),
+            ocr=False,
+            plan=plan,
+        )
+
+    # The empty-run short-circuit still records a matching plan, and a
+    # plan whose warnings differ (CLI-layer knowledge) is accepted.
+    warned = resolve_plan(
+        RetrievalConfig(query_gen=False, no_grounding=True),
+        prefilter=False,
+        explicit=frozenset({"--expand-siblings"}),
+    )
+    assert warned.warnings
+    result = pipeline.run_extraction(
+        documents=[doc],
+        client=None,
+        config=mock_config,
+        risks=[],
+        retrieval=RetrievalConfig(query_gen=False, no_grounding=True),
+        ocr=False,
+        plan=warned,
+    )
+    assert result.metadata["run_plan"]["effective"] == asdict(warned)
+
+
+def test_judge_stage_follows_the_plan_not_the_raw_flags(mock_config, monkeypatch):
+    """The judge stage branches on the plan's judge mode.
+
+    ``auto_promote`` settles borderline candidates without the LLM even
+    though the raw flag (use_cross_encoder) says the reranker runs; the
+    plan is the authority the stage follows.
+    """
+    from asago_policy_mapper.extract import pipeline
+    from asago_policy_mapper.extract.parse import Chunk
+    from asago_policy_mapper.extract.retrieve import ChunkResult
+
+    calls = {"judge_one": 0}
+
+    def fake_judge_one(*args):
+        calls["judge_one"] += 1
+        raise AssertionError("the LLM judge must not run under auto_promote")
+
+    monkeypatch.setattr(pipeline, "_judge_one", fake_judge_one)
+
+    chunks = [Chunk(text="chunk words " * 20, source="p.md", index=0)]
+    borderline = [ScoredCandidate(risk_id="R-001", risk_name="n", risk_description="d", cross_encoder_score=0.5)]
+    chunk_results = [
+        ChunkResult(
+            chunk_index=0,
+            source="p.md",
+            page=None,
+            section=None,
+            accepted=[],
+            borderline=borderline,
+            borderline_judged=[],
+            stats={},
+        )
+    ]
+    # The raw settings still name the cross-encoder (use_cross_encoder
+    # defaults true) while the plan resolves the judge to auto_promote
+    # through --no-judge.
+    retrieval = RetrievalConfig(query_gen=False, no_judge=True)
+    plan = resolve_plan(retrieval, prefilter=False, explicit=frozenset())
+    assert plan.judge == "auto_promote"
+
+    pipeline._run_judge(chunk_results, chunks, MagicMock(), mock_config, retrieval, [], plan, chunk_contexts=["g0"])
+
+    assert calls["judge_one"] == 0
+    # The borderline candidates were promoted, not judged.
+    assert chunk_results[0].borderline_judged == borderline
+    assert chunk_results[0].accepted == borderline
 
 
 # --- the warnings (step 6) ---
