@@ -1677,7 +1677,12 @@ def _run_expansion_stage(
 
 
 def _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing):
-    """Synthesize causal chains for each merged risk when a client is present."""
+    """Synthesize causal chains for each merged risk when the plan runs the stage.
+
+    The plan's truth table gates causal synthesis on grounding: an ungrounded
+    run has no verified evidence to synthesize from, so every match records
+    why the stage skipped it instead.
+    """
     if plan.causal_synthesis and client is not None:
         with timed(timing, "causal_synthesis_ms"):
             return _run_causal_synthesis(
@@ -1688,8 +1693,15 @@ def _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_colle
                 max_workers,
                 call_collector,
             )
+    # Grounding off wins over the synthesis flag: the plan gates causal
+    # synthesis on grounding, so an ungrounded run names the grounding
+    # reason even when synthesis was on.
+    if not plan.causal_synthesis:
+        status = "disabled_no_grounding" if not plan.grounding else "disabled_synthesis_off"
+    else:
+        status = "disabled_no_client"
     for m in merged:
-        m.causal_status = "disabled"
+        m.causal_status = status
     return merged
 
 

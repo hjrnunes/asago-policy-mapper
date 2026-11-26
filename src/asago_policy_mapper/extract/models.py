@@ -164,10 +164,21 @@ class RiskMatch(BaseModel):
     consequence: str | None = None
     impact: str | None = None
     scores_inherited_from: str | None = None
-    # Why there is no causal chain: "disabled" covers synthesis turned off,
-    # no client or no grounding; the other values come from
-    # CausalSynthesisStatus.
-    causal_status: Literal["generated", "no_evidence", "empty_answer", "validation_exhausted", "disabled"] | None = None
+    # Why there is no causal chain: the three disabled_* values name which
+    # condition skipped the stage (synthesis off, no client, no grounding);
+    # the other values come from CausalSynthesisStatus.
+    causal_status: (
+        Literal[
+            "generated",
+            "no_evidence",
+            "empty_answer",
+            "validation_exhausted",
+            "disabled_synthesis_off",
+            "disabled_no_client",
+            "disabled_no_grounding",
+        ]
+        | None
+    ) = None
     # Which source supplied each causal field: LLM synthesis or the built-in
     # catalog tables. A catalog entry names the table's risk ID.
     causal_provenance: dict[str, CausalProvenanceValue] = {}

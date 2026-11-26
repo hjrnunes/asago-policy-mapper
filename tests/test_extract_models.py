@@ -448,7 +448,15 @@ def test_risk_match_causal_provenance_roundtrip():
 
 def test_risk_match_causal_status_literal_values():
     """Every causal_status value from the schema parses; anything else is rejected."""
-    for status in ("generated", "no_evidence", "empty_answer", "validation_exhausted", "disabled"):
+    for status in (
+        "generated",
+        "no_evidence",
+        "empty_answer",
+        "validation_exhausted",
+        "disabled_synthesis_off",
+        "disabled_no_client",
+        "disabled_no_grounding",
+    ):
         match = RiskMatch(
             risk_id="atlas-R-0042",
             risk_name="Discriminatory Outcomes",

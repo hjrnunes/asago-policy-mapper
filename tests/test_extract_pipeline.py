@@ -1092,6 +1092,29 @@ def test_run_causal_synthesis_marks_status_and_generated_provenance():
     }
 
 
+def test_run_causal_synthesis_does_not_leak_marks_into_a_copied_risk():
+    """A model_copy()'d risk shares its provenance dict; synthesis must not mutate the original's."""
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a"])
+    client = _causal_client("none-matches", None)
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+    original = merged[0].model_copy()
+
+    result = _run_causal_synthesis(merged, chunks, client, config, 4, [])
+
+    assert result[0].causal_provenance == {
+        "threat": {"source": "generated"},
+        "threat_source": {"source": "generated"},
+        "vulnerability": {"source": "generated"},
+        "consequence": {"source": "generated"},
+        "impact": {"source": "generated"},
+    }
+    # The copy's source kept its own dict: no marks, no status.
+    assert original.causal_provenance == {}
+    assert original.causal_status is None
+
+
 def test_run_causal_synthesis_marks_empty_answer_status():
     from asago_policy_mapper.llm import LLMConfig
 
@@ -1185,7 +1208,7 @@ def test_run_causal_synthesis_stage_marks_disabled_when_synthesis_off():
 
     result = _run_causal_synthesis_stage(merged, chunks, client, config, _causal_plan(retrieval), [], 4, {})
 
-    assert all(r.causal_status == "disabled" for r in result)
+    assert all(r.causal_status == "disabled_synthesis_off" for r in result)
     client.chat.completions.create.assert_not_called()
 
 
@@ -1198,7 +1221,35 @@ def test_run_causal_synthesis_stage_marks_disabled_when_client_none():
 
     result = _run_causal_synthesis_stage(merged, chunks, None, config, _causal_plan(retrieval), [], 4, {})
 
-    assert all(r.causal_status == "disabled" for r in result)
+    assert all(r.causal_status == "disabled_no_client" for r in result)
+
+
+def test_run_causal_synthesis_stage_grounding_off_wins_over_synthesis_off():
+    """With grounding and synthesis both off, the grounding reason is recorded."""
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a", "atlas-b"])
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+    retrieval = RetrievalConfig(query_gen=False, no_grounding=True, no_causal_synthesis=True)
+    client = MagicMock()
+
+    result = _run_causal_synthesis_stage(merged, chunks, client, config, _causal_plan(retrieval), [], 4, {})
+
+    assert all(r.causal_status == "disabled_no_grounding" for r in result)
+    client.chat.completions.create.assert_not_called()
+
+
+def test_run_causal_synthesis_stage_synthesis_off_wins_over_client_none():
+    """A plan-disabled run names the synthesis reason even without a client."""
+    from asago_policy_mapper.llm import LLMConfig
+
+    merged, chunks = _causal_risk_and_chunks(["atlas-a", "atlas-b"])
+    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
+    retrieval = RetrievalConfig(query_gen=False, no_causal_synthesis=True)
+
+    result = _run_causal_synthesis_stage(merged, chunks, None, config, _causal_plan(retrieval), [], 4, {})
+
+    assert all(r.causal_status == "disabled_synthesis_off" for r in result)
 
 
 def test_run_causal_synthesis_stage_runs_synthesis_and_times_it():
@@ -1246,29 +1297,6 @@ def test_run_causal_synthesis_stage_end_to_end_generated():
 
 
 @pytest.mark.slow
-def test_run_causal_synthesis_does_not_leak_marks_into_a_copied_risk():
-    """A model_copy()'d risk shares its provenance dict; synthesis must not mutate the original's."""
-    from asago_policy_mapper.llm import LLMConfig
-
-    merged, chunks = _causal_risk_and_chunks(["atlas-a"])
-    client = _causal_client("none-matches", None)
-    config = LLMConfig(base_url="http://localhost:8000/v1", model="test-model")
-    original = merged[0].model_copy()
-
-    result = _run_causal_synthesis(merged, chunks, client, config, 4, [])
-
-    assert result[0].causal_provenance == {
-        "threat": {"source": "generated"},
-        "threat_source": {"source": "generated"},
-        "vulnerability": {"source": "generated"},
-        "consequence": {"source": "generated"},
-        "impact": {"source": "generated"},
-    }
-    # The copy's source kept its own dict: no marks, no status.
-    assert original.causal_provenance == {}
-    assert original.causal_status is None
-
-
 def test_run_extraction_query_gen_no_judge_no_grounding(mock_config, tmp_path):
     """With query_gen + no_judge + no_grounding, LLM generates queries and all candidates become ungrounded matches."""
     doc = tmp_path / "test.md"
