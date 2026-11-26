@@ -80,62 +80,59 @@ def _install_stub(monkeypatch, agent: _StubAgent | None = None, load_error: Exce
     return agent or _StubAgent()
 
 
-def _endpoint(**overrides):
-    from asago_policy_mapper.assessors.laya import LayaProbabilityEndpoint
+def _config(**overrides):
+    from asago_policy_mapper.assessors.laya import LayaModelConfig
 
     fields: dict = {}
     fields.update(overrides)
-    return LayaProbabilityEndpoint(**fields)
+    return LayaModelConfig(**fields)
 
 
 def _assessor(agent: _StubAgent, monkeypatch, **overrides):
     from asago_policy_mapper.assessors.laya import LayaProbabilityAssessor
 
     _install_stub(monkeypatch, agent)
-    return LayaProbabilityAssessor(_endpoint(**overrides))
+    return LayaProbabilityAssessor(_config(**overrides))
 
 
 def _p_value(outcome) -> float | None:
     return outcome.probability if isinstance(outcome, ProbabilityAnswer) else None
 
 
-# --- endpoint ---
+# --- config ---
 
 
-def test_endpoint_defaults():
-    """The endpoint defaults to the multilingual checkpoint and in-process shape."""
-    endpoint = _endpoint()
+def test_config_defaults():
+    """The config defaults to the multilingual checkpoint and a 16-question pass."""
+    config = _config()
 
-    assert endpoint.model == "aac6fef/laya-multilingual-mlx"
-    assert endpoint.base_url == "http://localhost/laya"
-    assert endpoint.api_key_env == "POLICY_MAPPER_LAYA_API_KEY"
-    assert endpoint.timeout_s == 30.0
-    assert endpoint.max_batch == 16
+    assert config.model == "aac6fef/laya-multilingual-mlx"
+    assert config.max_batch == 16
 
 
-def test_endpoint_is_a_probability_endpoint():
-    """The Laya endpoint subclasses the generic one for metadata compatibility."""
-    from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+def test_config_has_no_endpoint_fields():
+    """Laya runs in process: the config carries no URL, credential or timeout."""
+    config = _config()
 
-    assert isinstance(_endpoint(), ProbabilityEndpoint)
+    assert not hasattr(config, "base_url")
+    assert not hasattr(config, "api_key_env")
+    assert not hasattr(config, "timeout_s")
 
 
-def test_endpoint_overrides():
+def test_config_overrides():
     """Every field stays overridable."""
-    endpoint = _endpoint(model="aac6fef/laya-mlx", max_batch=8, timeout_s=5.0)
+    config = _config(model="aac6fef/laya-mlx", max_batch=8)
 
-    assert endpoint.model == "aac6fef/laya-mlx"
-    assert endpoint.max_batch == 8
-    assert endpoint.timeout_s == 5.0
+    assert config.model == "aac6fef/laya-mlx"
+    assert config.max_batch == 8
 
 
-def test_endpoint_serialization_excludes_credentials(monkeypatch):
-    """repr and to_dict never carry a key value (there is none to carry)."""
+def test_config_repr_carries_no_secret(monkeypatch):
+    """repr never carries a key value (there is none to carry)."""
     monkeypatch.setenv("POLICY_MAPPER_LAYA_API_KEY", "secret-value-123")
-    endpoint = _endpoint()
+    config = _config()
 
-    assert "secret-value-123" not in repr(endpoint)
-    assert "secret-value-123" not in json.dumps(endpoint.to_dict())
+    assert "secret-value-123" not in repr(config)
 
 
 # --- assessor basics ---
@@ -185,7 +182,7 @@ def test_injected_agent_is_the_one_used(monkeypatch):
     module.load = _no_load
     monkeypatch.setitem(sys.modules, "laya_mlx", module)
 
-    assessor = LayaProbabilityAssessor(_endpoint(), agent=agent)
+    assessor = LayaProbabilityAssessor(_config(), agent=agent)
     batch = assessor.assess(QUESTION, "context", _cases("R-001"))
 
     assert len(agent.predicts) == 1
@@ -193,7 +190,7 @@ def test_injected_agent_is_the_one_used(monkeypatch):
 
 
 def test_default_load_uses_the_endpoint_model(monkeypatch):
-    """Without an injected agent, laya_mlx.load runs with the endpoint's checkpoint."""
+    """Without an injected agent, laya_mlx.load runs with the config's checkpoint."""
     from asago_policy_mapper.assessors.laya import LayaProbabilityAssessor
 
     loaded: list = []
@@ -201,8 +198,8 @@ def test_default_load_uses_the_endpoint_model(monkeypatch):
     module.load = lambda model_id_or_path, **kwargs: loaded.append(model_id_or_path) or _StubAgent()
     monkeypatch.setitem(sys.modules, "laya_mlx", module)
 
-    endpoint = _endpoint(model="aac6fef/laya-mlx")
-    LayaProbabilityAssessor(endpoint)
+    config = _config(model="aac6fef/laya-mlx")
+    LayaProbabilityAssessor(config)
 
     assert loaded == ["aac6fef/laya-mlx"]
 
@@ -223,7 +220,7 @@ def test_import_error_names_the_install(monkeypatch):
     from asago_policy_mapper.assessors.laya import LayaProbabilityAssessor
 
     with pytest.raises(ImportError, match="laya-mlx"):
-        LayaProbabilityAssessor(_endpoint())
+        LayaProbabilityAssessor(_config())
 
 
 def test_empty_cases_return_empty_batch(monkeypatch):
@@ -551,6 +548,29 @@ def test_exchange_records_request_answers_and_usage(monkeypatch):
     assert response["usage"]["truncated"] is True
 
 
+def test_latency_is_flagged_recorded_on_a_real_pass(monkeypatch):
+    """A batch from a real forward pass flags its latency as measured.
+
+    ``latency_recorded`` tells latency consumers whether ``latency_ms``
+    measured a real assessment; the local arm's passes are exactly that,
+    so the flag is True on the non-empty path — the same value the HTTP
+    arm reports — while the empty-cases path keeps the default False
+    (no pass ran, nothing was measured).
+    """
+    agent = _StubAgent([_laya_result(("R-001", 0.7))])
+    assessor = _assessor(agent, monkeypatch)
+
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+
+    assert batch.latency_recorded is True
+    assert batch.latency_ms >= 0.0
+
+    empty = assessor.assess(QUESTION, "context", [])
+
+    assert empty.latency_recorded is False
+    assert empty.latency_ms == 0.0
+
+
 def test_exchange_keeps_request_on_error(monkeypatch):
     """A failed predict records the request and an explicit error object.
 
@@ -576,29 +596,6 @@ def test_unavailable_error_carries_the_exception_text(monkeypatch):
     outcome = batch.answers["R-001"][0]
     assert outcome.reason == "error"
     assert outcome.detail == "weight load failed"
-
-
-def test_latency_is_flagged_recorded_on_a_real_pass(monkeypatch):
-    """A batch from a real forward pass flags its latency as measured.
-
-    ``latency_recorded`` tells latency consumers whether ``latency_ms``
-    measured a real assessment; the local arm's passes are exactly that,
-    so the flag is True on the non-empty path — the same value the HTTP
-    arm reports — while the empty-cases path keeps the default False
-    (no pass ran, nothing was measured).
-    """
-    agent = _StubAgent([_laya_result(("R-001", 0.7))])
-    assessor = _assessor(agent, monkeypatch)
-
-    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
-
-    assert batch.latency_recorded is True
-    assert batch.latency_ms >= 0.0
-
-    empty = assessor.assess(QUESTION, "context", [])
-
-    assert empty.latency_recorded is False
-    assert empty.latency_ms == 0.0
 
 
 def test_exchange_accumulates_across_batches(monkeypatch):
@@ -696,9 +693,9 @@ def test_live_laya_smoke():
     """
 
     pytest.importorskip("laya_mlx")
-    from asago_policy_mapper.assessors.laya import LayaProbabilityAssessor, LayaProbabilityEndpoint
+    from asago_policy_mapper.assessors.laya import LayaModelConfig, LayaProbabilityAssessor
 
-    assessor = LayaProbabilityAssessor(LayaProbabilityEndpoint())
+    assessor = LayaProbabilityAssessor(LayaModelConfig())
     cases = [
         DecisionCase(
             risk_id="smoke-1",

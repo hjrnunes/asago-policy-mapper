@@ -453,15 +453,15 @@ def _build_provider_prefilter(provider: str, profile: dict, path: Path):
                 f"--prefilter-profile needs the decision extra (httpx); install with: uv sync --extra decision ({e})"
             )
     else:
-        from asago_policy_mapper.assessors.laya import LayaProbabilityAssessor, LayaProbabilityEndpoint
+        from asago_policy_mapper.assessors.laya import LayaModelConfig, LayaProbabilityAssessor
 
-        laya_endpoint: LayaProbabilityEndpoint
+        laya_config: LayaModelConfig
         try:
-            laya_endpoint = LayaProbabilityEndpoint(**profile)
+            laya_config = LayaModelConfig(**profile)
         except TypeError as e:
             _fail_validation(f"--prefilter-profile {path} has invalid fields: {e}")
         try:
-            assessor = LayaProbabilityAssessor(laya_endpoint)
+            assessor = LayaProbabilityAssessor(laya_config)
         except ImportError as e:
             _fail_validation(f"--prefilter-profile provider 'laya' needs laya-mlx installed: {e}")
         except (OSError, ValueError, RuntimeError) as e:
@@ -469,7 +469,7 @@ def _build_provider_prefilter(provider: str, profile: dict, path: Path):
             # subclass OSError (typo'd model, offline with no cache) or
             # ValueError/RuntimeError from a corrupt checkpoint config.
             _fail_validation(
-                f"--prefilter-profile provider 'laya' could not load checkpoint {laya_endpoint.model!r}: {e}"
+                f"--prefilter-profile provider 'laya' could not load checkpoint {laya_config.model!r}: {e}"
             )
     rule = DropThreshold(assessor, threshold)
     return GroundingPrefilter(assessor=assessor, rule=rule)
