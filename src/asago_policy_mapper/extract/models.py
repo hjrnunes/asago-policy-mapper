@@ -325,21 +325,35 @@ class FilteredCandidate(BaseModel):
 class DecisionCallRecord(BaseModel):
     """One decision-stage call: what was sent and what was decided.
 
-    ``request`` holds the exact request the stage sent, with no
-    credentials (the prefilter's key travels in a header the body never
-    sees). Assessors that batch report one body per batch as a list;
-    single-shot assessors report one body as a dict. ``decision`` is the
-    ``DecisionLog`` the seam produced. ``synthesized`` marks a request
-    the stage built for the record rather than sent — it lives on the
-    record, not inside the body, so the body stays exactly the request
-    data and the marker never travels to an endpoint.
+    ``requests`` holds the exact request bodies the stage sent, one per
+    batch, with no credentials (the prefilter's key travels in a header
+    the body never sees); ``responses`` holds what the assessor recorded
+    as answered, one entry per batch, when the exchange shape carries it
+    (provider assessors record usage readouts there, e.g. laya's token
+    truncation and Jev's token spend); it stays empty for assessors
+    that record no responses, so the serialized output is unchanged.
+    ``decision`` is the ``DecisionLog`` the seam produced.
     """
 
     stage: str
     chunk_index: int
-    request: dict | list
+    requests: list
     decision: DecisionLog | None = None
-    synthesized: bool = False
+    responses: list = []
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_responses(self, handler) -> dict[str, Any]:
+        """Leave ``responses`` out unless the assessor recorded any.
+
+        Assessors without a response wire (replay, the generic seam stub)
+        keep it empty, and serializing it would change the output of every
+        prefilter run those assessors serve; only a provider run carries
+        response readouts.
+        """
+        data: dict[str, Any] = handler(self)
+        if not data.get("responses"):
+            data.pop("responses", None)
+        return data
 
 
 class RemovedVariantGroup(BaseModel):

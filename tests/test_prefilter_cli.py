@@ -994,6 +994,18 @@ def test_build_prefilter_defaults_to_http_provider(tmp_path, profile_path):
     assert isinstance(prefilter.assessor, HttpProbabilityAssessor)
 
 
+# --- API key presence ---
+def test_build_prefilter_defaults_to_generic_provider(tmp_path, profile_path):
+    """A profile without a provider key builds the generic HTTP assessor."""
+    from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
+    from asago_policy_mapper.cli import _build_prefilter
+
+    prefilter = _build_prefilter(profile_path)
+
+    assert prefilter is not None
+    assert isinstance(prefilter.assessor, HttpProbabilityAssessor)
+
+
 def test_build_prefilter_rejects_unknown_provider(tmp_path, capsys):
     """An unknown provider names the valid set."""
     from asago_policy_mapper.cli import _build_prefilter

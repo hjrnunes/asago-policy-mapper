@@ -1342,23 +1342,20 @@ def _prefilter_cases(cr: ChunkResult, index) -> list[DecisionCase]:
     ]
 
 
-def _prefilter_request(
-    context: str, cases: list[DecisionCase], assessment, assessor, question
-) -> tuple[dict | list, bool]:
-    """The request the prefilter recorded, and whether it was sent.
+def _prefilter_requests(context: str, cases: list[DecisionCase], assessment, assessor=None, question=None) -> list:
+    """The request bodies the prefilter recorded, one per batch; no credentials.
 
     Assessors that batch (the HTTP probability assessor splits at
     ``max_batch``) record every request body they actually sent, with
-    the batch boundaries preserved; the returned flag is False. When
-    the assessor sends nothing (replay) or fails before sending, the
-    record carries the unbatched body the assessor's own request
-    builder produces — the shape one batch's body would have, not
-    necessarily what would have left the machine, since a batching
-    assessor would split it at ``max_batch`` — and the flag is True, so
-    the call record itself (not the body) carries the synthesized
-    marker. Assessors without a request builder keep the generic
-    fallback shape. The key travels in a header, so no body ever
-    carries a credential.
+    the batch boundaries preserved. When the assessor sends nothing
+    (replay) or fails before sending, the record carries the unbatched
+    body the assessor's own request builder produces — the shape one
+    batch's body would have, not necessarily what would have left the
+    machine, since a batching assessor would split it at ``max_batch`` —
+    marked ``synthesized: true`` so a reader can tell the two apart.
+    Assessors without a request builder keep the generic fallback
+    shape. The key travels in a header, so no body ever carries a
+    credential.
     """
     exchange = getattr(assessment, "exchange", None)
     if isinstance(exchange, dict) and isinstance(exchange.get("requests"), list):
@@ -1367,16 +1364,40 @@ def _prefilter_request(
         # consumers do to a request body — at any nesting depth — can
         # reach back into the assessor's recorded exchange (pydantic
         # does not copy plain dict fields on construction).
-        return copy.deepcopy(exchange["requests"]), False
+        return copy.deepcopy(exchange["requests"])
     builder = getattr(assessor, "_request_body", None)
-    if callable(builder):
+    if callable(builder) and question is not None:
         body = dict(builder(question, context, cases))
     else:
         body = {
             "context": context,
             "items": [{"id": c.risk_id, "text": f"{c.name}: {c.description}"} for c in cases],
         }
-    return body, True
+    body["synthesized"] = True
+    return [body]
+
+
+def _prefilter_responses(assessment) -> list:
+    """What the assessor recorded as answered, when its exchange carries it.
+
+    Assessors whose exchange carries ``responses`` (the provider assessors)
+    answer with readouts the run needs after the fact — laya's usage
+    block (``state_tokens_dropped``, ``truncated``) and Jev's token
+    usage. Assessors that record nothing (replay, the generic seam stub)
+    stay empty, so their serialized output is unchanged. Credentials
+    never appear: the exchange records bodies, and the key travels in a
+    header the body never sees.
+
+    The recorded responses are deep-copied, the same boundary the
+    request bodies get: pydantic does not copy plain dict fields on
+    construction, so sharing the member dicts would let anything the
+    record's consumers do — at any nesting depth — reach back into the
+    assessor's recorded exchange.
+    """
+    exchange = getattr(assessment, "exchange", None)
+    if isinstance(exchange, dict) and isinstance(exchange.get("responses"), list):
+        return copy.deepcopy(exchange["responses"])
+    return []
 
 
 def _prefilter_decision_log(decisions: list[Decision], assessment, rule, assessor_id: str) -> DecisionLog:
@@ -1487,14 +1508,11 @@ def _prefilter_one_chunk(
     decision_by_id = {d.risk_id: d for d in decisions}
     accepted_ids = {c.risk_id for c in cr.accepted}
     keep_ids = {d.risk_id for d in decisions if d.keep} | (accepted_ids - set(decision_by_id))
-    request_body, synthesized = _prefilter_request(
-        context, cases, assessment, prefilter.assessor, GROUNDING_LIKELIHOOD_QUESTION_V1
-    )
     calls_record = DecisionCallRecord(
         stage="prefilter",
         chunk_index=cr.chunk_index,
-        request=request_body,
-        synthesized=synthesized,
+        requests=_prefilter_requests(context, cases, assessment, prefilter.assessor, GROUNDING_LIKELIHOOD_QUESTION_V1),
+        responses=_prefilter_responses(assessment),
         decision=_prefilter_decision_log(
             decisions, assessment, prefilter.rule, getattr(prefilter.assessor, "assessor_id", "")
         ),
