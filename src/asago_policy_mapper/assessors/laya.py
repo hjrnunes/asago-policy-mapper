@@ -54,9 +54,9 @@ from asago_policy_mapper.extract.screening import (
 )
 
 _LAYA_BASE_URL = "http://localhost/laya"
-"""A placeholder URL: in-process means no real endpoint, but metadata and
-profile validation read a URL-shaped ``base_url`` (host ``localhost``
-matches ``offsite=False`` — the assessor never leaves the machine)."""
+"""A placeholder kept for ``ProbabilityEndpoint`` field-shape compatibility
+only: the assessor never opens a client, and metadata records no host for
+an in-process run."""
 
 _LAYA_MODEL = "aac6fef/laya-multilingual-mlx"
 """The default checkpoint: 1024-token context (the English 421M has 512,
