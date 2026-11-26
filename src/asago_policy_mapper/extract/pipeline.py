@@ -4,8 +4,11 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
 
 from asago_policy_mapper.extract.attribute import (
     _counts_causal,
@@ -22,6 +25,9 @@ from asago_policy_mapper.extract.index import RiskIndex
 from asago_policy_mapper.extract.merge import merge_matches
 from asago_policy_mapper.extract.models import (
     ChunkSummary,
+    DecisionCallRecord,
+    DecisionItem,
+    DecisionLog,
     EvidenceSpan,
     ExtractionResult,
     FilteredCandidate,
@@ -42,11 +48,52 @@ from asago_policy_mapper.extract.retrieve import (
     judge_borderline,
     retrieve_chunk,
 )
+from asago_policy_mapper.extract.screening import (
+    AnswerBatch,
+    Assessor,
+    Decision,
+    DecisionCase,
+    NoAnswer,
+    ProbabilityAnswer,
+    Question,
+    answer_payloads,
+)
 from asago_policy_mapper.llm import LLMConfig, StructuredOutputMode
 
 logger = logging.getLogger(__name__)
 
 _QUERY_GEN_MAX_CANDIDATES = 50
+
+PREFILTER_TASK = Question(
+    question_id="grounding-probability",
+    version="1",
+    criterion=(
+        "A candidate risk is worth grounding when the policy passage "
+        "plausibly contains evidence for it: the passage names the risk or "
+        "its specific technical concept, describes its mitigation, "
+        "management or oversight, or establishes a governance framework "
+        "that inherently covers it."
+    ),
+)
+"""The pre-grounding filter's task: score grounding likelihood, not relevance."""
+
+_PREFILTER_FIELDS_SENT = ["chunk_context", "risk_name", "risk_description"]
+
+
+@dataclass(frozen=True)
+class Prefilter:
+    """The opt-in pre-grounding filter: an assessor plus a keep/drop rule.
+
+    ``assessor`` is any ``Assessor`` that emits ``ProbabilityAnswer``
+    answers (today the HTTP probability assessor or the replay assessor);
+    ``rule`` reduces those answers to keep/drop decisions (today
+    ``DropThreshold``). Provider settings never travel in here: the
+    assessor carries its own endpoint configuration, and the run's
+    ``RetrievalConfig`` stays free of them.
+    """
+
+    assessor: Assessor
+    rule: Any
 
 
 def _cap_accepted_candidates(chunk_results: list[ChunkResult], limit: int) -> None:
@@ -91,6 +138,26 @@ def _document_discusses_agents(texts: list[str]) -> bool:
     return any(phrase in combined for phrase in _AGENTIC_PHRASES)
 
 
+def _stage_context(chunk_contexts: list[str], chunk_index: int, chunks) -> str:
+    """The context a stage scores or grounds one chunk against.
+
+    The selection rule grounding and the prefilter share: pick the
+    context by the chunk's index, not the chunk's position in a stage's
+    list, and fall back to the chunk's own text when the context is
+    missing or empty. Selecting by position holds only while every
+    stage sees a dense list of every chunk; selecting by index is the
+    invariant the pipeline's data model already promises
+    (``chunk_index`` keys the chunks list).
+    """
+    context = chunk_contexts[chunk_index] if chunk_contexts and 0 <= chunk_index < len(chunk_contexts) else ""
+    return _stage_context_value(context, chunks[chunk_index] if 0 <= chunk_index < len(chunks) else None)
+
+
+def _stage_context_value(context: str, chunk) -> str:
+    """The grounding text for one chunk: the stage context, else the chunk's text."""
+    return context if context else (chunk.text if chunk is not None else "")
+
+
 def _judge_one(
     i,
     cr,
@@ -125,7 +192,7 @@ def _ground_one(
     context_text="",
 ):
     chunk = chunks[cr.chunk_index]
-    text = context_text if context_text else chunk.text
+    text = _stage_context_value(context_text, chunk)
     merged: dict[str, tuple[list, str]] = {}
     for pass_num in range(1, passes + 1):
         grounded = ground_and_extract_evidence(
@@ -265,7 +332,7 @@ def _run_grounding(
                     task_records[pos],
                     grounding_passes,
                     grounding_batch_size,
-                    chunk_contexts[cr.chunk_index] if chunk_contexts else "",
+                    _stage_context(chunk_contexts, cr.chunk_index, chunks),
                 ): cr
                 for pos, cr in enumerate(ground_tasks)
             }
@@ -896,6 +963,252 @@ def _build_chunk_summaries(chunk_results, chunks) -> list[ChunkSummary]:
     ]
 
 
+def _prefilter_cases(cr: ChunkResult, index) -> list[DecisionCase]:
+    """Build the assessor cases for one chunk's accepted candidates.
+
+    A synthetic parent (a collapsed variant group, keyed in the index's
+    ``variant_map``) is flagged with ``is_variant_parent=True``; its name
+    and description are exactly what the grounder reads, because the
+    candidate came from the same index collapse that produced them. The
+    parent id itself carries no ``---`` — only its member variants do —
+    so the variant map, not the id text, identifies it.
+    """
+    return [
+        DecisionCase(
+            risk_id=c.risk_id,
+            name=c.risk_name,
+            description=c.risk_description,
+            is_variant_parent=c.risk_id in index.variant_map,
+        )
+        for c in cr.accepted
+    ]
+
+
+def _prefilter_request(context: str, cases: list[DecisionCase], assessment) -> dict | list:
+    """The exact request the prefilter sent; no credentials.
+
+    Assessors that batch (the HTTP probability assessor splits at
+    ``max_batch``) record every request body they actually sent, with the
+    batch boundaries preserved; assessors that send nothing (replay)
+    record the single body the exchange shape describes, so a run's
+    ``decision_calls`` still show what would have left the machine. The
+    key travels in a header, so no body ever carries a credential.
+    """
+    exchange = getattr(assessment, "exchange", None)
+    if isinstance(exchange, dict) and isinstance(exchange.get("requests"), list):
+        return list(exchange["requests"])
+    return {
+        "context": context,
+        "items": [{"id": c.risk_id, "text": f"{c.name}: {c.description}"} for c in cases],
+    }
+
+
+def _prefilter_decision_log(
+    cases: list[DecisionCase], decisions: list[Decision], assessment, rule, assessor_id: str
+) -> DecisionLog:
+    """Assemble the prefilter's DecisionLog for one chunk."""
+    items = [
+        DecisionItem(
+            risk_id=d.risk_id,
+            answers=answer_payloads(assessment.answers.get(d.risk_id, ())),
+            keep=d.keep,
+            reason=d.reason,
+        )
+        for d in decisions
+    ]
+    return DecisionLog(
+        question_id=PREFILTER_TASK.question_id,
+        question_version=PREFILTER_TASK.version,
+        prompt_name="prefilter",
+        prompt_sha256="",
+        assessor_id=assessor_id,
+        rule_id=getattr(rule, "rule_id", ""),
+        latency_ms=assessment.latency_ms,
+        items=items,
+        unmatched_ids=list(assessment.unmatched_ids),
+    )
+
+
+def _prefilter_dropped_score(answers) -> float | None:
+    """The probability a drop decision rests on, or None when none exists.
+
+    ``DropThreshold`` drops only on probabilities (a ``NoAnswer``
+    bypasses), so a dropped candidate's score is its maximum probability;
+    a rule that drops despite having no probability gets ``None``.
+    """
+    probabilities = [a.probability for a in answers if isinstance(a, ProbabilityAnswer)]
+    return max(probabilities) if probabilities else None
+
+
+def _prefilter_drop_record(candidate, decision, answers, taxonomy, chunk_index, accepted_by) -> FilteredCandidate:
+    """Build the recorded drop for one filtered-out candidate.
+
+    ``accepted_by`` keeps the retrieval provenance (threshold, rrf,
+    llm_judge) the candidate earned before the prefilter dropped it;
+    ``dropped_by`` names the prefilter separately.
+    """
+    return FilteredCandidate(
+        risk_id=candidate.risk_id,
+        risk_name=candidate.risk_name,
+        taxonomy=taxonomy,
+        cross_encoder_score=candidate.cross_encoder_score,
+        rrf_score=candidate.rrf_score,
+        bm25_rank=candidate.bm25_rank,
+        accepted_by=accepted_by,
+        chunk_index=chunk_index,
+        dropped_by="prefilter",
+        score=_prefilter_dropped_score(answers),
+        reason=decision.reason,
+    )
+
+
+def _prefilter_one_chunk(
+    cr, context, prefilter, index, retrieval
+) -> tuple[ChunkResult, list[FilteredCandidate], DecisionCallRecord]:
+    """Assess and filter one chunk's accepted candidates.
+
+    Returns (filtered copy, drop records, decision call record). The copy
+    shares the original's borderline lists and stats; only ``accepted``
+    shrinks, and only on the copy.
+    """
+    cases = _prefilter_cases(cr, index)
+    try:
+        assessment = prefilter.assessor.assess(PREFILTER_TASK, context, cases)
+    except Exception as e:
+        # Fail-open: the filter must never lose risks to a broken
+        # assessor. Every case keeps, with the failure recorded the same
+        # way an unanswered case is. The pipeline holds no secret of its
+        # own and does not re-redact: exceptions escaping a conforming
+        # assessor arrive already boundary-redacted, with the type
+        # preserved (the shared contract has assessors redact their own
+        # escaping exceptions against the secret they captured), so the
+        # detail is the exception text as it reached this handler and the
+        # warning carries the exception type and that same detail rather
+        # than the raw exception — a credential in an exception message
+        # reaches neither the log nor the result. A test double that
+        # injects raw key text models a non-conforming assessor; the
+        # contract assigns that defense to the boundary, not here.
+        detail = str(e) or type(e).__name__
+        logger.warning(
+            "Prefilter assessor %s failed on chunk %s; keeping all candidates: %s: %s",
+            getattr(prefilter.assessor, "assessor_id", "<unknown>"),
+            cr.chunk_index,
+            type(e).__name__,
+            detail,
+        )
+        assessment = AnswerBatch(
+            answers={c.risk_id: (NoAnswer("error", detail),) for c in cases},
+            unmatched_ids=(),
+            latency_ms=0.0,
+            exchange=None,
+        )
+    decisions = prefilter.rule.decide(cases, assessment)
+    # A rule that omits a case keeps it: the kept set is the cases the
+    # rule kept plus the cases it never mentioned, so a non-conforming
+    # rule fails open exactly like a non-conforming assessor. Keep still
+    # wins on conflicting decisions for one id, as it did before; only
+    # an id whose every decision drops is dropped.
+    decision_by_id = {d.risk_id: d for d in decisions}
+    accepted_ids = {c.risk_id for c in cr.accepted}
+    keep_ids = {d.risk_id for d in decisions if d.keep} | (accepted_ids - set(decision_by_id))
+    calls_record = DecisionCallRecord(
+        stage="prefilter",
+        chunk_index=cr.chunk_index,
+        request=_prefilter_request(context, cases, assessment),
+        decision=_prefilter_decision_log(cases, decisions, assessment, prefilter.rule, prefilter.assessor.assessor_id),
+    )
+    drops = [
+        _prefilter_drop_record(
+            candidate,
+            decision_by_id[candidate.risk_id],
+            assessment.answers.get(candidate.risk_id, ()),
+            index.get_taxonomy(candidate.risk_id),
+            cr.chunk_index,
+            determine_accepted_by(
+                candidate,
+                borderline_judged=cr.borderline_judged,
+                use_cross_encoder=retrieval.use_cross_encoder,
+                no_judge=retrieval.no_judge,
+            ),
+        )
+        for candidate in cr.accepted
+        if candidate.risk_id not in keep_ids
+    ]
+    filtered_copy = ChunkResult(
+        chunk_index=cr.chunk_index,
+        source=cr.source,
+        page=cr.page,
+        section=cr.section,
+        accepted=[c for c in cr.accepted if c.risk_id in keep_ids],
+        borderline=cr.borderline,
+        borderline_judged=cr.borderline_judged,
+        stats=dict(cr.stats),
+    )
+    return filtered_copy, drops, calls_record
+
+
+def _run_prefilter_stage(
+    chunk_results: list[ChunkResult],
+    chunk_contexts: list[str],
+    prefilter: Prefilter,
+    index,
+    retrieval,
+    chunks=(),
+) -> tuple[list[ChunkResult], list[FilteredCandidate], list[DecisionCallRecord]]:
+    """Filter accepted candidates per chunk before grounding.
+
+    Returns (filtered copies, prefilter drops, decision call records).
+    The copies carry every candidate the filter kept; the original
+    ``accepted`` lists stay untouched, because ``_build_found_risk_chunks``
+    and the expansion-context choice read them. Candidates the filter
+    dropped never reach grounding, and a dropped synthetic parent means
+    its variants never reach variant grounding either (they enter the
+    pipeline only through the parent's grounded match).
+
+    Each chunk's context comes from the same selection rule grounding
+    uses (``_stage_context``), so the filter scores exactly the text
+    grounding grounds against — including the chunk-text fallback —
+    rather than agreeing with grounding only when both stages happen to
+    see dense, aligned lists.
+    """
+    filtered_copies: list[ChunkResult] = []
+    drops: list[FilteredCandidate] = []
+    calls: list[DecisionCallRecord] = []
+    for i, cr in enumerate(chunk_results):
+        if cr is None or not cr.accepted:
+            filtered_copies.append(cr)
+            continue
+        context = _stage_context(chunk_contexts, cr.chunk_index, chunks)
+        copy, chunk_drops, call = _prefilter_one_chunk(cr, context, prefilter, index, retrieval)
+        filtered_copies.append(copy)
+        drops.extend(chunk_drops)
+        calls.append(call)
+    return filtered_copies, drops, calls
+
+
+def _assessor_endpoint_host(assessor) -> str | None:
+    """The hostname of a probability assessor's endpoint, when it has one."""
+    endpoint = getattr(assessor, "endpoint", None)
+    base_url = getattr(endpoint, "base_url", None) if endpoint is not None else None
+    if not isinstance(base_url, str) or not base_url:
+        return None
+    return urlsplit(base_url).hostname
+
+
+def _prefilter_metadata(prefilter: Prefilter) -> dict:
+    """The metadata.prefilter block recorded when the filter is on."""
+    assessor = prefilter.assessor
+    rule = prefilter.rule
+    return {
+        "assessor_id": getattr(assessor, "assessor_id", ""),
+        "rule_id": getattr(rule, "rule_id", ""),
+        "threshold": getattr(rule, "threshold", None),
+        "endpoint_host": _assessor_endpoint_host(assessor),
+        "sends_offsite": bool(getattr(assessor, "sends_offsite", False)),
+        "fields_sent": list(_PREFILTER_FIELDS_SENT),
+    }
+
+
 def _run_matches_stage(
     chunk_results, chunks, client, config, retrieval, index, call_collector, chunk_contexts, timing
 ) -> tuple[list[RiskMatch], list[FilteredCandidate], int]:
@@ -941,7 +1254,7 @@ def _build_retrieval_stats(chunk_results, chunks, timing, grounding_filtered, no
 
 
 def _build_result_metadata(
-    config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client=None
+    config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client=None, prefilter=None
 ) -> dict:
     """Assemble the run metadata recorded alongside the extraction result."""
     metadata = {
@@ -951,6 +1264,8 @@ def _build_result_metadata(
         "expansion_stats": expansion_stats,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    if prefilter is not None:
+        metadata["prefilter"] = _prefilter_metadata(prefilter)
     mode = getattr(client, "mode", None)
     if isinstance(mode, StructuredOutputMode):
         metadata["structured_output_mode"] = mode.value
@@ -1081,8 +1396,11 @@ def run_extraction(
     retrieval: RetrievalConfig | None = None,
     *,
     ocr: bool = False,
+    prefilter: Prefilter | None = None,
 ) -> ExtractionResult:
     retrieval = retrieval or RetrievalConfig()
+    if prefilter is not None and retrieval.no_grounding:
+        raise ValueError("prefilter requires grounding; it filters what grounding sees, so --no-grounding refuses it")
     timing: dict[str, float] = {}
     max_workers = config.max_concurrent
 
@@ -1131,9 +1449,20 @@ def run_extraction(
             chunk_contexts=chunk_contexts,
         )
 
+    prefilter_drops: list[FilteredCandidate] = []
+    decision_calls: list[DecisionCallRecord] = []
+    if prefilter is not None:
+        with timed(timing, "prefilter_ms"):
+            grounding_inputs, prefilter_drops, decision_calls = _run_prefilter_stage(
+                chunk_results, chunk_contexts, prefilter, index, retrieval, chunks
+            )
+    else:
+        grounding_inputs = chunk_results
+
     all_matches, all_filtered, grounding_filtered = _run_matches_stage(
-        chunk_results, chunks, client, config, retrieval, index, call_collector, chunk_contexts, timing
+        grounding_inputs, chunks, client, config, retrieval, index, call_collector, chunk_contexts, timing
     )
+    all_filtered = prefilter_drops + all_filtered
 
     all_matches = _run_variant_grounding_stage(
         all_matches, chunks, index, client, config, retrieval, call_collector, chunk_contexts, max_workers, timing
@@ -1171,11 +1500,12 @@ def run_extraction(
         source_documents=[str(d) for d in documents],
         retrieval_stats=total_stats,
         metadata=_build_result_metadata(
-            config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client
+            config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client, prefilter
         ),
         chunks=chunk_summaries,
         llm_calls=call_collector,
         grounding_filtered_candidates=all_filtered,
+        decision_calls=decision_calls,
     )
 
 
