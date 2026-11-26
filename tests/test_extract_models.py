@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from asago_policy_mapper.extract.models import (
     ChunkSummary,
     EvidenceSpan,
@@ -396,4 +399,88 @@ def test_risk_match_accepted_by_rejects_unknown_label():
             accepted_by="grounding",
             evidence=[],
             scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=None, rrf_score=0.5),
+        )
+
+
+def test_risk_match_causal_provenance_defaults():
+    match = RiskMatch(
+        risk_id="atlas-R-0042",
+        risk_name="Discriminatory Outcomes",
+        risk_description="AI system produces biased results.",
+        confidence=0.85,
+        confidence_source="cross_encoder",
+        grounding_confidence="high",
+        accepted_by="threshold",
+        evidence=[],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.2, cross_encoder_score=0.85, rrf_score=0.03),
+    )
+    assert match.causal_status is None
+    assert match.causal_provenance == {}
+
+
+def test_risk_match_causal_provenance_roundtrip():
+    match = RiskMatch(
+        risk_id="atlas-R-0042",
+        risk_name="Discriminatory Outcomes",
+        risk_description="AI system produces biased results.",
+        confidence=0.85,
+        confidence_source="cross_encoder",
+        grounding_confidence="high",
+        accepted_by="threshold",
+        evidence=[],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.2, cross_encoder_score=0.85, rrf_score=0.03),
+        causal_status="generated",
+        causal_provenance={
+            "threat": {"source": "generated"},
+            "impact": {"source": "catalog", "risk_id": "atlas-hallucination"},
+        },
+    )
+    d = match.model_dump()
+    assert d["causal_status"] == "generated"
+    assert d["causal_provenance"] == {
+        "threat": {"source": "generated"},
+        "impact": {"source": "catalog", "risk_id": "atlas-hallucination"},
+    }
+    restored = RiskMatch(**d)
+    assert restored.causal_status == "generated"
+    assert restored.causal_provenance["impact"] == {"source": "catalog", "risk_id": "atlas-hallucination"}
+
+
+def test_risk_match_causal_status_literal_values():
+    """Every causal_status value from the schema parses; anything else is rejected."""
+    for status in (
+        "generated",
+        "no_evidence",
+        "empty_answer",
+        "validation_exhausted",
+        "disabled_synthesis_off",
+        "disabled_no_client",
+        "disabled_no_grounding",
+    ):
+        match = RiskMatch(
+            risk_id="atlas-R-0042",
+            risk_name="Discriminatory Outcomes",
+            risk_description="AI system produces biased results.",
+            confidence=0.85,
+            confidence_source="cross_encoder",
+            grounding_confidence="high",
+            accepted_by="threshold",
+            evidence=[],
+            scores=RetrievalScores(bm25_rank=1, embedding_distance=0.2, cross_encoder_score=0.85, rrf_score=0.03),
+            causal_status=status,
+        )
+        assert match.causal_status == status
+
+    with pytest.raises(ValidationError):
+        RiskMatch(
+            risk_id="atlas-R-0042",
+            risk_name="Discriminatory Outcomes",
+            risk_description="AI system produces biased results.",
+            confidence=0.85,
+            confidence_source="cross_encoder",
+            grounding_confidence="high",
+            accepted_by="threshold",
+            evidence=[],
+            scores=RetrievalScores(bm25_rank=1, embedding_distance=0.2, cross_encoder_score=0.85, rrf_score=0.03),
+            causal_status="bogus",
         )

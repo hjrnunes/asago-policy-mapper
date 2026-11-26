@@ -12,7 +12,7 @@ import time
 
 from asago_policy_mapper.extract.attribute import _record_grounding_call
 from asago_policy_mapper.extract.calllog import merge_call_records, next_call_number
-from asago_policy_mapper.extract.models import LLMCallRecord, _RiskEvidence
+from asago_policy_mapper.extract.models import CausalSynthesisResult, LLMCallRecord, _RiskEvidence
 
 
 def _record(call_id: str, stage: str = "grounding", chunk_index: int = 0) -> LLMCallRecord:
@@ -512,9 +512,9 @@ def test_run_causal_synthesis_numbers_records_in_task_order(monkeypatch):
         gate.enter(index)
         records.append(_record("causal-001", stage="causal_synthesis", chunk_index=index))
         gate.finish(index)
-        return None
+        return CausalSynthesisResult(status="empty_answer")
 
-    monkeypatch.setattr(pipeline, "synthesize_causal_chain", fake_synthesize_causal_chain)
+    monkeypatch.setattr(pipeline, "synthesize_causal_chain_with_status", fake_synthesize_causal_chain)
     collector: list[LLMCallRecord] = []
 
     def make_match(i):
@@ -551,9 +551,9 @@ def test_run_causal_synthesis_without_collector_records_nothing(monkeypatch):
 
     def fake_synthesize_causal_chain(*, risk_match, chunk_texts, client, model, records):
         records.append(_record("causal-001", stage="causal_synthesis"))
-        return None
+        return CausalSynthesisResult(status="empty_answer")
 
-    monkeypatch.setattr(pipeline, "synthesize_causal_chain", fake_synthesize_causal_chain)
+    monkeypatch.setattr(pipeline, "synthesize_causal_chain_with_status", fake_synthesize_causal_chain)
 
     def make_match(i):
         return RiskMatch(

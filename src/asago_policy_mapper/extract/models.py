@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, computed_field, field_validator, model_serializer, model_validator
+from typing_extensions import TypedDict
 
 
 def _reject_nan(value: float | None) -> float | None:
@@ -124,6 +125,27 @@ RERANKER_CONFIDENCE_SOURCES = frozenset({"cross_encoder", "colbert"})
 CONFIDENCE_FOLLOWS_MEASUREMENT = frozenset({"cross_encoder", "colbert", "none"})
 
 
+class CatalogCausalProvenance(TypedDict):
+    """A causal field the built-in YAML tables supplied.
+
+    ``risk_id`` is the ID of the table entry the value came from — the
+    risk's own ID for a direct fill, the cross-mapped ID when the fill
+    went through the risk crossmap.
+    """
+
+    source: Literal["catalog"]
+    risk_id: str
+
+
+class GeneratedCausalProvenance(TypedDict):
+    """A causal field LLM synthesis supplied."""
+
+    source: Literal["generated"]
+
+
+CausalProvenanceValue = CatalogCausalProvenance | GeneratedCausalProvenance
+
+
 class RiskMatch(BaseModel):
     risk_id: str
     risk_name: str
@@ -142,6 +164,24 @@ class RiskMatch(BaseModel):
     consequence: str | None = None
     impact: str | None = None
     scores_inherited_from: str | None = None
+    # Why there is no causal chain: the three disabled_* values name which
+    # condition skipped the stage (synthesis off, no client, no grounding);
+    # the other values come from CausalSynthesisStatus.
+    causal_status: (
+        Literal[
+            "generated",
+            "no_evidence",
+            "empty_answer",
+            "validation_exhausted",
+            "disabled_synthesis_off",
+            "disabled_no_client",
+            "disabled_no_grounding",
+        ]
+        | None
+    ) = None
+    # Which source supplied each causal field: LLM synthesis or the built-in
+    # catalog tables. A catalog entry names the table's risk ID.
+    causal_provenance: dict[str, CausalProvenanceValue] = {}
 
     _reject_nan_confidence = field_validator("confidence")(_reject_nan)
 
@@ -364,6 +404,23 @@ class _CausalChain(BaseModel):
 
 class _CausalChains(BaseModel):
     items: list[_CausalChain]
+
+
+CausalSynthesisStatus = Literal["generated", "no_evidence", "empty_answer", "validation_exhausted"]
+
+
+@dataclass
+class CausalSynthesisResult:
+    """The result of one causal-synthesis attempt, with the reason for no chain.
+
+    ``status`` keeps the three "no chain" reasons apart: ``no_evidence``
+    (the risk's evidence points at no known chunk), ``empty_answer`` (the
+    model returned no chain content) and ``validation_exhausted`` (the
+    model output failed parsing or validation until retries ran out).
+    """
+
+    status: CausalSynthesisStatus
+    chain: _CausalChain | None = None
 
 
 @dataclass
