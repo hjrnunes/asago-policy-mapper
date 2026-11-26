@@ -332,7 +332,8 @@ def test_prefilter_record_request_bodies_do_not_alias_the_exchange():
     elsewhere (candidates are copied, borderline lists shared on
     purpose).
     """
-    from asago_policy_mapper.extract.pipeline import PREFILTER_TASK, _prefilter_request
+    from asago_policy_mapper.extract.pipeline import _prefilter_request
+    from asago_policy_mapper.extract.screening import GROUNDING_LIKELIHOOD_QUESTION_V1
 
     exchange = {
         "requests": [
@@ -343,7 +344,7 @@ def test_prefilter_record_request_bodies_do_not_alias_the_exchange():
     }
     batch = AnswerBatch(answers={}, unmatched_ids=(), latency_ms=1.0, exchange=exchange)
 
-    recorded, synthesized = _prefilter_request("policy text", [], batch, None, PREFILTER_TASK)
+    recorded, synthesized = _prefilter_request("policy text", [], batch, None, GROUNDING_LIKELIHOOD_QUESTION_V1)
 
     assert synthesized is False
     assert recorded == exchange["requests"]
@@ -947,7 +948,7 @@ def test_prefilter_cases_carry_name_and_description(mock_config, tmp_path, monke
 
 
 def test_prefilter_assessor_sees_the_probability_task(mock_config, tmp_path, monkeypatch):
-    """The assessor is asked the grounding-probability task, not the judge's."""
+    """The assessor is asked the grounding-likelihood question, not the judge's."""
     from asago_policy_mapper.extract import pipeline
 
     class _StubIndex:
@@ -980,8 +981,8 @@ def test_prefilter_assessor_sees_the_probability_task(mock_config, tmp_path, mon
     )
 
     task, _, _ = assessor.calls[0]
-    assert task is pipeline.PREFILTER_TASK
-    assert task.question_id == "grounding-probability"
+    assert task is pipeline.GROUNDING_LIKELIHOOD_QUESTION_V1
+    assert task.question_id == "grounding-likelihood"
     assert task.version == "1"
 
 
@@ -1217,7 +1218,7 @@ def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, mo
     assert call.request["items"][0]["text"] == f"{MOCK_RISKS[0].name}: {MOCK_RISKS[0].description}"
     # The decision log identifies the task, prompt, assessor and rule.
     log = call.decision
-    assert log.question_id == "grounding-probability"
+    assert log.question_id == "grounding-likelihood"
     assert log.question_version == "1"
     assert log.prompt_name == "prefilter"
     assert log.prompt_sha256 == ""
@@ -1290,7 +1291,7 @@ def test_prefilter_request_synthesizes_through_assessor_builder(mock_config, tmp
     assert call.synthesized is True
     assert call.request["model"] == "mapped-model"
     assert [call.request["questions"][r.id] for r in MOCK_RISKS] == [
-        f"grounding-probability:{r.name}" for r in MOCK_RISKS
+        f"grounding-likelihood:{r.name}" for r in MOCK_RISKS
     ]
 
 

@@ -46,6 +46,26 @@ while those semantics hold; a template that changes them bumps the version.
 """
 
 
+GROUNDING_LIKELIHOOD_QUESTION_V1 = Question(
+    question_id="grounding-likelihood",
+    version="1",
+    criterion=(
+        "A candidate risk is worth grounding when the policy passage "
+        "plausibly contains evidence for it: the passage names the risk or "
+        "its specific technical concept, describes its mitigation, "
+        "management or oversight, or establishes a governance framework "
+        "that inherently covers it."
+    ),
+)
+"""The pre-grounding filter's question: score grounding likelihood, not relevance.
+
+The criterion mirrors the borderline-judge question's three routes to
+relevance; the filter differs in what it does with the answer (a probability
+that ``DropThreshold`` compares to a threshold, not a keep-or-drop boolean).
+``version`` stays at "1" while those semantics hold.
+"""
+
+
 @dataclass(frozen=True)
 class DecisionCase:
     """One risk put to an assessor, decoupled from the retrieval candidate.
