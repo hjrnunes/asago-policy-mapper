@@ -266,7 +266,7 @@ def _run_grounding_with_reverse_completion(monkeypatch, task_count):
     config = LLMConfig(base_url="http://test", model="test-model", max_context=0)
     retrieval = type("R", (), {"use_cross_encoder": True, "no_judge": False})()
     index = type("I", (), {"get_taxonomy": staticmethod(lambda rid: "t")})()
-    chunks = [type("C", (), {"source": "doc.md"})() for _ in range(task_count)]
+    chunks = [type("C", (), {"source": "doc.md", "text": "chunk text"})() for _ in range(task_count)]
 
     pipeline._run_grounding(
         _grounding_chunk_results(task_count),
@@ -316,7 +316,7 @@ def test_run_grounding_without_collector_records_nothing(monkeypatch):
     config = LLMConfig(base_url="http://test", model="test-model", max_context=0)
     retrieval = type("R", (), {"use_cross_encoder": True, "no_judge": False})()
     index = type("I", (), {"get_taxonomy": staticmethod(lambda rid: "t")})()
-    chunks = [type("C", (), {"source": "doc.md"})() for _ in range(task_count)]
+    chunks = [type("C", (), {"source": "doc.md", "text": "chunk text"})() for _ in range(task_count)]
 
     matches, filtered, _ = pipeline._run_grounding(
         _grounding_chunk_results(task_count), chunks, None, config, retrieval, index, None

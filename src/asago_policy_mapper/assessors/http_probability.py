@@ -142,8 +142,14 @@ class HttpProbabilityAssessor:
         unmatched: list[str] = []
         exchanges: list[dict] = []
         latency_ms = 0.0
-        client = self._open_client()
+        client = None
         try:
+            # Client construction sits inside the try with the requests:
+            # a construction failure (bad URL, TLS setup) propagates to
+            # the caller, which fails the batch open instead of losing
+            # the run, and there is nothing to close when it never
+            # opened.
+            client = self._open_client()
             for batch in self._batches(cases):
                 t0 = time.perf_counter()
                 try:
@@ -167,7 +173,7 @@ class HttpProbabilityAssessor:
                     entry = answers.get(rid)
                     answers[rid] = (entry or ()) + (answer,)
         finally:
-            if self._transport is None:
+            if client is not None and self._transport is None:
                 client.close()
         return AnswerBatch(
             answers=answers,

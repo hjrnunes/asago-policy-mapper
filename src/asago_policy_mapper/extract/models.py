@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_serializer
 
 
 class ScoredCandidate(BaseModel):
@@ -82,7 +82,24 @@ class RetrievalStats(BaseModel):
     llm_judged: int
     auto_promoted: int = 0
     grounding_filtered: int
+    # None means the pre-grounding filter did not run; the count is
+    # omitted then so a filter-off run serializes byte-identically to a
+    # pre-filter run.
+    prefilter_dropped: int | None = None
     timing_ms: dict[str, float] = {}
+
+    @model_serializer(mode="wrap")
+    def _omit_prefilter_dropped_when_off(self, handler) -> dict[str, Any]:
+        """Leave ``prefilter_dropped`` out unless the prefilter ran.
+
+        ``grounding_filtered`` counts only candidates grounding itself
+        rejected; the prefilter's drops are counted separately here and
+        never overlap with it.
+        """
+        data: dict[str, Any] = handler(self)
+        if data.get("prefilter_dropped") is None:
+            data.pop("prefilter_dropped", None)
+        return data
 
 
 class ChunkSummary(BaseModel):
@@ -150,6 +167,43 @@ class FilteredCandidate(BaseModel):
     bm25_rank: int = 0
     accepted_by: str
     chunk_index: int
+    dropped_by: str | None = None
+    score: float | None = None
+    reason: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_prefilter_fields(self, handler) -> dict[str, Any]:
+        """Leave the prefilter provenance fields out unless the prefilter set them.
+
+        Grounding rejections keep all three ``None``, and serializing them
+        would change the output of every filter-off run; only a prefilter
+        drop carries ``dropped_by``/``score``/``reason``.
+        """
+        data: dict[str, Any] = handler(self)
+        for key in ("dropped_by", "score", "reason"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+class DecisionCallRecord(BaseModel):
+    """One decision-stage call: what was sent and what was decided.
+
+    ``request`` holds the exact request the stage sent, with no
+    credentials (the prefilter's key travels in a header the body never
+    sees). Assessors that batch report one body per batch as a list;
+    single-shot assessors report one body as a dict. ``decision`` is the
+    ``DecisionLog`` the seam produced. ``synthesized`` marks a request
+    the stage built for the record rather than sent — it lives on the
+    record, not inside the body, so the body stays exactly the request
+    data and the marker never travels to an endpoint.
+    """
+
+    stage: str
+    chunk_index: int
+    request: dict | list
+    decision: DecisionLog | None = None
+    synthesized: bool = False
 
 
 class ExtractionResult(BaseModel):
@@ -162,7 +216,27 @@ class ExtractionResult(BaseModel):
     chunks: list[ChunkSummary] = []
     llm_calls: list[LLMCallRecord] = []
     grounding_filtered_candidates: list[FilteredCandidate] = []
+    decision_calls: list[DecisionCallRecord] = []
     eval: dict | None = None
+    prefilter_ran: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_decision_calls_when_off(self, handler) -> dict[str, Any]:
+        """Leave ``decision_calls`` out unless the prefilter ran.
+
+        ``decision_calls`` carries the filter's presence the way
+        ``prefilter_dropped`` does: the key appears whenever the filter
+        ran — an empty list means the filter ran with nothing to assess
+        — and both keys are omitted only when the filter never ran, so
+        a filter-off result stays byte-identical to the pre-filter
+        output. ``prefilter_ran`` says which of the two worlds the
+        result belongs to and serializes with it.
+        """
+        data: dict[str, Any] = handler(self)
+        if not self.prefilter_ran:
+            data.pop("decision_calls", None)
+            data.pop("prefilter_ran", None)
+        return data
 
 
 class _JudgeVerdict(BaseModel):

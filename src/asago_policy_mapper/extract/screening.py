@@ -46,6 +46,26 @@ while those semantics hold; a template that changes them bumps the version.
 """
 
 
+GROUNDING_LIKELIHOOD_QUESTION_V1 = Question(
+    question_id="grounding-likelihood",
+    version="1",
+    criterion=(
+        "A candidate risk is worth grounding when the policy passage "
+        "plausibly contains evidence for it: the passage names the risk or "
+        "its specific technical concept, describes its mitigation, "
+        "management or oversight, or establishes a governance framework "
+        "that inherently covers it."
+    ),
+)
+"""The pre-grounding filter's question: score grounding likelihood, not relevance.
+
+The criterion mirrors the borderline-judge question's three routes to
+relevance; the filter differs in what it does with the answer (a probability
+that ``DropThreshold`` compares to a threshold, not a keep-or-drop boolean).
+``version`` stays at "1" while those semantics hold.
+"""
+
+
 @dataclass(frozen=True)
 class DecisionCase:
     """One risk put to an assessor, decoupled from the retrieval candidate.
@@ -227,6 +247,15 @@ def _format_threshold(threshold: float) -> str:
     return two if float(two) == threshold else repr(threshold)
 
 
+DEFAULT_THRESHOLD = 0.10
+"""The threshold ``DropThreshold`` drops at when the profile names none.
+
+The CLI's profile validation reads this constant rather than repeating
+the value, so the default the validator accepts and the default the
+rule applies cannot diverge.
+"""
+
+
 class DropThreshold:
     """Keep/drop rule "drop-threshold/1": drop when every probability is at or below the threshold.
 
@@ -245,19 +274,33 @@ class DropThreshold:
 
     rule_id = "drop-threshold/1"
 
-    def __init__(self, assessor, threshold: float = 0.10):
+    @staticmethod
+    def validate_threshold(value: object) -> float:
+        """Check a threshold the way the rule's constructor will, and return it as a float.
+
+        The CLI's profile validation calls this so a bad threshold fails
+        at profile load with the rule's own contract, instead of the CLI
+        repeating (and possibly diverging from) the rule's checks:
+        non-numbers and booleans raise ``TypeError``; NaN, infinities
+        and out-of-range values raise ``ValueError``.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"DropThreshold threshold must be a number; got {value!r}")
+        if not 0.0 <= value <= 1.0:
+            # Value comparison first, so a huge int compares by value instead of
+            # overflowing float(); NaN and infinities fail the comparison and
+            # land here too.
+            raise ValueError(f"DropThreshold threshold must be in [0, 1]; got {value!r}")
+        return float(value)
+
+    def __init__(self, assessor, threshold: float = DEFAULT_THRESHOLD):
         answer_types = getattr(assessor, "answer_types", None) or frozenset()
         if ProbabilityAnswer not in answer_types:
             raise TypeError(
                 f"DropThreshold requires an assessor that emits ProbabilityAnswer; "
                 f"got answer_types={sorted(t.__name__ for t in answer_types) or 'none'}"
             )
-        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
-            raise TypeError(f"DropThreshold threshold must be a number; got {threshold!r}")
-        if not 0.0 <= threshold <= 1.0:
-            # Value comparison first, so a huge int compares by value instead of
-            # overflowing float(); NaN fails the comparison and lands here too.
-            raise ValueError(f"DropThreshold threshold must be in [0, 1]; got {threshold!r}")
+        threshold = self.validate_threshold(threshold)
         self.assessor = assessor
         self.threshold = threshold
 

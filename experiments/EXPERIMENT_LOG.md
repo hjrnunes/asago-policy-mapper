@@ -1,5 +1,35 @@
 # Experiment Log
 
+## 2026-11-15: Prefilter Saved-Inputs Evaluation (mechanism check)
+
+**Description:** First evaluation run of the opt-in pre-grounding filter (GitHub #149 part 2), on frozen fixtures from
+the risk-selected battery: 576 chunk rows across 27 policies, 21,127 candidates, 7,234 grounded ids. The threshold
+was swept on a 14-policy tuning split and reported on a disjoint 13-policy held-out split, per
+`scripts/eval_prefilter.py`. All assessments ran through the replay assessor; no provider was contacted.
+
+**Outcomes source:** the standin outcomes file, built from the fixtures' own grounding outcomes (grounded
+candidates p=0.95, everything else p=0.02). No real assessor outcomes exist yet — the live probability endpoint has
+not been swept. **These numbers are
+construction-perfect by design: they prove the evaluation mechanism (fixtures → threshold sweep on the tuning split →
+held-out report), not the filter's performance.**
+
+**Results (held-out split, 9,499 candidates, 3,556 grounded):**
+
+| Threshold | Drop rate | Recall loss | Bypass rate | Latency p50 / p95 |
+|---|---:|---:|---:|---:|
+| 0.02 (chosen) | 59.5% | 0.0 | 0.0 | 8.4 µs / 12.7 µs |
+
+The sweep on the tuning split (11,628 candidates) shows the construction artifact plainly: at 0.01 nothing drops (the
+standin's minimum p is 0.02), and at every threshold ≥ 0.02 all 7,501 ungrounded candidates drop and no grounded
+candidate does. The tie-break (least recall loss, then most drops) therefore picks 0.02.
+
+**Conclusion:** The mechanism works end to end: the fixture replay drives a real threshold sweep, the chosen threshold
+carries to the held-out split, and drop rate / recall loss / bypass rate / replay latency all report. The numbers
+themselves carry no performance signal — a real assessor sweep (the full battery, at least 3 baseline and 3 filtered
+runs) remains future work, gated on live runs for the prefilter.
+
+---
+
 ## 2026-11-05: Structured-Output Mode A/B (instructor removal)
 
 **Description:** Three-arm full-battery comparison (`batteries/risk-selected.yaml`, 27 policies, gemma-4-26b-a4b-it on a vLLM endpoint, catalog at the ai-atlas-nexus pin recorded in `uv.lock`) for replacing instructor with a plain OpenAI SDK structured-output client. Baseline: instructor Mode.JSON (json_object + schema block in the system prompt, free decoding). Arm 2: native `json_schema` response_format (vLLM guided decoding). Arm 3: guided decoding + instructor's verbatim schema block in the prompt (`json_schema_with_prompt`). Wire-level inspection confirmed per-chunk prompts are byte-identical across arms; the divergence enters through the decoding regime.

@@ -155,9 +155,13 @@ def process_policy(
     if ext_data:
         extracted_ids = {r["risk_id"] for r in ext_data.get("risks", [])}
         spurious_ids = extracted_ids - gt_ids
+        # Prefilter drops (dropped_by="prefilter") never reached grounding,
+        # so they are not grounding rejections; the reranker trains only
+        # on candidates grounding itself rejected.
         filtered_ids = {
             fc["risk_id"]
             for fc in ext_data.get("grounding_filtered_candidates", [])
+            if fc.get("dropped_by") != "prefilter"
         }
 
     hard_neg_pool = list((spurious_ids | filtered_ids) - gt_ids)
