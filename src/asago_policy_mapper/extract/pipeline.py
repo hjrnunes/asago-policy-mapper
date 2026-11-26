@@ -5,7 +5,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ from asago_policy_mapper.extract.models import (
     _CausalChain,
 )
 from asago_policy_mapper.extract.parse import chunk_documents, parse_document
+from asago_policy_mapper.extract.plan import RunPlan, resolve_plan, validate_rrf_min_score
 from asago_policy_mapper.extract.querygen import generate_queries, group_chunks
 from asago_policy_mapper.extract.retrieve import (
     ChunkResult,
@@ -497,22 +498,26 @@ def _run_judge(
     config,
     retrieval,
     call_collector,
+    plan,
     chunk_contexts=None,
 ):
+    """Settle borderline candidates per the plan's judge mode.
+
+    ``auto_promote`` moves every borderline candidate into accepted,
+    ``llm`` asks the judge over judge-only contexts, and ``none`` leaves
+    them (no cross-encoder means no borderline candidates exist anyway).
+    """
     max_workers = config.max_concurrent
     judge_tasks = [(i, cr) for i, cr in enumerate(chunk_results) if cr.borderline]
-    logger.info(
-        "Judge: %d chunks with borderline candidates (no_judge=%s)",
-        len(judge_tasks),
-        retrieval.no_judge,
-    )
-    if retrieval.no_judge:
+    logger.info("Judge: %d chunks with borderline candidates (judge=%s)", len(judge_tasks), plan.judge)
+    if plan.judge == "auto_promote":
         for cr in chunk_results:
             if cr.borderline:
                 cr.borderline_judged = list(cr.borderline)
                 cr.accepted.extend(cr.borderline)
-    elif retrieval.use_cross_encoder:
+    elif plan.judge == "llm":
         if judge_tasks:
+            judge_contexts = _judge_contexts(chunks, retrieval, chunk_contexts, judge_tasks)
             # One records list per chunk; the submit and merge loops walk the
             # same list-position pairing, so the merge order is the chunk order.
             task_records: list[list[LLMCallRecord]] = [[] for _ in judge_tasks]
@@ -527,7 +532,7 @@ def _run_judge(
                         task_records[pos],
                         retrieval.judge_prompt,
                         retrieval.grounding_batch_size,
-                        chunk_contexts[i] if chunk_contexts else "",
+                        judge_contexts[i] if judge_contexts else "",
                     ): i
                     for pos, (i, cr) in enumerate(judge_tasks)
                 }
@@ -540,9 +545,29 @@ def _run_judge(
                     merge_call_records(call_collector, records, counts=_counts_judge)
 
 
-def _build_chunk_risk_map(chunk_results, all_matches, no_grounding):
+def _judge_contexts(chunks, retrieval, chunk_contexts, judge_tasks):
+    """Pick the context list the judge reads.
+
+    A positive ``judge_context_tokens`` builds judge-only contexts with
+    that budget, and only for the chunks that have borderline candidates
+    to judge; the grounding and prefilter contexts are untouched. Chunks
+    with nothing to judge get an empty string, which no judge task reads.
+    """
+    if retrieval.judge_context_tokens > 0:
+        indexes = {i for i, _cr in judge_tasks}
+        return build_chunk_contexts(chunks, max_context_tokens=retrieval.judge_context_tokens, only=indexes)
+    return chunk_contexts
+
+
+def _build_chunk_risk_map(chunk_results, all_matches, plan):
+    """Map chunk index to the risk ids found there, per the plan's grounding mode.
+
+    Grounded runs attribute risks through their evidence chunks; ungrounded
+    runs have no evidence, so accepted candidates attribute to the chunk
+    they were retrieved from.
+    """
     chunk_risk_ids: dict[int, list[str]] = {}
-    if no_grounding:
+    if not plan.grounding:
         for cr in chunk_results:
             for candidate in cr.accepted:
                 chunk_risk_ids.setdefault(cr.chunk_index, []).append(candidate.risk_id)
@@ -933,8 +958,15 @@ def _merge_query_candidates(chunk_results, chunks, qr, candidates):
             )
 
 
-def _retrieve_chunk_result(chunks, i, index, retrieval) -> ChunkResult:
-    """Run per-chunk hybrid retrieval with the pipeline's retrieval settings."""
+def _retrieve_chunk_result(chunks, i, index, retrieval, plan) -> ChunkResult:
+    """Run per-chunk hybrid retrieval with the pipeline's retrieval settings.
+
+    The RRF floor applies only on the unreranked path, so the plan's
+    rerank decision routes it: a reranked (cross-encoder or ColBERT) run
+    passes 0.0 and never lets the floor behave as a filter beside the
+    reranker.
+    """
+    floor = retrieval.rrf_min_score if plan.rerank == "none" else 0.0
     return retrieve_chunk(
         chunks,
         i,
@@ -944,30 +976,32 @@ def _retrieve_chunk_result(chunks, i, index, retrieval) -> ChunkResult:
         min_score_floor=retrieval.min_score_floor,
         bm25_rescue_rank=retrieval.bm25_rescue_rank,
         use_cross_encoder=retrieval.use_cross_encoder,
-        rrf_min_score=retrieval.effective_rrf_min_score,
+        rrf_min_score=floor,
         threshold_high=retrieval.threshold_high,
         threshold_low=retrieval.threshold_low,
     )
 
 
-def _run_retrieval(chunks, index, retrieval, query_results, fallback_chunk_indices, timing) -> list[ChunkResult]:
+def _run_retrieval(chunks, index, retrieval, query_results, fallback_chunk_indices, plan, timing) -> list[ChunkResult]:
     """Retrieve candidates per chunk: query-gen queries first, then per-chunk fallback.
 
-    With query generation on, each query's candidates are unioned into every
+    The plan's candidate source picks the retrieval mode: with query
+    generation, each query's candidates are unioned into every
     chunk the query covers (capped per chunk), and chunks without a query —
-    plus fallback chunks — go through per-chunk retrieval. With query
-    generation off, every chunk goes through per-chunk retrieval.
+    plus fallback chunks — go through per-chunk retrieval. Without it,
+    every chunk goes through per-chunk retrieval.
     """
     with timed(timing, "retrieve_ms"):
         chunk_results: list[ChunkResult] = [None] * len(chunks)  # type: ignore[list-item]
 
-        if retrieval.query_gen:
+        if plan.candidate_source == "query_gen":
             for qr in query_results:
                 candidates = index.hybrid_search(
                     qr.query,
                     top_k=50,
                     bm25_rescue_rank=retrieval.bm25_rescue_rank,
                     rrf_min_score=retrieval.rrf_min_score or 0.015,
+                    rerank=False,
                 )
                 _merge_query_candidates(chunk_results, chunks, qr, candidates)
 
@@ -975,10 +1009,10 @@ def _run_retrieval(chunks, index, retrieval, query_results, fallback_chunk_indic
 
             retrieval_indices = fallback_chunk_indices | {i for i in range(len(chunks)) if chunk_results[i] is None}
             for i in sorted(retrieval_indices):
-                chunk_results[i] = _retrieve_chunk_result(chunks, i, index, retrieval)
+                chunk_results[i] = _retrieve_chunk_result(chunks, i, index, retrieval, plan)
         else:
             for i in range(len(chunks)):
-                chunk_results[i] = _retrieve_chunk_result(chunks, i, index, retrieval)
+                chunk_results[i] = _retrieve_chunk_result(chunks, i, index, retrieval, plan)
 
     return chunk_results
 
@@ -1271,10 +1305,10 @@ def _prefilter_metadata(prefilter: GroundingPrefilter) -> dict:
 
 
 def _run_matches_stage(
-    chunk_results, chunks, client, config, retrieval, index, call_collector, chunk_contexts, timing
+    chunk_results, chunks, client, config, retrieval, plan, index, call_collector, chunk_contexts, timing
 ) -> tuple[list[RiskMatch], list[FilteredCandidate], int]:
     """Ground accepted candidates, or collect them ungrounded when grounding is disabled."""
-    if retrieval.no_grounding:
+    if not plan.grounding or client is None:
         all_matches = _collect_ungrounded(chunk_results, index, retrieval)
         all_filtered: list[FilteredCandidate] = []
         timing["grounding_ms"] = 0.0
@@ -1297,24 +1331,26 @@ def _run_matches_stage(
 
 
 def _build_retrieval_stats(
-    chunk_results, chunks, timing, grounding_filtered, no_judge=False, prefilter_dropped=None
+    chunk_results, chunks, timing, grounding_filtered, plan, prefilter_dropped=None
 ) -> RetrievalStats:
     """Aggregate per-chunk counters into the run's retrieval stats.
 
-    Under --no-judge the borderline candidates are auto-promoted, not judged,
-    so their count moves from llm_judged to auto_promoted. ``prefilter_dropped``
-    counts the candidates the pre-grounding filter removed; ``grounding_filtered``
-    counts only what grounding itself rejected, so the two never overlap. Pass
-    ``None`` (the default) when the filter did not run: the field then stays
-    out of the serialized output.
+    With the judge auto-promoting (no LLM judge), the borderline candidates
+    are promoted, not judged, so their count moves from llm_judged to
+    auto_promoted. ``prefilter_dropped`` counts the candidates the
+    pre-grounding filter removed; ``grounding_filtered`` counts only what
+    grounding itself rejected, so the two never overlap. Pass ``None``
+    (the default) when the filter did not run: the field then stays out
+    of the serialized output.
     """
+    auto_promote = plan.judge != "llm"
     judged = sum(len(cr.borderline_judged) for cr in chunk_results)
     return RetrievalStats(
         total_chunks=len(chunks),
         total_candidates_retrieved=sum(cr.stats.get("candidates_retrieved", 0) for cr in chunk_results),
         auto_accepted=sum(cr.stats.get("auto_accepted", 0) for cr in chunk_results),
-        llm_judged=0 if no_judge else judged,
-        auto_promoted=judged if no_judge else 0,
+        llm_judged=0 if auto_promote else judged,
+        auto_promoted=judged if auto_promote else 0,
         grounding_filtered=grounding_filtered,
         prefilter_dropped=prefilter_dropped,
         timing_ms=timing,
@@ -1322,13 +1358,23 @@ def _build_retrieval_stats(
 
 
 def _build_result_metadata(
-    config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client=None, prefilter=None
+    config,
+    retrieval,
+    expansion_stats,
+    query_results,
+    fallback_chunk_indices,
+    client=None,
+    prefilter=None,
+    plan=None,
 ) -> dict:
     """Assemble the run metadata recorded alongside the extraction result."""
+    if plan is None:
+        plan = resolve_plan(retrieval, prefilter=prefilter is not None, explicit=frozenset())
     metadata = {
         "model": config.model,
         **({"service_tier": config.service_tier} if config.service_tier is not None else {}),
         **retrieval.to_metadata(),
+        "run_plan": _run_plan_metadata(retrieval, plan, prefilter),
         "expansion_stats": expansion_stats,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -1337,7 +1383,7 @@ def _build_result_metadata(
     mode = getattr(client, "mode", None)
     if isinstance(mode, StructuredOutputMode):
         metadata["structured_output_mode"] = mode.value
-    if retrieval.query_gen:
+    if plan.candidate_source == "query_gen":
         metadata["query_gen_queries"] = [
             {"query": qr.query, "chunk_indices": qr.chunk_indices, "section": qr.section} for qr in query_results
         ]
@@ -1345,14 +1391,45 @@ def _build_result_metadata(
     return metadata
 
 
+def _run_plan_metadata(retrieval, plan, prefilter) -> dict:
+    """Record the requested settings next to the effective plan.
+
+    Planned is not executed: the execution counters live elsewhere in the
+    result, and a stage the plan includes may still be skipped at runtime
+    (no client, a catalog without variants). ``effective`` is the plan the
+    pipeline ran with; when no plan was resolved, one is derived here so
+    the metadata always carries it.
+    """
+    if plan is None:
+        plan = resolve_plan(retrieval, prefilter=prefilter is not None, explicit=frozenset())
+    return {
+        "requested": retrieval.to_metadata(),
+        "effective": asdict(plan),
+        "warnings": list(plan.warnings),
+    }
+
+
+def _empty_result_metadata(retrieval, prefilter, plan) -> dict:
+    """The metadata a short-circuited run records: the run plan, nothing else.
+
+    Empty-document and no-risk runs exit before any stage runs, so the
+    execution counters the full metadata carries do not exist yet; the
+    plan still describes what the run would have done. The base recorded
+    no metadata at all here, so only the run_plan block is new.
+    """
+    return {
+        "run_plan": _run_plan_metadata(retrieval, plan, prefilter),
+    }
+
+
 _EMPTY_EXPANSION_STATS = {"expanded_candidates": 0, "expanded_grounded": 0, "expansion_groups": 0}
 
 
 def _run_variant_grounding_stage(
-    all_matches, chunks, index, client, config, retrieval, call_collector, chunk_contexts, max_workers, timing
+    all_matches, chunks, index, client, config, plan, call_collector, chunk_contexts, max_workers, timing
 ):
     """Variant-ground grounded matches when variants and a client are present."""
-    if index.variant_map and not retrieval.no_grounding and client is not None:
+    if index.variant_map and plan.grounding and client is not None:
         with timed(timing, "variant_grounding_ms"):
             return _run_variant_grounding(
                 all_matches,
@@ -1377,6 +1454,7 @@ def _run_expansion_stage(
     client,
     config,
     retrieval,
+    plan,
     call_collector,
     chunk_contexts,
     max_workers,
@@ -1390,7 +1468,7 @@ def _run_expansion_stage(
     carries the prefilter's drop records, whose ids the expansion counts
     when it proposes them again.
     """
-    if retrieval.expand_siblings and not retrieval.no_grounding and client is not None:
+    if plan.expansion and client is not None:
         with timed(timing, "expansion_ms"):
             merged, expansion_stats = _run_expansion(
                 risks,
@@ -1412,9 +1490,9 @@ def _run_expansion_stage(
     return merged, _EMPTY_EXPANSION_STATS.copy()
 
 
-def _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, call_collector, max_workers, timing):
+def _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing):
     """Synthesize causal chains for each merged risk when a client is present."""
-    if not retrieval.no_causal_synthesis and client is not None:
+    if plan.causal_synthesis and client is not None:
         with timed(timing, "causal_synthesis_ms"):
             return _run_causal_synthesis(
                 merged,
@@ -1469,16 +1547,31 @@ def run_extraction(
     *,
     ocr: bool = False,
     prefilter: GroundingPrefilter | None = None,
+    plan: RunPlan | None = None,
 ) -> ExtractionResult:
     retrieval = retrieval or RetrievalConfig()
     if prefilter is not None and retrieval.no_grounding:
         raise ValueError("prefilter requires grounding; it filters what grounding sees, so --no-grounding refuses it")
+    validate_rrf_min_score(retrieval.rrf_min_score)
+    if plan is None:
+        plan = resolve_plan(retrieval, prefilter=prefilter is not None, explicit=frozenset())
+    else:
+        # Execution must follow the retrieval settings it was handed, so a
+        # caller-supplied plan has to resolve the same way. Warnings sit
+        # outside this check: they depend on which options the caller's
+        # CLI layer saw passed explicitly, which the pipeline cannot know.
+        derived = resolve_plan(retrieval, prefilter=prefilter is not None, explicit=frozenset())
+        if replace(plan, warnings=()) != replace(derived, warnings=()):
+            raise ValueError(
+                "the supplied run plan does not match the retrieval settings; "
+                "pass the settings the plan was resolved from, or omit the plan and let the run resolve it"
+            )
     timing: dict[str, float] = {}
     max_workers = config.max_concurrent
 
     prepared = _parse_and_chunk(documents, ocr, retrieval, timing)
     if prepared is None:
-        return _empty_result(documents)
+        return _empty_result(documents, _empty_result_metadata(retrieval, prefilter, plan))
     parsed, chunks, chunk_contexts = prepared
 
     risks = _filter_agentic_risks(risks, parsed)
@@ -1486,26 +1579,26 @@ def run_extraction(
     with timed(timing, "index_ms"):
         if not risks:
             logger.error("No risks loaded from Nexus")
-            return _empty_result(documents)
+            return _empty_result(documents, _empty_result_metadata(retrieval, prefilter, plan))
         index = _build_risk_index(risks, retrieval)
 
     call_collector: list[LLMCallRecord] = []
     fallback_chunk_indices: set[int] = set()
     query_results: list = []
 
-    if retrieval.query_gen:
+    if plan.candidate_source == "query_gen":
         query_results, fallback_chunk_indices = _run_query_gen(
             chunks, client, config, call_collector, max_workers, timing
         )
 
-    chunk_results = _run_retrieval(chunks, index, retrieval, query_results, fallback_chunk_indices, timing)
+    chunk_results = _run_retrieval(chunks, index, retrieval, query_results, fallback_chunk_indices, plan, timing)
     logger.info(
         "Retrieval complete: %d chunks, %d accepted candidates",
         len(chunks),
         sum(len(cr.accepted) for cr in chunk_results if cr is not None),
     )
 
-    if index.variant_map and retrieval.no_grounding:
+    if index.variant_map and not plan.grounding:
         _expand_chunk_variants(chunk_results, index)
 
     chunk_summaries = _build_chunk_summaries(chunk_results, chunks)
@@ -1518,12 +1611,13 @@ def run_extraction(
             config,
             retrieval,
             call_collector,
+            plan,
             chunk_contexts=chunk_contexts,
         )
 
     prefilter_drops: list[FilteredCandidate] = []
     decision_calls: list[DecisionCallRecord] = []
-    if prefilter is not None:
+    if plan.prefilter and prefilter is not None:
         with timed(timing, "prefilter_ms"):
             grounding_inputs, prefilter_drops, decision_calls = _run_prefilter_stage(
                 chunk_results, chunk_contexts, prefilter, index, retrieval, chunks
@@ -1532,15 +1626,15 @@ def run_extraction(
         grounding_inputs = chunk_results
 
     all_matches, all_filtered, grounding_filtered = _run_matches_stage(
-        grounding_inputs, chunks, client, config, retrieval, index, call_collector, chunk_contexts, timing
+        grounding_inputs, chunks, client, config, retrieval, plan, index, call_collector, chunk_contexts, timing
     )
     all_filtered = prefilter_drops + all_filtered
 
     all_matches = _run_variant_grounding_stage(
-        all_matches, chunks, index, client, config, retrieval, call_collector, chunk_contexts, max_workers, timing
+        all_matches, chunks, index, client, config, plan, call_collector, chunk_contexts, max_workers, timing
     )
 
-    chunk_risk_ids = _build_chunk_risk_map(chunk_results, all_matches, retrieval.no_grounding)
+    chunk_risk_ids = _build_chunk_risk_map(chunk_results, all_matches, plan)
     for cs in chunk_summaries:
         cs.accepted_risk_ids = sorted(set(chunk_risk_ids.get(cs.index, [])))
 
@@ -1557,6 +1651,7 @@ def run_extraction(
         client,
         config,
         retrieval,
+        plan,
         call_collector,
         chunk_contexts,
         max_workers,
@@ -1564,14 +1659,14 @@ def run_extraction(
         prefilter_drops=prefilter_drops or None,
     )
 
-    merged = _run_causal_synthesis_stage(merged, chunks, client, config, retrieval, call_collector, max_workers, timing)
+    merged = _run_causal_synthesis_stage(merged, chunks, client, config, plan, call_collector, max_workers, timing)
 
     total_stats = _build_retrieval_stats(
         chunk_results,
         chunks,
         timing,
         grounding_filtered,
-        retrieval.no_judge,
+        plan,
         prefilter_dropped=len(prefilter_drops) if prefilter is not None else None,
     )
 
@@ -1580,7 +1675,7 @@ def run_extraction(
         source_documents=[str(d) for d in documents],
         retrieval_stats=total_stats,
         metadata=_build_result_metadata(
-            config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client, prefilter
+            config, retrieval, expansion_stats, query_results, fallback_chunk_indices, client, prefilter, plan
         ),
         chunks=chunk_summaries,
         llm_calls=call_collector,
@@ -1590,7 +1685,7 @@ def run_extraction(
     )
 
 
-def _empty_result(documents: list[Path]) -> ExtractionResult:
+def _empty_result(documents: list[Path], metadata: dict | None = None) -> ExtractionResult:
     return ExtractionResult(
         risks=[],
         source_documents=[str(d) for d in documents],
@@ -1601,4 +1696,5 @@ def _empty_result(documents: list[Path]) -> ExtractionResult:
             llm_judged=0,
             grounding_filtered=0,
         ),
+        metadata=metadata or {},
     )

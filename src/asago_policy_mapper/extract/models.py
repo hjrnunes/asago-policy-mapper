@@ -318,10 +318,6 @@ class RetrievalConfig:
             return None
         return self.cross_encoder_model
 
-    @property
-    def effective_rrf_min_score(self) -> float:
-        return self.rrf_min_score if not self.use_cross_encoder else 0.0
-
     def to_metadata(self) -> dict:
         return {
             "bi_encoder_model": self.bi_encoder_model,

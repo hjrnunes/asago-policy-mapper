@@ -43,20 +43,40 @@ def _fail_validation(message: str) -> NoReturn:
     raise typer.Exit(1)
 
 
-def _run_needs_llm(no_judge, no_grounding, expand_siblings, query_gen) -> bool:
-    """Tell whether the run makes LLM calls.
-
-    Pure IR runs (no judge, no grounding, no sibling expansion) skip the LLM
-    entirely; query generation always needs one.
-    """
-    return not (no_judge and no_grounding and not expand_siblings) or query_gen
-
-
 def _require_existing_policy_files(policy_files) -> None:
     """Fail validation unless every policy file exists."""
     for pf in policy_files:
         if not pf.exists():
             _fail_validation(f"{pf} does not exist")
+
+
+def _explicit_option_names(param_names: tuple[str, ...]) -> frozenset[str]:
+    """Collect the dashed CLI names of the parameters the user actually passed.
+
+    Warnings fire only for explicitly passed options, so defaults (and
+    values that arrive via environment variables, which click reports as
+    ``ENVIRONMENT``) stay quiet. Called from inside the command body, where
+    the current click context holds the parameter sources.
+    """
+    import click
+
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return frozenset()
+    # Boolean pairs (--expand-siblings/--no-expand-siblings) report one
+    # parameter name, so the flag's actual polarity decides which dashed
+    # name lands in the set; the store-true no_* flags map directly.
+    boolean_pairs = {"expand_siblings", "query_gen"}
+    explicit = set()
+    for name in param_names:
+        source = ctx.get_parameter_source(name)
+        if source != click.core.ParameterSource.COMMANDLINE:
+            continue
+        dashed = "--" + name.replace("_", "-")
+        if name in boolean_pairs and not ctx.params.get(name, False):
+            dashed = "--no-" + name.replace("_", "-")
+        explicit.add(dashed)
+    return frozenset(explicit)
 
 
 def _validate_extract_options(
@@ -65,27 +85,38 @@ def _validate_extract_options(
     policy_files,
     base_url,
     model,
-    no_judge,
-    no_grounding,
-    expand_siblings,
-    query_gen,
-    prefilter_profile=None,
-) -> bool:
-    """Validate extract options; exit on error. Returns whether the run needs an LLM."""
+    retrieval,
+    prefilter=False,
+    explicit=frozenset(),
+):
+    """Validate extract options; exit on error. Returns the run's resolved plan.
+
+    The plan decides whether the run needs an LLM, and the missing-endpoint
+    error names the stages that call one for this exact combination of
+    options (``plan.llm_stages``), so the message follows the flags.
+    """
+    from asago_policy_mapper.extract.plan import resolve_plan, validate_rrf_min_score
+
     valid_formats = {"json", "yaml", "both"}
     if output_format not in valid_formats:
         _fail_validation(f"--output-format must be one of: {', '.join(sorted(valid_formats))}")
 
     _require_existing_policy_files(policy_files)
 
-    if prefilter_profile is not None and no_grounding:
+    if prefilter and retrieval.no_grounding:
         _fail_validation("--prefilter-profile requires grounding; it filters what grounding sees")
 
-    needs_llm = _run_needs_llm(no_judge, no_grounding, expand_siblings, query_gen)
-    if needs_llm and (not base_url or not model):
-        _fail_validation("--base-url and --model are required (unless both --no-judge and --no-grounding are set)")
+    try:
+        validate_rrf_min_score(retrieval.rrf_min_score)
+    except ValueError as error:
+        _fail_validation(str(error))
 
-    return needs_llm
+    plan = resolve_plan(retrieval, prefilter=prefilter, explicit=explicit)
+    if plan.needs_llm and (not base_url or not model):
+        stages = ", ".join(plan.llm_stages)
+        _fail_validation(f"--base-url/--model required: stages {stages} call an LLM")
+
+    return plan
 
 
 def _setup_llm(
@@ -105,8 +136,9 @@ def _setup_llm(
 ):
     """Build the LLM config, token tracker and client for the run.
 
-    LLM-free runs (pure IR evaluation) substitute "unused" endpoint values
-    and skip client creation.
+    ``needs_llm`` comes from the resolved run plan. LLM-free runs (pure
+    IR evaluation) substitute "unused" endpoint values and skip client
+    creation.
     """
     if not needs_llm:
         base_url = base_url or "unused"
@@ -421,12 +453,16 @@ def _echo_extraction_banner(policy_files, all_risks, custom_risk_count) -> None:
         typer.echo(f"Extracting risks from {len(policy_files)} document(s) ({len(all_risks)} Nexus risks loaded)...")
 
 
-def _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter=None):
+def _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter=None, plan=None):
     """Run the extraction pipeline over the loaded risk catalog.
 
     The caller resolves run_extraction so its import happens at the same
     point as before the refactor, before the extraction banner echoes.
+    A resolved plan is forwarded so the pipeline records the plan the CLI
+    validated and warned about instead of re-resolving one without the
+    explicit options (which would leave the metadata warnings empty).
     """
+    kwargs = {} if plan is None else {"plan": plan}
     return run_extraction(
         documents=policy_files,
         client=client,
@@ -435,6 +471,7 @@ def _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_e
         retrieval=retrieval,
         ocr=ocr,
         prefilter=prefilter,
+        **kwargs,
     )
 
 
@@ -466,11 +503,8 @@ def _write_extraction_outputs(
     result_data,
     output,
     output_format,
-    needs_llm,
+    plan,
     tracker,
-    no_judge,
-    no_grounding,
-    no_cross_encoder,
 ) -> None:
     """Write the extraction result as JSON/YAML and echo the run summary."""
     write_json = output_format in ("json", "both")
@@ -486,20 +520,26 @@ def _write_extraction_outputs(
         typer.echo(f"Risk extraction written to {yaml_path}")
     typer.echo(f"  {len(result.risks)} risks matched")
     stats = result.retrieval_stats
-    if no_judge and no_grounding:
+    if not plan.grounding and plan.judge != "llm" and not plan.needs_llm:
         typer.echo(f"  {stats.auto_accepted} auto-accepted (IR-only, no LLM stages)")
-    elif no_grounding:
+    elif not plan.grounding and plan.judge != "llm":
+        typer.echo(f"  {stats.auto_accepted} auto-accepted (IR-only, query generation)")
+    elif not plan.grounding:
         typer.echo(f"  {stats.auto_accepted} auto-accepted, {stats.llm_judged} LLM-judged (no grounding)")
-    elif no_cross_encoder:
+    elif plan.judge == "none":
         typer.echo(
-            f"  {stats.auto_accepted} RRF-accepted, {stats.grounding_filtered} grounding-filtered (no cross-encoder)"
+            f"  {stats.auto_accepted} auto-accepted, {stats.grounding_filtered} grounding-filtered (no cross-encoder)"
+        )
+    elif plan.judge == "auto_promote":
+        typer.echo(
+            f"  {stats.auto_accepted} auto-accepted, {stats.grounding_filtered} grounding-filtered (no LLM judge)"
         )
     else:
         typer.echo(
             f"  {stats.auto_accepted} auto-accepted, {stats.llm_judged} LLM-judged,"
             f" {stats.grounding_filtered} grounding-filtered"
         )
-    if needs_llm:
+    if plan.needs_llm:
         typer.echo(
             f"Token usage: {tracker.prompt_tokens:,} prompt + {tracker.completion_tokens:,} completion"
             f" = {tracker.total_tokens:,} total ({tracker.calls} calls)"
@@ -624,7 +664,9 @@ def extract(
         False, "--no-cross-encoder", help="Skip cross-encoder reranking and LLM judge; use RRF score floor instead"
     ),
     rrf_min_score: float = typer.Option(
-        0.015, "--rrf-min-score", help="Minimum RRF score for candidates (only used with --no-cross-encoder)"
+        0.015,
+        "--rrf-min-score",
+        help="RRF floor; used with --no-cross-encoder and on every query-generation search (0 = no floor)",
     ),
     colbert_model: str = typer.Option(
         None,
@@ -637,7 +679,9 @@ def extract(
         help="Judge prompt template name (judge_risk, judge_risk_gepa, judge_risk_gepa_demos)",
     ),
     judge_context_tokens: int = typer.Option(
-        0, "--judge-context-tokens", help="Max tokens for judge context window (0=use default sentence padding)"
+        0,
+        "--judge-context-tokens",
+        help="Token budget for judge-only contexts (0=use the grounding context's default padding)",
     ),
     expand_siblings: bool = typer.Option(
         True,
@@ -696,48 +740,6 @@ def extract(
     # inherit POLICY_MAPPER_PREFILTER_PROFILE and still run unfiltered.
     if no_prefilter:
         prefilter_profile = None
-    needs_llm = _validate_extract_options(
-        output_format=output_format,
-        policy_files=policy_files,
-        base_url=base_url,
-        model=model,
-        no_judge=no_judge,
-        no_grounding=no_grounding,
-        expand_siblings=expand_siblings,
-        query_gen=query_gen,
-        prefilter_profile=prefilter_profile,
-    )
-
-    config, tracker, client = _setup_llm(
-        needs_llm=needs_llm,
-        base_url=base_url,
-        model=model,
-        api_key=api_key,
-        max_concurrent=max_concurrent,
-        max_tokens=max_tokens,
-        output_token_parameter=output_token_parameter,
-        service_tier=service_tier,
-        max_context=max_context,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-    )
-
-    # Build and validate the profile before creating any output: a bad
-    # profile fails the run without leaving an empty output directory.
-    prefilter = _build_prefilter(prefilter_profile)
-
-    output.mkdir(parents=True, exist_ok=True)
-
-    loaded_custom_risks = _load_custom_risks(custom_taxonomy)
-    # Normalize once for every consumer (catalog + mitigation loaders): a blank
-    # --nexus-base-dir / NEXUS_BASE_DIR behaves exactly like unset.
-    nexus_base_dir_override = nexus_base_dir or None
-    all_risks, custom_risk_count = _load_risk_catalog(nexus_base_dir_override, loaded_custom_risks)
-    _warn_risk_text(all_risks, check_risk_text)
-
-    from asago_policy_mapper.extract.pipeline import run_extraction
-
     retrieval = _build_retrieval_config(
         bi_encoder_model=bi_encoder_model,
         bi_encoder_api_key=bi_encoder_api_key,
@@ -767,10 +769,68 @@ def extract(
         no_causal_synthesis=no_causal_synthesis,
         query_gen=query_gen,
     )
+    explicit = _explicit_option_names(
+        (
+            "no_judge",
+            "no_grounding",
+            "no_cross_encoder",
+            "no_causal_synthesis",
+            "expand_siblings",
+            "query_gen",
+            "rrf_min_score",
+            "judge_context_tokens",
+            "prefilter_profile",
+        )
+    )
+
+    plan = _validate_extract_options(
+        output_format=output_format,
+        policy_files=policy_files,
+        base_url=base_url,
+        model=model,
+        retrieval=retrieval,
+        prefilter=prefilter_profile is not None,
+        explicit=explicit,
+    )
+
+    for warning in plan.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+
+    config, tracker, client = _setup_llm(
+        needs_llm=plan.needs_llm,
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        max_concurrent=max_concurrent,
+        max_tokens=max_tokens,
+        output_token_parameter=output_token_parameter,
+        service_tier=service_tier,
+        max_context=max_context,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+    )
+
+    # Build and validate the profile before creating any output: a bad
+    # profile fails the run without leaving an empty output directory.
+    prefilter = _build_prefilter(prefilter_profile)
+
+    output.mkdir(parents=True, exist_ok=True)
+
+    loaded_custom_risks = _load_custom_risks(custom_taxonomy)
+    # Normalize once for every consumer (catalog + mitigation loaders): a blank
+    # --nexus-base-dir / NEXUS_BASE_DIR behaves exactly like unset.
+    nexus_base_dir_override = nexus_base_dir or None
+    all_risks, custom_risk_count = _load_risk_catalog(nexus_base_dir_override, loaded_custom_risks)
+    _warn_risk_text(all_risks, check_risk_text)
+
+    from asago_policy_mapper.extract.pipeline import run_extraction
 
     _echo_extraction_banner(policy_files, all_risks, custom_risk_count)
 
-    result = _run_pipeline(policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter)
+    result = _run_pipeline(
+        policy_files, client, config, all_risks, retrieval, ocr, run_extraction, prefilter, plan=plan
+    )
 
     result.token_usage = tracker.to_dict()
 
@@ -783,11 +843,8 @@ def extract(
         result_data,
         output,
         output_format,
-        needs_llm,
+        plan,
         tracker,
-        no_judge,
-        no_grounding,
-        no_cross_encoder,
     )
 
     _write_extraction_reports(result_data, policy_files, output, ocr, chunk_max_tokens)

@@ -365,6 +365,39 @@ def _load_cross_encoder(model_name, cross_encoder_type="score", cross_encoder_mo
     return local, None, model_name in _SIGMOID_MODELS, model_name in _NLI_MODELS
 
 
+def _should_rerank(rerank: bool | None, rrf_min_score: float) -> bool:
+    """Tell whether hybrid_search reranks its fused candidates.
+
+    An explicit ``rerank`` decides; with ``None`` the historical rule
+    applies (rerank if and only if the RRF floor is non-positive). Every
+    call site in the repository passes ``rerank`` explicitly, so
+    ``rrf_min_score`` only sets a floor there.
+    """
+    if rerank is not None:
+        return rerank
+    return rrf_min_score <= 0
+
+
+def _rerank_pairs(is_nli: bool, text: str, candidates: list[ScoredCandidate]) -> list[tuple[str, str]]:
+    """Build the cross-encoder pairs: NLI models take (text, statement), score models the reverse."""
+    if is_nli:
+        return [(text, f"This text discusses {c.risk_name}") for c in candidates]
+    return [(f"{c.risk_name}: {c.risk_description}", text) for c in candidates]
+
+
+def _scored_candidates(candidates: list[ScoredCandidate], scores: np.ndarray, top_k: int) -> list[ScoredCandidate]:
+    """Attach scores to the top-k candidates, skipping non-finite ones."""
+    scored = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+    results = []
+    for c, score in scored[:top_k]:
+        s = float(score)
+        if np.isnan(s) or np.isinf(s):
+            logger.warning("Skipping candidate %s with invalid score", c.risk_id)
+            continue
+        results.append(c.model_copy(update={"cross_encoder_score": s}))
+    return results
+
+
 def _rescue_and_merge_scores(
     reranked: list[ScoredCandidate], rrf_candidates: list[ScoredCandidate], bm25_rescue_rank: int
 ) -> list[ScoredCandidate]:
@@ -723,10 +756,7 @@ class RiskIndex:
     def rerank(self, text: str, candidates: list[ScoredCandidate], top_k: int = 50) -> list[ScoredCandidate]:
         if not candidates or (not self._cross_encoder and not self._remote_cross_encoder):
             return []
-        if self._is_nli:
-            pairs = [(text, f"This text discusses {c.risk_name}") for c in candidates]
-        else:
-            pairs = [(f"{c.risk_name}: {c.risk_description}", text) for c in candidates]
+        pairs = _rerank_pairs(self._is_nli, text, candidates)
         if self._remote_cross_encoder is not None:
             raw_scores = self._remote_cross_encoder.predict(pairs)
         else:
@@ -734,15 +764,7 @@ class RiskIndex:
             raw_scores = self._cross_encoder.predict(pairs)
         raw_scores = np.array(raw_scores)
         scores = self._score_normalizer(raw_scores)
-        scored = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
-        results = []
-        for c, score in scored[:top_k]:
-            s = float(score)
-            if np.isnan(s) or np.isinf(s):
-                logger.warning("Skipping candidate %s with invalid score", c.risk_id)
-                continue
-            results.append(c.model_copy(update={"cross_encoder_score": s}))
-        return results
+        return _scored_candidates(candidates, scores, top_k)
 
     def hybrid_search(
         self,
@@ -753,6 +775,7 @@ class RiskIndex:
         rrf_k: int = 60,
         bm25_rescue_rank: int = 0,
         rrf_min_score: float = 0.0,
+        rerank: bool | None = None,
     ) -> list[ScoredCandidate]:
         if self._colbert is not None:
             return self._hybrid_search_colbert(text, top_k, bm25_top_k, rrf_k, bm25_rescue_rank)
@@ -781,11 +804,10 @@ class RiskIndex:
                 )
             )
 
-        if rrf_min_score > 0:
-            return [c for c in rrf_candidates if c.rrf_score >= rrf_min_score][:top_k]
-
-        reranked = self.rerank(text, rrf_candidates, top_k=top_k)
-        return _rescue_and_merge_scores(reranked, rrf_candidates, bm25_rescue_rank)
+        if _should_rerank(rerank, rrf_min_score):
+            reranked = self.rerank(text, rrf_candidates, top_k=top_k)
+            return _rescue_and_merge_scores(reranked, rrf_candidates, bm25_rescue_rank)
+        return [c for c in rrf_candidates if c.rrf_score >= rrf_min_score][:top_k]
 
     def _hybrid_search_colbert(
         self,

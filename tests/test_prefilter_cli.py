@@ -76,20 +76,29 @@ def _policy(tmp_path):
 # --- _validate_extract_options ---
 
 
-def test_validate_rejects_prefilter_with_no_grounding(tmp_path, profile_path):
-    """--prefilter-profile with --no-grounding fails validation."""
-    from asago_policy_mapper.cli import _validate_extract_options
-
+def _validate_kwargs(tmp_path, retrieval, prefilter=False, **overrides):
     kwargs = dict(
         output_format="json",
         policy_files=[_policy(tmp_path)],
         base_url="http://localhost:8000/v1",
         model="test-model",
-        no_judge=False,
-        no_grounding=True,
-        expand_siblings=True,
-        query_gen=False,
-        prefilter_profile=profile_path,
+        retrieval=retrieval,
+        prefilter=prefilter,
+        explicit=frozenset(),
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_validate_rejects_prefilter_with_no_grounding(tmp_path, profile_path):
+    """--prefilter-profile with --no-grounding fails validation."""
+    from asago_policy_mapper.cli import _validate_extract_options
+    from asago_policy_mapper.extract.models import RetrievalConfig
+
+    kwargs = _validate_kwargs(
+        tmp_path,
+        retrieval=RetrievalConfig(no_grounding=True, query_gen=False),
+        prefilter=True,
     )
     with pytest.raises(typer.Exit) as excinfo:
         _validate_extract_options(**kwargs)
@@ -99,39 +108,25 @@ def test_validate_rejects_prefilter_with_no_grounding(tmp_path, profile_path):
 def test_validate_allows_prefilter_with_grounding(tmp_path, profile_path):
     """--prefilter-profile passes validation on a grounded run."""
     from asago_policy_mapper.cli import _validate_extract_options
+    from asago_policy_mapper.extract.models import RetrievalConfig
 
-    kwargs = dict(
-        output_format="json",
-        policy_files=[_policy(tmp_path)],
-        base_url="http://localhost:8000/v1",
-        model="test-model",
-        no_judge=False,
-        no_grounding=False,
-        expand_siblings=True,
-        query_gen=False,
-        prefilter_profile=profile_path,
+    assert (
+        _validate_extract_options(
+            **_validate_kwargs(tmp_path, retrieval=RetrievalConfig(query_gen=False), prefilter=True)
+        ).needs_llm
+        is True
     )
-    assert _validate_extract_options(**kwargs) is True
 
 
 def test_validate_allows_unset_prefilter_with_no_grounding(tmp_path):
     """No profile + --no-grounding still validates (the filter is opt-in)."""
     from asago_policy_mapper.cli import _validate_extract_options
+    from asago_policy_mapper.extract.models import RetrievalConfig
 
-    kwargs = dict(
-        output_format="json",
-        policy_files=[_policy(tmp_path)],
-        base_url="http://localhost:8000/v1",
-        model="test-model",
-        no_judge=False,
-        no_grounding=True,
-        expand_siblings=True,
-        query_gen=False,
-        prefilter_profile=None,
+    # needs_llm either way; must not exit.
+    _validate_extract_options(
+        **_validate_kwargs(tmp_path, retrieval=RetrievalConfig(no_grounding=True, query_gen=False))
     )
-    # Must not exit; needs_llm is either way.
-    needs_llm = _validate_extract_options(**kwargs)
-    assert isinstance(needs_llm, bool)
 
 
 def test_extract_rejects_prefilter_profile_with_no_grounding_cli(tmp_path, profile_path):
@@ -607,17 +602,12 @@ def test_missing_profile_and_bad_yaml_name_the_path(tmp_path, capsys):
 def test_no_grounding_refusal_message_names_the_option(tmp_path, capsys):
     """The refusal names --prefilter-profile, grounding, and the reason."""
     from asago_policy_mapper.cli import _validate_extract_options
+    from asago_policy_mapper.extract.models import RetrievalConfig
 
-    kwargs = dict(
-        output_format="json",
-        policy_files=[_policy(tmp_path)],
-        base_url="http://localhost:8000/v1",
-        model="test-model",
-        no_judge=False,
-        no_grounding=True,
-        expand_siblings=True,
-        query_gen=False,
-        prefilter_profile=tmp_path / "x.yaml",
+    kwargs = _validate_kwargs(
+        tmp_path,
+        retrieval=RetrievalConfig(no_grounding=True, query_gen=False),
+        prefilter=True,
     )
     with pytest.raises(typer.Exit):
         _validate_extract_options(**kwargs)
@@ -632,41 +622,33 @@ def test_needs_llm_requires_base_url_or_model_each(tmp_path, capsys):
     both together.
     """
     from asago_policy_mapper.cli import _validate_extract_options
+    from asago_policy_mapper.extract.models import RetrievalConfig
 
     for base_url, model in ((None, "m"), ("http://x/v1", None)):
-        kwargs = dict(
-            output_format="json",
-            policy_files=[_policy(tmp_path)],
+        kwargs = _validate_kwargs(
+            tmp_path,
+            retrieval=RetrievalConfig(query_gen=False),
             base_url=base_url,
             model=model,
-            no_judge=False,
-            no_grounding=False,
-            expand_siblings=True,
-            query_gen=False,
-            prefilter_profile=None,
         )
         with pytest.raises(typer.Exit):
             _validate_extract_options(**kwargs)
         err = capsys.readouterr().err
         assert err.strip() == (
-            "Error: --base-url and --model are required (unless both --no-judge and --no-grounding are set)"
+            "Error: --base-url/--model required: stages judge, grounding, variant_grounding, expansion, "
+            "causal_synthesis call an LLM"
         )
 
 
 def test_output_format_error_lists_the_formats(tmp_path, capsys):
     """An invalid --output-format names the valid formats, comma-separated."""
     from asago_policy_mapper.cli import _validate_extract_options
+    from asago_policy_mapper.extract.models import RetrievalConfig
 
-    kwargs = dict(
+    kwargs = _validate_kwargs(
+        tmp_path,
+        retrieval=RetrievalConfig(query_gen=False),
         output_format="xml",
-        policy_files=[_policy(tmp_path)],
-        base_url="http://localhost:8000/v1",
-        model="test-model",
-        no_judge=False,
-        no_grounding=False,
-        expand_siblings=True,
-        query_gen=False,
-        prefilter_profile=None,
     )
     with pytest.raises(typer.Exit):
         _validate_extract_options(**kwargs)
