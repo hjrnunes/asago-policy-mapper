@@ -62,7 +62,11 @@ Per-PR procedure:
 2. Inspect survivors with `.venv/bin/mutmut show <id>`. `mutmut results` lists results for the whole source tree, not just your module, so read the entries for the changed module; `.venv/bin/mutmut browse` opens an interactive triage TUI over the same data. Default `mutmut results` omits killed mutants from the listing, so a listing with no killed lines does not mean the run had zero kills. Count kills with `mutmut results --all true` or read the run's exit summary (the `🎉`/`🙁` tally) before drawing conclusions.
 3. Gate on **no new surviving mutants in changed code** relative to the run before your changes — not on a score threshold. The existing baseline has too much survival for a threshold to be useful.
 
-Two known macOS artifacts: forking from the post-stats process can segfault child runs (exit code `-11`, concentrated in client-construction paths — treat as unjudged, not kills), and true timeouts are classified separately with a `⏰` marker. The segfault is not random-environment noise: the crash chain runs mutmut's fork → transformers/huggingface_hub → httpx → `getproxies_macosx_sysconf`, and the macOS system-proxy lookup is not fork-safe. Pin it off by exporting dead proxies around the run: `http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 .venv/bin/mutmut run "<scope>" --max-children 8`. The `mutants/` directory is the sandbox cache; delete it to force a cold run.
+Two known macOS artifacts: forking from the post-stats process can segfault child runs (exit code `-11`, concentrated in client-construction paths — treat as unjudged, not kills), and true timeouts are classified separately with a `⏰` marker. The segfault is not random-environment noise: it lands in `getproxies_macosx_sysconf`, the macOS system-proxy lookup, which is not fork-safe after a warmed parent process. The hop into that lookup is httpx client construction generally — the OpenAI SDK's client, a plain `httpx.Client()`, the HF libraries' httpx-backed sessions — not the package imports, which fire no lookup on their own. Pin it off by exporting dead proxies around the run:
+
+`http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 .venv/bin/mutmut run "<scope>" --max-children 8`
+
+The `mutants/` directory is the sandbox cache; delete it to force a cold run.
 
 ### Sandbox isolation and the canary guard
 
