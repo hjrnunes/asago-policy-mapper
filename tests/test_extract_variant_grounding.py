@@ -536,11 +536,44 @@ class TestRunVariantGrounding:
         assert variant.risk_name == VARIANTS[1]["name"]
         assert variant.taxonomy == "ai-risk-taxonomy"
         assert variant.scores.bm25_rank == parent.scores.bm25_rank
+        assert variant.scores.embedding_distance == parent.scores.embedding_distance
         assert variant.scores.cross_encoder_score == parent.scores.cross_encoder_score
         assert variant.scores.rrf_score == parent.scores.rrf_score
         assert variant.accepted_by == parent.accepted_by
         assert variant.grounding_confidence == "medium"
         assert variant.scores_inherited_from == parent.risk_id
+
+    def test_variant_without_taxonomy_entry_gets_empty_taxonomy(self):
+        """A variant entry lacking a taxonomy key yields an empty-string taxonomy."""
+        mock_client = MagicMock()
+        mock_client.for_stage = lambda stage: mock_client
+        mock_client.chat.completions.create.return_value = _RiskEvidenceList(
+            items=[
+                _RiskEvidence(
+                    risk_id=VARIANTS[0]["risk_id"],
+                    grounded=True,
+                    confidence="high",
+                    quotes=["biometric data"],
+                ),
+            ]
+        )
+        bare_variants = [{k: v for k, v in VARIANTS[0].items() if k != "taxonomy"}]
+        parent = _make_parent_match(chunk_index=0)
+        chunks = _make_chunks(["biometric data processing."])
+
+        result, removed = _run_variant_grounding(
+            [parent],
+            chunks,
+            {PARENT_ID: bare_variants},
+            mock_client,
+            self._make_config(),
+            None,
+            stage="grounding",
+        )
+
+        assert len(result) == 1
+        assert result[0].risk_id == VARIANTS[0]["risk_id"]
+        assert result[0].taxonomy == ""
 
     def test_no_parents_returns_unchanged(self):
         """When no parent matches exist, returns input unchanged."""
@@ -1283,9 +1316,11 @@ def test_expansion_variant_removal_recorded():
             1,
             None,
             variant_map=VARIANT_MAP,
+            chunk_contexts=["expanded context text"],
         )
 
-    # the expanded parent went through variant grounding, which grounded nothing
+    # the expanded parent went through the real variant grounding, which
+    # grounded nothing, so the parent is gone and the removal is recorded
     assert not any(m.risk_id == PARENT_ID for m in merged)
     assert len(removed) == 1
     record = removed[0]
@@ -1293,6 +1328,249 @@ def test_expansion_variant_removal_recorded():
     assert record.stage == "expansion"
     assert record.reason == "no_variant_grounded"
     assert record.attempted_variant_ids == [v["risk_id"] for v in VARIANTS]
+
+
+def test_expansion_forwards_run_context_to_variant_grounding():
+    """The expansion call passes the run's chunks, client, workers and contexts on."""
+    client = MagicMock()
+    chunks = _make_chunks(["chunk about data processing"])
+    found = RiskMatch(
+        risk_id="R-001",
+        risk_name="Model bias",
+        risk_description="Systematic errors.",
+        confidence=0.9,
+        confidence_source="cross_encoder",
+        grounding_confidence="high",
+        accepted_by="threshold",
+        evidence=[EvidenceSpan(text="quote", document="doc.md", chunk_index=0)],
+        scores=RetrievalScores(bm25_rank=1, embedding_distance=0.1, cross_encoder_score=0.9, rrf_score=0.03),
+    )
+    catalog = [
+        _catalog_risk("R-001", "Model bias", "Systematic errors.", "other-taxonomy", "grp"),
+        _catalog_risk("unrelated-parent", "Unrelated", "A collapsible parent.", "other-taxonomy", "grp"),
+    ]
+    variant_map = {"unrelated-parent": [{"risk_id": "unrelated-parent---a", "name": "", "description": ""}]}
+
+    def _ground_all(**kwargs):
+        evidence = [EvidenceSpan(text="quote", document="doc.md", chunk_index=0)]
+        return {r["risk_id"]: (evidence, "medium") for r in kwargs["risks"]}
+
+    with (
+        patch(
+            "asago_policy_mapper.extract.expand.build_expansion_graph",
+            return_value={"R-001": {"unrelated-parent"}},
+        ),
+        patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_all),
+        patch(
+            "asago_policy_mapper.extract.pipeline._run_variant_grounding",
+            return_value=([], []),
+        ) as variant_grounding,
+    ):
+        _run_expansion(
+            catalog,
+            [found],
+            [],
+            chunks,
+            ["doc.md"],
+            SimpleNamespace(get_taxonomy=lambda rid: f"tax-{rid}"),
+            client,
+            SimpleNamespace(model="test-model"),
+            3,
+            None,
+            variant_map=variant_map,
+            chunk_contexts=["expanded context text"],
+        )
+
+    call = variant_grounding.call_args
+    assert call.args[1] is chunks
+    assert call.args[2] is variant_map
+    assert call.args[3] is client
+    assert call.args[4].model == "test-model"
+    assert call.kwargs["max_workers"] == 3
+    assert call.kwargs["chunk_contexts"] == ["expanded context text"]
+    assert call.kwargs["stage"] == "expansion"
+
+
+# ---------------------------------------------------------------------------
+# Removed variant groups: the output invariant
+# ---------------------------------------------------------------------------
+
+
+def test_invariant_raises_on_leaked_parent():
+    """A variant-map key reaching the output raises PipelineInvariantError."""
+    merged = [_make_parent_match(chunk_index=0)]
+
+    with pytest.raises(PipelineInvariantError, match=PARENT_ID):
+        _assert_no_synthetic_parents(merged, VARIANT_MAP, check=True)
+
+
+def test_invariant_skipped_without_variants():
+    """With an empty variant map the invariant does not fire, even for parent-like ids."""
+    merged = [_make_parent_match(chunk_index=0)]
+
+    # No exception: the empty map means the run never collapsed variants.
+    _assert_no_synthetic_parents(merged, {}, check=True)
+
+
+def test_invariant_skipped_when_stage_gate_off():
+    """Runs whose variant-grounding stage could not run are not held to the promise.
+
+    Ungrounded runs expand parents to variants and client-less runs leave
+    parent matches in place legitimately, so neither is checked.
+    """
+    merged = [_make_parent_match(chunk_index=0)]
+
+    # No exception: the stage's gate (variants, plan grounding, client)
+    # did not all hold, so parents may appear.
+    _assert_no_synthetic_parents(merged, VARIANT_MAP, check=False)
+
+
+@pytest.mark.slow
+def test_run_extraction_invariant_fires_on_leaked_parent(mock_config, tmp_path):
+    """A parent that survives variant grounding fails the run at the invariant."""
+    catalog = [
+        _catalog_risk("R-001", "Model bias", "Systematic errors.", "other-taxonomy", ""),
+        *[_catalog_risk(v["risk_id"], v["name"], v["description"], v["taxonomy"], "grp") for v in VARIANTS],
+    ]
+    doc = tmp_path / "policy.md"
+    doc.write_text(
+        "Policy covering unauthorized processing of biometric and location data "
+        "across all processing activities the organization undertakes."
+    )
+    parent_candidate = ScoredCandidate(
+        risk_id=PARENT_ID,
+        risk_name=PARENT_NAME,
+        risk_description=PARENT_DESC,
+        bm25_rank=1,
+        rrf_score=0.9,
+        cross_encoder_score=0.9,
+    )
+
+    def _retrieve_parent(chunks, i, index, **kwargs):
+        return ChunkResult(
+            chunk_index=i,
+            source=chunks[i].source,
+            page=chunks[i].page,
+            section=chunks[i].section,
+            accepted=[parent_candidate],
+            borderline=[],
+            borderline_judged=[],
+            stats={
+                "candidates_retrieved": 1,
+                "auto_accepted": 1,
+                "borderline": 0,
+                "discarded": 0,
+                "bm25_rescued": 0,
+            },
+        )
+
+    def _ground_nothing(**kwargs):
+        return {}
+
+    with (
+        patch("asago_policy_mapper.extract.index._load_bi_encoder", return_value=(None, None, None)),
+        patch("asago_policy_mapper.extract.index._load_cross_encoder", return_value=(None, None, False, False)),
+        # retrieval surfaces the collapsed parent; grounding accepts it; a
+        # broken variant stage passes it through untouched — exactly the leak
+        # the invariant exists to catch
+        patch("asago_policy_mapper.extract.pipeline.retrieve_chunk", side_effect=_retrieve_parent),
+        patch(
+            "asago_policy_mapper.extract.pipeline.ground_and_extract_evidence",
+            side_effect=lambda **kwargs: {
+                c.risk_id: ([EvidenceSpan(text="quote", document="doc.md", chunk_index=0)], "high")
+                for c in kwargs["candidates"]
+            },
+        ),
+        patch(
+            "asago_policy_mapper.extract.pipeline._run_variant_grounding",
+            side_effect=lambda matches, *a, **k: (matches, []),
+        ),
+        patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_nothing),
+    ):
+        with pytest.raises(PipelineInvariantError, match="unauthorized-processing"):
+            run_extraction(
+                documents=[doc],
+                client=MagicMock(),
+                config=mock_config,
+                risks=catalog,
+                retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+                ocr=False,
+            )
+
+
+@pytest.mark.slow
+def test_run_extraction_client_none_grounded_run_keeps_parents(mock_config, tmp_path):
+    """A grounded run without a client leaves parent matches in place without raising.
+
+    The variant-grounding stage cannot run without a client, so parent
+    matches survive legitimately; the invariant shares the stage's gate and
+    does not fire on them.
+    """
+    catalog = [
+        _catalog_risk("R-001", "Model bias", "Systematic errors.", "other-taxonomy", ""),
+        *[_catalog_risk(v["risk_id"], v["name"], v["description"], v["taxonomy"], "grp") for v in VARIANTS],
+    ]
+    doc = tmp_path / "policy.md"
+    doc.write_text(
+        "Policy covering unauthorized processing of biometric and location data "
+        "across all processing activities the organization undertakes."
+    )
+    parent_candidate = ScoredCandidate(
+        risk_id=PARENT_ID,
+        risk_name=PARENT_NAME,
+        risk_description=PARENT_DESC,
+        bm25_rank=1,
+        rrf_score=0.9,
+        cross_encoder_score=0.9,
+        accepted_by="threshold",
+        rerank_source="cross_encoder",
+    )
+
+    def _retrieve_parent(chunks, i, index, **kwargs):
+        return ChunkResult(
+            chunk_index=i,
+            source=chunks[i].source,
+            page=chunks[i].page,
+            section=chunks[i].section,
+            accepted=[parent_candidate],
+            borderline=[],
+            borderline_judged=[],
+            stats={
+                "candidates_retrieved": 1,
+                "auto_accepted": 1,
+                "borderline": 0,
+                "discarded": 0,
+                "bm25_rescued": 0,
+            },
+        )
+
+    def _ground_nothing(**kwargs):
+        return {}
+
+    with (
+        patch("asago_policy_mapper.extract.index._load_bi_encoder", return_value=(None, None, None)),
+        patch("asago_policy_mapper.extract.index._load_cross_encoder", return_value=(None, None, False, False)),
+        patch("asago_policy_mapper.extract.pipeline.retrieve_chunk", side_effect=_retrieve_parent),
+        patch(
+            "asago_policy_mapper.extract.pipeline.ground_and_extract_evidence",
+            side_effect=lambda **kwargs: {
+                c.risk_id: ([EvidenceSpan(text="quote", document="doc.md", chunk_index=0)], "high")
+                for c in kwargs["candidates"]
+            },
+        ),
+        patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_nothing),
+    ):
+        result = run_extraction(
+            documents=[doc],
+            client=None,
+            config=mock_config,
+            risks=catalog,
+            retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+            ocr=False,
+        )
+
+    # the parent stays: no client means the variant stage never replaced it
+    assert PARENT_ID in {r.risk_id for r in result.risks}
 
 
 # ---------------------------------------------------------------------------
@@ -1398,186 +1676,3 @@ def test_run_extraction_removed_record_dropped_when_expansion_reenters_variant(m
     assert contradictory == []
     # the stage outcome is visible through the expansion counters
     assert result.metadata["expansion_stats"]["expanded_grounded"] >= 1
-
-
-# Removed variant groups: the output invariant
-# ---------------------------------------------------------------------------
-
-
-def test_invariant_raises_on_leaked_parent():
-    """A variant-map key reaching the output raises PipelineInvariantError."""
-    merged = [_make_parent_match(chunk_index=0)]
-
-    with pytest.raises(PipelineInvariantError, match=PARENT_ID):
-        _assert_no_synthetic_parents(merged, VARIANT_MAP, check=True)
-
-
-def test_invariant_skipped_without_variants():
-    """With an empty variant map the invariant does not fire, even for parent-like ids."""
-    merged = [_make_parent_match(chunk_index=0)]
-
-    # No exception: the empty map means the run never collapsed variants.
-    _assert_no_synthetic_parents(merged, {}, check=True)
-
-
-def test_invariant_skipped_when_stage_gate_off():
-    """Runs whose variant-grounding stage could not run are not held to the promise.
-
-    Ungrounded runs expand parents to variants and client-less runs leave
-    parent matches in place legitimately, so neither is checked.
-    """
-    merged = [_make_parent_match(chunk_index=0)]
-
-    # No exception: the stage's gate (variants, plan grounding, client)
-    # did not all hold, so parents may appear.
-    _assert_no_synthetic_parents(merged, VARIANT_MAP, check=False)
-
-
-@pytest.mark.slow
-@pytest.mark.slow
-def test_run_extraction_invariant_fires_on_leaked_parent(mock_config, tmp_path):
-    """A parent that survives variant grounding fails the run at the invariant."""
-    catalog = [
-        _catalog_risk("R-001", "Model bias", "Systematic errors.", "other-taxonomy", ""),
-        *[_catalog_risk(v["risk_id"], v["name"], v["description"], v["taxonomy"], "grp") for v in VARIANTS],
-    ]
-    doc = tmp_path / "policy.md"
-    doc.write_text(
-        "Policy covering unauthorized processing of biometric and location data "
-        "across all processing activities the organization undertakes."
-    )
-    parent_candidate = ScoredCandidate(
-        risk_id=PARENT_ID,
-        risk_name=PARENT_NAME,
-        risk_description=PARENT_DESC,
-        bm25_rank=1,
-        rrf_score=0.9,
-        cross_encoder_score=0.9,
-    )
-
-    def _retrieve_parent(chunks, i, index, **kwargs):
-        return ChunkResult(
-            chunk_index=i,
-            source=chunks[i].source,
-            page=chunks[i].page,
-            section=chunks[i].section,
-            accepted=[parent_candidate],
-            borderline=[],
-            borderline_judged=[],
-            stats={
-                "candidates_retrieved": 1,
-                "auto_accepted": 1,
-                "borderline": 0,
-                "discarded": 0,
-                "bm25_rescued": 0,
-            },
-        )
-
-    def _ground_nothing(**kwargs):
-        return {}
-
-    with (
-        patch("asago_policy_mapper.extract.index._load_bi_encoder", return_value=(None, None, None)),
-        patch("asago_policy_mapper.extract.index._load_cross_encoder", return_value=(None, None, False, False)),
-        # retrieval surfaces the collapsed parent; grounding accepts it; a
-        # broken variant stage passes it through untouched — exactly the leak
-        # the invariant exists to catch
-        patch("asago_policy_mapper.extract.pipeline.retrieve_chunk", side_effect=_retrieve_parent),
-        patch(
-            "asago_policy_mapper.extract.pipeline.ground_and_extract_evidence",
-            side_effect=lambda **kwargs: {
-                c.risk_id: ([EvidenceSpan(text="quote", document="doc.md", chunk_index=0)], "high")
-                for c in kwargs["candidates"]
-            },
-        ),
-        patch(
-            "asago_policy_mapper.extract.pipeline._run_variant_grounding",
-            side_effect=lambda matches, *a, **k: (matches, []),
-        ),
-        patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_nothing),
-    ):
-        with pytest.raises(PipelineInvariantError, match="unauthorized-processing"):
-            run_extraction(
-                documents=[doc],
-                client=MagicMock(),
-                config=mock_config,
-                risks=catalog,
-                retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-                ocr=False,
-            )
-
-
-@pytest.mark.slow
-@pytest.mark.slow
-def test_run_extraction_client_none_grounded_run_keeps_parents(mock_config, tmp_path):
-    """A grounded run without a client leaves parent matches in place without raising.
-
-    The variant-grounding stage cannot run without a client, so parent
-    matches survive legitimately; the invariant shares the stage's gate and
-    does not fire on them.
-    """
-    catalog = [
-        _catalog_risk("R-001", "Model bias", "Systematic errors.", "other-taxonomy", ""),
-        *[_catalog_risk(v["risk_id"], v["name"], v["description"], v["taxonomy"], "grp") for v in VARIANTS],
-    ]
-    doc = tmp_path / "policy.md"
-    doc.write_text(
-        "Policy covering unauthorized processing of biometric and location data "
-        "across all processing activities the organization undertakes."
-    )
-    parent_candidate = ScoredCandidate(
-        risk_id=PARENT_ID,
-        risk_name=PARENT_NAME,
-        risk_description=PARENT_DESC,
-        bm25_rank=1,
-        rrf_score=0.9,
-        cross_encoder_score=0.9,
-        accepted_by="threshold",
-        rerank_source="cross_encoder",
-    )
-
-    def _retrieve_parent(chunks, i, index, **kwargs):
-        return ChunkResult(
-            chunk_index=i,
-            source=chunks[i].source,
-            page=chunks[i].page,
-            section=chunks[i].section,
-            accepted=[parent_candidate],
-            borderline=[],
-            borderline_judged=[],
-            stats={
-                "candidates_retrieved": 1,
-                "auto_accepted": 1,
-                "borderline": 0,
-                "discarded": 0,
-                "bm25_rescued": 0,
-            },
-        )
-
-    def _ground_nothing(**kwargs):
-        return {}
-
-    with (
-        patch("asago_policy_mapper.extract.index._load_bi_encoder", return_value=(None, None, None)),
-        patch("asago_policy_mapper.extract.index._load_cross_encoder", return_value=(None, None, False, False)),
-        patch("asago_policy_mapper.extract.pipeline.retrieve_chunk", side_effect=_retrieve_parent),
-        patch(
-            "asago_policy_mapper.extract.pipeline.ground_and_extract_evidence",
-            side_effect=lambda **kwargs: {
-                c.risk_id: ([EvidenceSpan(text="quote", document="doc.md", chunk_index=0)], "high")
-                for c in kwargs["candidates"]
-            },
-        ),
-        patch("asago_policy_mapper.extract.pipeline.ground_risk_group", side_effect=_ground_nothing),
-    ):
-        result = run_extraction(
-            documents=[doc],
-            client=None,
-            config=mock_config,
-            risks=catalog,
-            retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-            ocr=False,
-        )
-
-    # the parent stays: no client means the variant stage never replaced it
-    assert PARENT_ID in {r.risk_id for r in result.risks}

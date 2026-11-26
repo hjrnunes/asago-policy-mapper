@@ -624,10 +624,7 @@ def _run_variant_grounding(
             outcome = outcomes.setdefault(parent_match.risk_id, _ParentOutcome())
             outcome.record(parent_match, grounded)
             for vid, (evidence, confidence) in grounded.items():
-                vinfo = next(
-                    (v for v in variant_map[parent_match.risk_id] if v["risk_id"] == vid),
-                    None,
-                )
+                vinfo = _variant_info(variant_map[parent_match.risk_id], vid)
                 if not vinfo:
                     continue
                 stub = _variant_stub(vid, vinfo, parent_match)
@@ -734,6 +731,14 @@ def _reconcile_removed_groups(removed, merged, variant_map):
             dropped,
         )
     return kept
+
+
+def _variant_info(variants, variant_id):
+    """Look up one variant's metadata by risk id; None when absent."""
+    for v in variants:
+        if v["risk_id"] == variant_id:
+            return v
+    return None
 
 
 def _run_judge(
