@@ -5,8 +5,10 @@ The filter adds three optional fields to ``FilteredCandidate`` —
 prefilter dropped the candidate; grounding rejections leave all three
 ``None``. ``ExtractionResult`` gains ``decision_calls``, a list of
 ``DecisionCallRecord`` objects holding the stage, chunk index, decision
-log and exact request for each prefilter call, and ``RetrievalStats``
-gains ``prefilter_dropped``, the count of candidates the filter removed
+log and exact request for each prefilter call, plus ``prefilter_ran``,
+which carries the filter's presence (an empty ``decision_calls`` list
+means the filter ran with nothing to assess); ``RetrievalStats`` gains
+``prefilter_dropped``, the count of candidates the filter removed
 (``grounding_filtered`` counts only grounding's own rejections). With
 the filter off, none of the new fields may appear in serialized output,
 so runs stay byte-identical to today's.
@@ -302,9 +304,10 @@ def test_extraction_result_omits_decision_calls_when_empty():
 
 
 def test_extraction_result_decision_calls_roundtrip():
-    result = _result(decision_calls=[_call_record()])
+    result = _result(decision_calls=[_call_record()], prefilter_ran=True)
     restored = ExtractionResult(**result.model_dump())
     assert restored.decision_calls == result.decision_calls
+    assert restored.prefilter_ran is True
     assert restored.decision_calls[0].decision.question_id == "risk-relevance"
 
 

@@ -321,6 +321,42 @@ def test_prefilter_records_wire_requests_when_assessor_batches(mock_config, tmp_
     assert restored.request == request
 
 
+def test_prefilter_record_request_bodies_do_not_alias_the_exchange():
+    """Mutating a recorded request body leaves the assessor's exchange alone.
+
+    The record copies the exchange's request bodies (the list and the
+    member dicts); pydantic does not copy plain dict fields on
+    construction, so sharing the member dicts would let anything the
+    record's consumers do reach back into the assessor's recorded
+    exchange. The copy is the same deliberate boundary the stage draws
+    elsewhere (candidates are copied, borderline lists shared on
+    purpose).
+    """
+    from asago_policy_mapper.extract.pipeline import PREFILTER_TASK, _prefilter_request
+
+    exchange = {
+        "requests": [
+            {"context": "policy text", "items": [{"id": "R-001", "text": "x"}]},
+            {"context": "policy text", "items": [{"id": "R-002", "text": "y"}]},
+        ],
+        "responses": [None, None],
+    }
+    batch = AnswerBatch(answers={}, unmatched_ids=(), latency_ms=1.0, exchange=exchange)
+
+    recorded, synthesized = _prefilter_request("policy text", [], batch, None, PREFILTER_TASK)
+
+    assert synthesized is False
+    assert recorded == exchange["requests"]
+    # The recorded list and its member dicts are copies: a consumer's
+    # mutation never reaches the assessor's exchange.
+    recorded.append({"context": "injected", "items": []})
+    recorded[0]["context"] = "mutated"
+    recorded[0]["items"].append({"id": "R-999", "text": "mutated"})
+    assert len(exchange["requests"]) == 2
+    assert exchange["requests"][0]["context"] == "policy text"
+    assert exchange["requests"][0]["items"] == [{"id": "R-001", "text": "x"}]
+
+
 def test_prefilter_drops_at_0_10_keeps_above(mock_config, tmp_path, monkeypatch):
     """p <= 0.10 drops before grounding; p > 0.10 is grounded."""
     from asago_policy_mapper.extract import pipeline
@@ -748,9 +784,12 @@ def test_prefilter_skips_chunks_without_accepted_candidates(mock_config, tmp_pat
     )
 
     # No chunk had accepted candidates, so the assessor was never called
-    # and no decision call records exist.
+    # and no decision call records exist — but the filter ran, so the
+    # serialized result carries decision_calls as an empty list, the
+    # same presence convention prefilter_dropped uses.
     assert assessor.calls == []
     assert result.decision_calls == []
+    assert result.model_dump()["decision_calls"] == []
 
 
 def test_metadata_records_offsite_and_fields(mock_config, tmp_path, monkeypatch):
@@ -1130,11 +1169,13 @@ def test_prefilter_drop_records_carry_full_provenance(mock_config, tmp_path, mon
 
 
 def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, monkeypatch):
-    """A wire-less assessor's record carries the body it would have sent.
+    """An assessor without an exchange record carries the body it would have sent.
 
     The keys and per-item fields pin the fallback shape: ``context`` and
-    ``items`` with ``id``/``text`` per case, exactly as the probability
-    task's request format defines them.
+    ``items`` with ``id``/"text" per case, exactly as the probability
+    task's request format defines them. The body itself carries the
+    ``synthesized: true`` marker — set because the body was built for
+    the record, not sent anywhere, so a reader can tell the two apart.
     """
     from asago_policy_mapper.extract import pipeline
 
@@ -1171,6 +1212,7 @@ def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, mo
     assert call.chunk_index == 0
     assert isinstance(call.request, dict)
     assert set(call.request) == {"context", "items"}
+    assert call.synthesized is True
     assert [i["id"] for i in call.request["items"]] == [r.id for r in MOCK_RISKS]
     assert call.request["items"][0]["text"] == f"{MOCK_RISKS[0].name}: {MOCK_RISKS[0].description}"
     # The decision log identifies the task, prompt, assessor and rule.
@@ -1187,6 +1229,69 @@ def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, mo
     r1 = next(i for i in log.items if i.risk_id == "R-001")
     assert r1.answers == [{"kind": "no_answer", "reason": "missing", "detail": ""}]
     assert r1.keep is True
+
+
+def test_prefilter_request_synthesizes_through_assessor_builder(mock_config, tmp_path, monkeypatch):
+    """A builder-bearing assessor's unsent record carries its own request shape.
+
+    When the exchange is empty (replay, or an assessor that failed
+    before sending), the synthesized body is built through the
+    assessor's own ``_request_body`` — the same method that builds what
+    it would send — so the record never claims a generic body under an
+    assessor whose real exchange looks nothing like it. The call
+    record's ``synthesized`` field still tells a reader the body was
+    built for the record, not sent.
+    """
+    from asago_policy_mapper.extract import pipeline
+
+    class BuilderAssessor(ScriptedAssessor):
+        """An assessor whose request shape is its own, not the generic one."""
+
+        def _request_body(self, question, context, cases):
+            return {
+                "model": "mapped-model",
+                "state": context,
+                "questions": {c.risk_id: f"{question.question_id}:{c.name}" for c in cases},
+            }
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", lambda **kwargs: {})
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=Prefilter(assessor=BuilderAssessor({}), rule=ThresholdRule()),
+        ocr=False,
+    )
+
+    call = result.decision_calls[0]
+    assert isinstance(call.request, dict)
+    # The record carries the assessor's own shape, not the generic one,
+    # and the synthesized marker sits on the record, not in the body.
+    assert set(call.request) == {"model", "state", "questions"}
+    assert call.synthesized is True
+    assert call.request["model"] == "mapped-model"
+    assert [call.request["questions"][r.id] for r in MOCK_RISKS] == [
+        f"grounding-probability:{r.name}" for r in MOCK_RISKS
+    ]
 
 
 def test_prefilter_copy_preserves_chunk_identity_fields(mock_config, tmp_path, monkeypatch):

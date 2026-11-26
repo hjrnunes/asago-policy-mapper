@@ -193,13 +193,17 @@ class DecisionCallRecord(BaseModel):
     credentials (the prefilter's key travels in a header the body never
     sees). Assessors that batch report one body per batch as a list;
     single-shot assessors report one body as a dict. ``decision`` is the
-    ``DecisionLog`` the seam produced.
+    ``DecisionLog`` the seam produced. ``synthesized`` marks a request
+    the stage built for the record rather than sent — it lives on the
+    record, not inside the body, so the body stays exactly the request
+    data and the marker never travels to an endpoint.
     """
 
     stage: str
     chunk_index: int
     request: dict | list
     decision: DecisionLog | None = None
+    synthesized: bool = False
 
 
 class ExtractionResult(BaseModel):
@@ -214,17 +218,24 @@ class ExtractionResult(BaseModel):
     grounding_filtered_candidates: list[FilteredCandidate] = []
     decision_calls: list[DecisionCallRecord] = []
     eval: dict | None = None
+    prefilter_ran: bool = False
 
     @model_serializer(mode="wrap")
     def _omit_decision_calls_when_off(self, handler) -> dict[str, Any]:
-        """Leave ``decision_calls`` out unless the prefilter recorded any.
+        """Leave ``decision_calls`` out unless the prefilter ran.
 
-        With the filter off the list stays empty, and the serialized result
-        must stay byte-identical to the pre-filter output.
+        ``decision_calls`` carries the filter's presence the way
+        ``prefilter_dropped`` does: the key appears whenever the filter
+        ran — an empty list means the filter ran with nothing to assess
+        — and both keys are omitted only when the filter never ran, so
+        a filter-off result stays byte-identical to the pre-filter
+        output. ``prefilter_ran`` says which of the two worlds the
+        result belongs to and serializes with it.
         """
         data: dict[str, Any] = handler(self)
-        if not data.get("decision_calls"):
+        if not self.prefilter_ran:
             data.pop("decision_calls", None)
+            data.pop("prefilter_ran", None)
         return data
 
 
