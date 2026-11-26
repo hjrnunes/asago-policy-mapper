@@ -1398,7 +1398,17 @@ on the gemma4-oc-65k endpoint, temperature 0); base comparison
 
 `not_found` quotes are genuine paraphrases, not window-scope misses: 0 of
 52 on dhs-gov appear anywhere in that document under the same
-normalization. `normalized` quotes are punctuation/whitespace variants
+normalization. An independent recheck (casefold-only substring plus
+`difflib.SequenceMatcher`, sharing no code with the pipeline's
+normalization) confirmed 0 of 52 appear whole — and found that all 52
+carry a contiguous sub-run of 40% or more of the quote: they are
+stitched summaries of the form "risk name — document sentence", whose
+document-sentence part is present verbatim. The `not_found` label is
+correct for whole-quote semantics; the stitching pattern is the dominant
+failure mode. The recheck originally ran ad hoc against the (since
+deleted) run directory; `scripts/verify_not_found.py` now implements the
+same comparison, parameterized over any run directory, so future checks
+are reproducible. `normalized` quotes are punctuation/whitespace variants
 (e.g. curly quotes in DOCX sources). Of the 5,025 found spans, 2,986
 (59.4%) sit in a different chunk than the context chunk — the neighbour
 windows catch most exact matches, and `found_chunk_index` now records that
