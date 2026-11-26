@@ -198,16 +198,18 @@ def build_padded_text(
 def _split_unscored(
     candidates: list[ScoredCandidate],
 ) -> tuple[list[ScoredCandidate], list[ScoredCandidate]]:
-    """Split candidates into (scored, unscored) by NaN cross-encoder score.
+    """Split candidates into (scored, unscored) by the unscored marker.
 
     Unscored candidates (the reranker gave no answer) must not enter the
     rank or threshold comparison: NaN breaks ordering. They rejoin as
-    borderline, where the judge decides them.
+    borderline, where the judge decides them. The split shares the marker
+    definition with the unscored count, so the two agree on every
+    candidate.
     """
     scored = []
     unscored = []
     for c in candidates:
-        if math.isnan(c.cross_encoder_score):
+        if _is_unscored(c):
             unscored.append(c)
         else:
             scored.append(c)
@@ -497,10 +499,15 @@ def _stamp_accepted_by(candidates: list[ScoredCandidate], label: str) -> list[Sc
     return [c.model_copy(update={"accepted_by": label}) for c in candidates]
 
 
-def _count_unscored(index) -> int:
-    """Read the index's cumulative unscored count; 0 when the index has none."""
-    count = getattr(index, "rerank_unscored", 0)
-    return count if isinstance(count, int) else 0
+def _is_unscored(c: ScoredCandidate) -> bool:
+    """True when the candidate carries the unscored marker.
+
+    This is the one definition of an unscored candidate at the chunk
+    boundary: a NaN cross-encoder score, the marker rerank stamps when the
+    reranker gives no answer. classify and the unscored count both read it,
+    so the two can never disagree.
+    """
+    return math.isnan(c.cross_encoder_score)
 
 
 def _serialize_score(c: ScoredCandidate) -> ScoredCandidate:
@@ -533,7 +540,6 @@ def retrieve_chunk(
 ) -> ChunkResult:
     chunk = chunks[chunk_index]
     padded = build_padded_text(chunks, chunk_index, context_sentences)
-    unscored_before = _count_unscored(index)
     candidates = index.hybrid_search(
         padded,
         top_k=top_k,
@@ -541,7 +547,10 @@ def retrieve_chunk(
         rrf_min_score=rrf_min_score,
         rerank=use_cross_encoder,
     )
-    rerank_unscored = max(_count_unscored(index) - unscored_before, 0)
+    # The unscored count is derived, not accumulated: every candidate the
+    # reranker could not score carries the NaN marker in this chunk's own
+    # result, so counting markers is the single source of truth.
+    rerank_unscored = sum(1 for c in candidates if _is_unscored(c))
 
     if not use_cross_encoder:
         return ChunkResult(

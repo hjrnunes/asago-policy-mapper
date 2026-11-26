@@ -307,82 +307,63 @@ def test_retrieve_chunk_no_cross_encoder():
 def test_retrieve_chunk_records_rerank_unscored():
     """retrieve_chunk reports the chunk's own unscored count as rerank_unscored.
 
-    The index counter is cumulative across searches, so the chunk stat is the
-    delta across this chunk's hybrid_search call.
+    The count is derived from the NaN markers in this chunk's own result,
+    not accumulated across searches, so it is exactly the candidates the
+    reranker could not score for this chunk.
     """
 
-    class _CountingIndex:
-        rerank_unscored = 0
-
+    class _UnscoringSearch:
         def hybrid_search(self, *args, **kwargs):
             # Two candidates went unscored during this chunk's search.
-            self.rerank_unscored += 2
-            return [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9)]
+            return [
+                ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9),
+                ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b", cross_encoder_score=float("nan")),
+                ScoredCandidate(risk_id="R-003", risk_name="C", risk_description="c", cross_encoder_score=float("nan")),
+            ]
 
     chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
 
-    cr = retrieve_chunk(chunks, 0, _CountingIndex())
+    cr = retrieve_chunk(chunks, 0, _UnscoringSearch())
 
     assert cr.stats["rerank_unscored"] == 2
 
 
-def test_retrieve_chunk_rerank_unscored_is_per_search_delta():
-    """A chunk searched after earlier searches reports only its own unscored count."""
+def test_retrieve_chunk_rerank_unscored_counts_only_nan_markers():
+    """The stat counts the markers in the chunk's own result, nothing else.
 
-    class _CountingIndex:
-        def __init__(self):
-            self.rerank_unscored = 5  # unscored in earlier searches
+    An index that unscored candidates in earlier searches (a NaN marker in
+    a previous chunk's result) cannot leak into this chunk's count: there
+    is no cumulative counter to read, only the returned candidates.
+    """
 
+    class _MarkerLeakAttempt:
+        def hybrid_search(self, *args, **kwargs):
+            return [
+                # A candidate carrying a marker from an earlier search's
+                # result would still be this chunk's unscored candidate.
+                ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9),
+                ScoredCandidate(risk_id="R-002", risk_name="B", risk_description="b", cross_encoder_score=float("nan")),
+            ]
+
+    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
+
+    cr = retrieve_chunk(chunks, 0, _MarkerLeakAttempt())
+
+    assert cr.stats["rerank_unscored"] == 1
+
+
+def test_retrieve_chunk_rerank_unscored_defaults_to_zero():
+    """A search whose every candidate is scored reports zero."""
+
+    class _ScoredSearch:
         def hybrid_search(self, *args, **kwargs):
             return [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9)]
 
     chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
 
-    cr = retrieve_chunk(chunks, 0, _CountingIndex())
+    cr = retrieve_chunk(chunks, 0, _ScoredSearch())
 
     assert cr.stats["rerank_unscored"] == 0
-
-
-def test_retrieve_chunk_rerank_unscored_defaults_to_zero():
-    """Indexes without a rerank_unscored attribute report zero."""
-    from types import SimpleNamespace as _NS
-
-    index = _NS(hybrid_search=lambda *a, **k: [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a")])
-    chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
-
-    cr = retrieve_chunk(chunks, 0, index)
-
-    assert cr.stats["rerank_unscored"] == 0
-
-
-def test_count_unscored_reads_int_counter():
-    """The helper returns the index counter verbatim when it is an int."""
-    from asago_policy_mapper.extract.retrieve import _count_unscored
-
-    class _Idx:
-        rerank_unscored = 4
-
-    assert _count_unscored(_Idx()) == 4
-
-
-def test_count_unscored_missing_attribute_is_zero():
-    """No counter attribute reads as zero, whatever the getattr default mutates to."""
-    from asago_policy_mapper.extract.retrieve import _count_unscored
-
-    class _Idx:
-        pass
-
-    assert _count_unscored(_Idx()) == 0
-
-
-def test_count_unscored_non_int_is_zero():
-    """Mock-style counters (auto-attributes) read as zero, not as a count."""
-    from asago_policy_mapper.extract.retrieve import _count_unscored
-
-    class _Idx:
-        rerank_unscored = "not-an-int"
-
-    assert _count_unscored(_Idx()) == 0
 
 
 # --- classify_by_rank / classify_by_threshold direct tests ---
@@ -519,11 +500,7 @@ def test_classify_candidates_forwards_top_n_judge_to_threshold_mode():
 class _UnscoringIndex:
     """hybrid_search returns a ranked list with unscored (NaN) candidates last."""
 
-    def __init__(self):
-        self.rerank_unscored = 0
-
     def hybrid_search(self, *args, **kwargs):
-        self.rerank_unscored += 1
         return [
             ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.95),
             ScoredCandidate(

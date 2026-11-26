@@ -171,9 +171,9 @@ def test_rerank_equal_scores_keep_input_order(monkeypatch):
 def test_rerank_counts_unscored(monkeypatch, caplog):
     """Unscored candidates ride at the tail carrying the NaN marker, and warn once each.
 
-    Unscored candidates stay in the returned list, after every scored one,
-    so the selection path can route them to the judge instead of dropping
-    them.
+    Every rider carries the marker, so counting markers in the returned
+    list is the unscored count; the selection path routes them to the
+    judge instead of dropping them.
     """
     index = _index_with_predict(monkeypatch, [float("nan"), 0.9, float("nan"), 0.8])
     candidates = [
@@ -187,7 +187,7 @@ def test_rerank_counts_unscored(monkeypatch, caplog):
         reranked = index.rerank("query", candidates, top_k=4)
 
     assert [c.risk_id for c in reranked] == ["R-B", "R-D", "R-A", "R-C"]
-    assert index.rerank_unscored == 2
+    assert sum(1 for c in reranked if math.isnan(c.cross_encoder_score)) == 2
     skip_warnings = [r.getMessage() for r in caplog.records if "unscored" in r.getMessage()]
     assert skip_warnings == ["Candidate R-A unscored by reranker", "Candidate R-C unscored by reranker"]
 
@@ -209,9 +209,8 @@ def test_rerank_majority_unscored_raises(monkeypatch, caplog):
         ):
             index.rerank("query", candidates, top_k=4)
 
-    # The count and warnings land before the raise, so the failure is
-    # observable in the run's diagnostics.
-    assert index.rerank_unscored == 3
+    # The warnings land before the raise, so the failure is observable in
+    # the run's diagnostics.
     skip_warnings = [r for r in caplog.records if "unscored by reranker" in r.message]
     assert len(skip_warnings) == 3
 
@@ -229,26 +228,27 @@ def test_rerank_half_unscored_does_not_raise(monkeypatch):
     reranked = index.rerank("query", candidates, top_k=4)
 
     assert [c.risk_id for c in reranked] == ["R-B", "R-D", "R-A", "R-C"]
-    assert index.rerank_unscored == 2
+    assert sum(1 for c in reranked if math.isnan(c.cross_encoder_score)) == 2
 
 
-def test_rerank_unscored_counter_starts_at_zero():
-    index = RiskIndex([])
-    assert index.rerank_unscored == 0
+def test_rerank_unscored_markers_are_per_call(monkeypatch):
+    """Each call's riders carry only that call's markers: no state accumulates.
 
-
-def test_rerank_unscored_accumulates_across_calls(monkeypatch):
-    """The counter accumulates across rerank calls, not resets per call."""
+    The unscored count is derived from the markers a chunk's own result
+    carries, so a second call sees exactly its own unscored candidates —
+    nothing from the first call leaks in, and rerank keeps no counter.
+    """
     index = _index_with_predict(monkeypatch, [float("nan"), 0.9])
     candidates = [
         ScoredCandidate(risk_id="R-A", risk_name="A", risk_description="a"),
         ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
     ]
 
-    index.rerank("query one", candidates, top_k=2)
-    index.rerank("query two", candidates, top_k=2)
+    first = index.rerank("query one", candidates, top_k=2)
+    second = index.rerank("query two", candidates, top_k=2)
 
-    assert index.rerank_unscored == 2
+    assert sum(1 for c in first if math.isnan(c.cross_encoder_score)) == 1
+    assert sum(1 for c in second if math.isnan(c.cross_encoder_score)) == 1
 
 
 @pytest.mark.slow
