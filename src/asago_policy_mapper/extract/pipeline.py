@@ -25,6 +25,8 @@ from asago_policy_mapper.extract.calllog import merge_call_records
 from asago_policy_mapper.extract.index import RiskIndex
 from asago_policy_mapper.extract.merge import _tiebreak_key, merge_matches
 from asago_policy_mapper.extract.models import (
+    CONFIDENCE_FOLLOWS_MEASUREMENT,
+    RERANKER_CONFIDENCE_SOURCES,
     ChunkSummary,
     DecisionCallRecord,
     DecisionItem,
@@ -62,6 +64,11 @@ from asago_policy_mapper.extract.screening import (
 from asago_policy_mapper.llm import LLMConfig, StructuredOutputMode
 
 logger = logging.getLogger(__name__)
+
+
+class PipelineInvariantError(RuntimeError):
+    """A pipeline stage received state that earlier stages guarantee impossible."""
+
 
 _QUERY_GEN_MAX_CANDIDATES = 50
 
@@ -211,10 +218,36 @@ def _ground_one(
     return cr, merged
 
 
-def determine_accepted_by(candidate, *, borderline_judged, use_cross_encoder, no_judge):
-    if candidate in borderline_judged:
-        return "auto_promoted" if no_judge else "llm_judge"
-    return "threshold" if use_cross_encoder else "rrf"
+def determine_accepted_by(candidate):
+    """Label how a candidate was accepted.
+
+    The label is stamped where the acceptance happens: retrieval and query
+    generation stamp selection labels, and the judge stamps
+    ``llm_judge``/``auto_promoted`` when it promotes a borderline candidate.
+    A candidate with no stamp cannot reach here in production, so the
+    missing stamp is an invariant failure, not a fallback case.
+    """
+    if candidate.accepted_by is not None:
+        return candidate.accepted_by
+    raise PipelineInvariantError(
+        f"candidate {candidate.risk_id} reached acceptance without a selection label; "
+        "retrieval, query generation and the judge must stamp every accepted candidate"
+    )
+
+
+def _confidence_from_candidate(candidate, *, use_cross_encoder):
+    """Derive (confidence, source) from the candidate's recorded stamps.
+
+    A reranker-measured score keeps its value and names its reranker. A
+    candidate no reranker scored (rerank_source None in cross-encoder
+    mode) is "not calculated": null confidence, never 0.0. Without the
+    cross-encoder the RRF ranking score is the confidence, labelled rrf.
+    """
+    if not use_cross_encoder:
+        return candidate.rrf_score, "rrf"
+    if candidate.rerank_source is None:
+        return None, "none"
+    return candidate.cross_encoder_score, candidate.rerank_source
 
 
 def build_risk_match(
@@ -225,18 +258,14 @@ def build_risk_match(
     grounding_confidence,
     evidence,
     use_cross_encoder=True,
-    confidence_override=None,
     scores_override=None,
 ):
-    confidence = (
-        confidence_override
-        if confidence_override is not None
-        else (candidate.cross_encoder_score if use_cross_encoder else candidate.rrf_score)
-    )
+    confidence, confidence_source = _confidence_from_candidate(candidate, use_cross_encoder=use_cross_encoder)
     scores = scores_override or RetrievalScores(
         bm25_rank=candidate.bm25_rank,
         embedding_distance=candidate.embedding_distance,
-        cross_encoder_score=candidate.cross_encoder_score,
+        cross_encoder_score=candidate.cross_encoder_score if candidate.rerank_source is not None else None,
+        cross_encoder_source=candidate.rerank_source,
         rrf_score=candidate.rrf_score,
     )
     return RiskMatch(
@@ -245,6 +274,7 @@ def build_risk_match(
         risk_description=candidate.risk_description,
         taxonomy=taxonomy,
         confidence=confidence,
+        confidence_source=confidence_source,
         grounding_confidence=grounding_confidence,
         accepted_by=accepted_by,
         evidence=list(evidence),
@@ -256,12 +286,7 @@ def _collect_ungrounded(chunk_results, index, retrieval):
     matches = []
     for cr in chunk_results:
         for candidate in cr.accepted:
-            accepted_by = determine_accepted_by(
-                candidate,
-                borderline_judged=cr.borderline_judged,
-                use_cross_encoder=retrieval.use_cross_encoder,
-                no_judge=retrieval.no_judge,
-            )
+            accepted_by = determine_accepted_by(candidate)
             matches.append(
                 build_risk_match(
                     candidate,
@@ -331,12 +356,7 @@ def _run_grounding(
                 total_grounded += len(grounded)
                 grounded_ids = set(grounded.keys())
                 for candidate in cr.accepted:
-                    accepted_by = determine_accepted_by(
-                        candidate,
-                        borderline_judged=cr.borderline_judged,
-                        use_cross_encoder=retrieval.use_cross_encoder,
-                        no_judge=retrieval.no_judge,
-                    )
+                    accepted_by = determine_accepted_by(candidate)
                     rid = candidate.risk_id
                     if rid in grounded_ids:
                         evidence, confidence = grounded[rid]
@@ -356,7 +376,9 @@ def _run_grounding(
                                 risk_id=rid,
                                 risk_name=candidate.risk_name,
                                 taxonomy=index.get_taxonomy(rid),
-                                cross_encoder_score=candidate.cross_encoder_score,
+                                cross_encoder_score=candidate.cross_encoder_score
+                                if candidate.rerank_source is not None
+                                else None,
                                 rrf_score=candidate.rrf_score,
                                 bm25_rank=candidate.bm25_rank,
                                 accepted_by=accepted_by,
@@ -425,6 +447,34 @@ def _ground_variants_one(
     return parent_match, grounded
 
 
+def _variant_stub(variant_id, variant_info, parent_match):
+    """Build the candidate a grounded variant stands in for at match time.
+
+    The parent's scores carry over: a reranker measured them for the same
+    matching work, so they still hold. A measured reranker score rides with
+    its source; an unmeasured parent leaves rerank_source unset, so its null
+    confidence stays null instead of posing as a measured 0.0.
+    """
+    stub = ScoredCandidate(
+        risk_id=variant_id,
+        risk_name=variant_info["name"],
+        risk_description=variant_info["description"],
+        bm25_rank=parent_match.scores.bm25_rank,
+        embedding_distance=parent_match.scores.embedding_distance,
+        rrf_score=parent_match.scores.rrf_score,
+    )
+    parent_source = parent_match.confidence_source
+    parent_score = parent_match.scores.cross_encoder_score
+    if parent_score is None:
+        return stub
+    return stub.model_copy(
+        update={
+            "cross_encoder_score": parent_score,
+            "rerank_source": parent_source if parent_source in RERANKER_CONFIDENCE_SOURCES else None,
+        }
+    )
+
+
 def _run_variant_grounding(
     grounded_matches,
     chunks,
@@ -479,15 +529,7 @@ def _run_variant_grounding(
                 )
                 if not vinfo:
                     continue
-                stub = ScoredCandidate(
-                    risk_id=vid,
-                    risk_name=vinfo["name"],
-                    risk_description=vinfo["description"],
-                    bm25_rank=parent_match.scores.bm25_rank,
-                    embedding_distance=parent_match.scores.embedding_distance,
-                    cross_encoder_score=parent_match.scores.cross_encoder_score,
-                    rrf_score=parent_match.scores.rrf_score,
-                )
+                stub = _variant_stub(vid, vinfo, parent_match)
                 variant_matches.append(
                     build_risk_match(
                         stub,
@@ -495,7 +537,13 @@ def _run_variant_grounding(
                         accepted_by=parent_match.accepted_by,
                         grounding_confidence=confidence,
                         evidence=evidence,
-                    )
+                        scores_override=parent_match.scores.model_copy(deep=True),
+                        # the variant's confidence follows the same path as
+                        # its parent's: a measured score, or null when the
+                        # parent was never measured; only an RRF-backed
+                        # parent inherits the ranking score as confidence
+                        use_cross_encoder=parent_match.confidence_source in CONFIDENCE_FOLLOWS_MEASUREMENT,
+                    ).model_copy(update={"scores_inherited_from": parent_match.risk_id})
                 )
     if call_collector is not None:
         for records in task_records:
@@ -526,8 +574,10 @@ def _run_judge(
     if plan.judge == "auto_promote":
         for cr in chunk_results:
             if cr.borderline:
-                cr.borderline_judged = list(cr.borderline)
-                cr.accepted.extend(cr.borderline)
+                # Promotion is an acceptance: stamp it the moment it
+                # happens, the way retrieval stamps selection labels.
+                cr.borderline_judged = [c.model_copy(update={"accepted_by": "auto_promoted"}) for c in cr.borderline]
+                cr.accepted.extend(cr.borderline_judged)
     elif plan.judge == "llm":
         if judge_tasks:
             judge_contexts = _judge_contexts(chunks, retrieval, chunk_contexts, judge_tasks)
@@ -551,8 +601,12 @@ def _run_judge(
                 }
                 for future in as_completed(futures):
                     idx, judged = future.result()
-                    chunk_results[idx].borderline_judged = judged
-                    chunk_results[idx].accepted.extend(judged)
+                    # Promotion is an acceptance: the label stamps when it
+                    # happens, so determine_accepted_by needs no ambient
+                    # state to rebuild it.
+                    stamped = [c.model_copy(update={"accepted_by": "llm_judge"}) for c in judged]
+                    chunk_results[idx].borderline_judged = stamped
+                    chunk_results[idx].accepted.extend(stamped)
             if call_collector is not None:
                 for records in task_records:
                     merge_call_records(call_collector, records, counts=_counts_judge)
@@ -637,7 +691,11 @@ def _ground_expansion_group_multi(group, chunks, documents, client, config, reco
 
 
 def _build_expansion_matches(grounded, index, risk_lookup) -> list[RiskMatch]:
-    """Convert one group's grounded risks into expansion matches."""
+    """Convert one group's grounded risks into expansion matches.
+
+    Expansion matches carry no retrieval score — nothing was measured, so
+    confidence is null with source none, never a made-up 0.0.
+    """
     matches = []
     for rid, (evidence, confidence) in grounded.items():
         info = risk_lookup.get(rid, {})
@@ -653,7 +711,6 @@ def _build_expansion_matches(grounded, index, risk_lookup) -> list[RiskMatch]:
                 accepted_by="expansion",
                 grounding_confidence=confidence,
                 evidence=evidence,
-                confidence_override=0.0,
             )
         )
     return matches
@@ -942,13 +999,16 @@ def _merge_query_candidates(chunk_results, chunks, qr, candidates):
     """Add a query's candidates to every chunk the query covers.
 
     The first occurrence of a risk id wins; later queries only append risks
-    the chunk has not seen yet.
+    the chunk has not seen yet. Every candidate is stamped query_gen via
+    model_copy — the same candidate objects are shared between chunks, so
+    nothing is mutated in place.
     """
+    stamped = [c.model_copy(update={"accepted_by": "query_gen"}) for c in candidates]
     for ci in qr.chunk_indices:
         chunk = chunks[ci]
         if chunk_results[ci] is not None:
             existing_ids = {c.risk_id for c in chunk_results[ci].accepted}
-            for c in candidates:
+            for c in stamped:
                 if c.risk_id not in existing_ids:
                     chunk_results[ci].accepted.append(c)
                     existing_ids.add(c.risk_id)
@@ -958,12 +1018,12 @@ def _merge_query_candidates(chunk_results, chunks, qr, candidates):
                 source=chunk.source,
                 page=chunk.page,
                 section=chunk.section,
-                accepted=list(candidates),
+                accepted=list(stamped),
                 borderline=[],
                 borderline_judged=[],
                 stats={
-                    "candidates_retrieved": len(candidates),
-                    "auto_accepted": len(candidates),
+                    "candidates_retrieved": len(stamped),
+                    "auto_accepted": len(stamped),
                     "borderline": 0,
                     "discarded": 0,
                     "bm25_rescued": 0,
@@ -1147,13 +1207,15 @@ def _prefilter_drop_record(candidate, decision, answers, taxonomy, chunk_index, 
 
     ``accepted_by`` keeps the retrieval provenance (threshold, rrf,
     llm_judge) the candidate earned before the prefilter dropped it;
-    ``dropped_by`` names the prefilter separately.
+    ``dropped_by`` names the prefilter separately. The score follows the
+    same rule as the match boundary: a candidate no reranker measured
+    records null, never its 0.0 placeholder.
     """
     return FilteredCandidate(
         risk_id=candidate.risk_id,
         risk_name=candidate.risk_name,
         taxonomy=taxonomy,
-        cross_encoder_score=candidate.cross_encoder_score,
+        cross_encoder_score=candidate.cross_encoder_score if candidate.rerank_source is not None else None,
         rrf_score=candidate.rrf_score,
         bm25_rank=candidate.bm25_rank,
         accepted_by=accepted_by,
@@ -1232,12 +1294,7 @@ def _prefilter_one_chunk(
             assessment.answers.get(candidate.risk_id, ()),
             index.get_taxonomy(candidate.risk_id),
             cr.chunk_index,
-            determine_accepted_by(
-                candidate,
-                borderline_judged=cr.borderline_judged,
-                use_cross_encoder=retrieval.use_cross_encoder,
-                no_judge=retrieval.no_judge,
-            ),
+            determine_accepted_by(candidate),
         )
         for candidate in cr.accepted
         if candidate.risk_id not in keep_ids

@@ -741,8 +741,8 @@ def test_dropped_candidates_distinguishable(mock_config, tmp_path, monkeypatch):
     assert by_id["R-001"].score == 0.03
     assert by_id["R-001"].reason is not None
     # The drop keeps its retrieval provenance: the prefilter filtered it,
-    # it did not accept it.
-    assert by_id["R-001"].accepted_by == "threshold"
+    # it did not accept it. Rank cutoff auto-accept labels as "rank".
+    assert by_id["R-001"].accepted_by == "rank"
     # R-002 passed the filter, was sent to grounding, and was rejected there:
     # no prefilter provenance.
     assert by_id["R-002"].dropped_by is None
@@ -1165,9 +1165,72 @@ def test_prefilter_drop_records_carry_full_provenance(mock_config, tmp_path, mon
     assert fc.taxonomy == "taxonomy-R-001"
     assert fc.rrf_score == 0.0123
     assert fc.bm25_rank == 7
-    assert fc.accepted_by == "threshold"
+    # Rank cutoff auto-accept labels as "rank"; the provenance survived the
+    # prefilter's filtered copy.
+    assert fc.accepted_by == "rank"
     assert fc.score == 0.05
     assert fc.reason == "p=0.05"
+
+
+def test_prefilter_drop_record_nulls_unmeasured_score():
+    """A candidate no reranker measured drops with a null score, not 0.0.
+
+    Query-gen retrieval is the default run, and its candidates carry the
+    0.0 placeholder with no rerank source. A drop record that serialized
+    that 0.0 would be indistinguishable from a measured zero — the exact
+    ambiguity the score-source schema removes.
+    """
+    from types import SimpleNamespace
+
+    from asago_policy_mapper.extract.pipeline import _prefilter_drop_record
+
+    candidate = ScoredCandidate(risk_id="R-QG", risk_name="n", risk_description="d", accepted_by="query_gen")
+    record = _prefilter_drop_record(candidate, SimpleNamespace(reason="p=0.05"), [], "tax", 3, "query_gen")
+    dumped = json.loads(record.model_dump_json())
+
+    assert dumped["cross_encoder_score"] is None
+
+
+def test_prefilter_drop_record_keeps_measured_zero():
+    """A measured 0.0 and a never-calculated score serialize differently.
+
+    The drop boundary must express both states: null for the unmeasured
+    candidate, the measured value (0.0 included) for a stamped one.
+    """
+    from types import SimpleNamespace
+
+    from asago_policy_mapper.extract.pipeline import _prefilter_drop_record
+
+    measured_zero = ScoredCandidate(
+        risk_id="R-CE",
+        risk_name="n",
+        risk_description="d",
+        cross_encoder_score=0.0,
+        rerank_source="cross_encoder",
+        accepted_by="rank",
+    )
+    record = _prefilter_drop_record(measured_zero, SimpleNamespace(reason="x"), [], "t", 0, "rank")
+
+    unmeasured = ScoredCandidate(risk_id="R-QG", risk_name="n", risk_description="d", accepted_by="query_gen")
+    unmeasured_record = _prefilter_drop_record(unmeasured, SimpleNamespace(reason="x"), [], "t", 0, "query_gen")
+
+    assert record.model_dump()["cross_encoder_score"] == 0.0
+    assert unmeasured_record.model_dump()["cross_encoder_score"] is None
+
+
+def test_filtered_candidate_accepts_null_score():
+    """The drop-record model can express a never-calculated score."""
+    from asago_policy_mapper.extract.models import FilteredCandidate
+
+    fc = FilteredCandidate(
+        risk_id="R-QG",
+        risk_name="n",
+        cross_encoder_score=None,
+        accepted_by="query_gen",
+        chunk_index=0,
+    )
+    assert fc.cross_encoder_score is None
+    assert fc.model_dump()["cross_encoder_score"] is None
 
 
 def test_prefilter_request_records_synthetic_body_keys(mock_config, tmp_path, monkeypatch):
@@ -1568,9 +1631,8 @@ def test_prefilter_accepted_by_flows_through_filter(mock_config, tmp_path, monke
 
     kept = {m.risk_id: m for m in result.risks}
     assert "R-002" in kept
-    # Auto-accepted by cross-encoder threshold: the provenance survived
-    # the filtered copy.
-    assert kept["R-002"].accepted_by == "threshold"
+    # Auto-accepted by rank cutoff: the provenance survived the filtered copy.
+    assert kept["R-002"].accepted_by == "rank"
 
 
 def test_prefilter_unmatched_ids_and_latency_recorded(mock_config, tmp_path, monkeypatch):
@@ -2030,8 +2092,20 @@ def test_prefilter_one_chunk_copy_keeps_page_and_section():
         page=7,
         section="Data Governance",
         accepted=[
-            ScoredCandidate(risk_id="R-001", risk_name="Model Bias", risk_description="d", cross_encoder_score=0.9),
-            ScoredCandidate(risk_id="R-002", risk_name="Data Poisoning", risk_description="d", cross_encoder_score=0.8),
+            ScoredCandidate(
+                risk_id="R-001",
+                risk_name="Model Bias",
+                risk_description="d",
+                cross_encoder_score=0.9,
+                accepted_by="rank",
+            ),
+            ScoredCandidate(
+                risk_id="R-002",
+                risk_name="Data Poisoning",
+                risk_description="d",
+                cross_encoder_score=0.8,
+                accepted_by="rank",
+            ),
         ],
         borderline=[],
         borderline_judged=[],

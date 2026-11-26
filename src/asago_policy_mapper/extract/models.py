@@ -3,20 +3,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator, model_serializer
+from pydantic import BaseModel, field_validator, model_serializer, model_validator
 
 
-def _reject_nan(value: float) -> float:
+def _reject_nan(value: float | None) -> float | None:
     """Reject NaN scores: they break the merge ordering keys.
 
     NaN compares unequal to everything, including itself, so max() and
     sort() become input-order dependent wherever a NaN reaches them. A NaN
     confidence or cross-encoder score is always a bug — a score that was
     never computed or failed to parse — so the models refuse it up front.
+    A None is "not calculated" and passes through untouched.
     """
-    if value != value:
+    if value is not None and value != value:
         raise ValueError("score must not be NaN")
     return value
+
+
+# How a risk candidate was accepted into the result set.
+ACCEPTED_BY = Literal[
+    "rank",
+    "threshold",
+    "rrf",
+    "query_gen",
+    "llm_judge",
+    "auto_promoted",
+    "expansion",
+]
 
 
 class ScoredCandidate(BaseModel):
@@ -27,6 +40,15 @@ class ScoredCandidate(BaseModel):
     embedding_distance: float = 0.0
     cross_encoder_score: float = 0.0
     rrf_score: float = 0.0
+    # Which reranker produced cross_encoder_score; None means "never
+    # calculated" (the candidate was outside the rerank window or its only
+    # measurement was invalid) — the 0.0 default is a placeholder, not a
+    # measurement.
+    rerank_source: Literal["cross_encoder", "colbert"] | None = None
+    # The selection label stamped where the candidate was accepted; typed
+    # so a mistyped stamp fails at the stamping site, not later at
+    # RiskMatch construction.
+    accepted_by: ACCEPTED_BY | None = None
 
 
 DPV_RISK_CONTROLS = Literal[
@@ -68,8 +90,25 @@ class EvidenceSpan(BaseModel):
 class RetrievalScores(BaseModel):
     bm25_rank: int
     embedding_distance: float
-    cross_encoder_score: float
+    cross_encoder_score: float | None
+    # Which reranker measured cross_encoder_score; None means no reranker
+    # measured it (the score is null). Carries the candidate's stamp past
+    # this boundary so a measured score never serializes without its
+    # provenance — the same rule confidence follows.
+    cross_encoder_source: Literal["cross_encoder", "colbert"] | None = None
     rrf_score: float
+
+
+# Confidence sources that name a reranker measurement. The stub's stamp
+# tests against this set: only these sources can become a rerank_source.
+RERANKER_CONFIDENCE_SOURCES = frozenset({"cross_encoder", "colbert"})
+
+# Confidence sources whose value follows the measured-score-or-null path
+# (rather than the RRF ranking score): a reranker measurement, or no
+# measurement at all. The match boundary's mode decision tests against
+# this set. A future source label must join exactly one of the two sets —
+# measurement-backed or ranking-backed — and both sites then agree.
+CONFIDENCE_FOLLOWS_MEASUREMENT = frozenset({"cross_encoder", "colbert", "none"})
 
 
 class RiskMatch(BaseModel):
@@ -77,9 +116,10 @@ class RiskMatch(BaseModel):
     risk_name: str
     risk_description: str
     taxonomy: str = ""
-    confidence: float
+    confidence: float | None
+    confidence_source: Literal["cross_encoder", "colbert", "rrf", "none"] = "none"
     grounding_confidence: str
-    accepted_by: str
+    accepted_by: ACCEPTED_BY
     evidence: list[EvidenceSpan]
     scores: RetrievalScores
     mitigations: list[MitigationRef] = []
@@ -88,8 +128,23 @@ class RiskMatch(BaseModel):
     vulnerability: str | None = None
     consequence: str | None = None
     impact: str | None = None
+    scores_inherited_from: str | None = None
 
     _reject_nan_confidence = field_validator("confidence")(_reject_nan)
+
+    @model_validator(mode="after")
+    def _confidence_needs_a_source(self) -> "RiskMatch":
+        """A numeric confidence must name where it came from.
+
+        Null confidence means "not calculated"; a number without a source
+        would be exactly the unsourced score this schema exists to prevent.
+        """
+        if self.confidence is not None and self.confidence_source == "none":
+            raise ValueError(
+                "numeric confidence requires a confidence_source other than 'none' "
+                f"(risk {self.risk_id} has confidence={self.confidence})"
+            )
+        return self
 
 
 class RetrievalStats(BaseModel):
@@ -179,7 +234,10 @@ class FilteredCandidate(BaseModel):
     risk_id: str
     risk_name: str
     taxonomy: str = ""
-    cross_encoder_score: float
+    # Null means no reranker measured the score before the candidate was
+    # dropped; the 0.0 placeholder a candidate carries unmeasured never
+    # reaches here as a number. Mirrors RiskMatch.scores.
+    cross_encoder_score: float | None
     rrf_score: float = 0.0
     bm25_rank: int = 0
     accepted_by: str
@@ -224,7 +282,7 @@ class DecisionCallRecord(BaseModel):
 
 
 class ExtractionResult(BaseModel):
-    version: str = "0.3"
+    version: str = "0.4"
     risks: list[RiskMatch]
     source_documents: list[str]
     token_usage: dict = {}

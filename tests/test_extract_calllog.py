@@ -221,7 +221,13 @@ def _grounding_chunk_results(count):
             page=None,
             section=None,
             accepted=[
-                ScoredCandidate(risk_id=f"R-{i:03d}", risk_name="R", risk_description="d", cross_encoder_score=0.9)
+                ScoredCandidate(
+                    risk_id=f"R-{i:03d}",
+                    risk_name="R",
+                    risk_description="d",
+                    cross_encoder_score=0.9,
+                    accepted_by="threshold",
+                )
             ],
             borderline=[],
             borderline_judged=[],
@@ -411,6 +417,7 @@ def test_run_variant_grounding_numbers_records_in_task_order(monkeypatch):
             risk_description="d",
             taxonomy="t",
             confidence=0.9,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[EvidenceSpan(text="t", document="doc.md", chunk_index=i)],
@@ -511,6 +518,7 @@ def test_run_causal_synthesis_numbers_records_in_task_order(monkeypatch):
             risk_description="d",
             taxonomy="t",
             confidence=0.9,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[EvidenceSpan(text="t", document="doc.md", chunk_index=0)],
@@ -548,6 +556,7 @@ def test_run_causal_synthesis_without_collector_records_nothing(monkeypatch):
             risk_description="d",
             taxonomy="t",
             confidence=0.9,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[EvidenceSpan(text="t", document="doc.md", chunk_index=0)],

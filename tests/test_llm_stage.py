@@ -354,6 +354,7 @@ class TestCallSiteStages:
             risk_description="d",
             taxonomy="t",
             confidence=0.9,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[EvidenceSpan(text="text", document="doc.pdf", chunk_index=0)],

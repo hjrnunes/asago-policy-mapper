@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -271,6 +272,38 @@ class TestPrepareAnnotationData:
                 assert "taxonomy" in ann
                 assert "confidence" in ann
                 assert "causal_chain" in ann
+
+    def test_null_confidence_passes_through(self, source_file: Path, extraction_data: dict):
+        data = json.loads(json.dumps(extraction_data))
+        for risk in data["risks"]:
+            risk["confidence"] = None
+        result = prepare_annotation_data(data, source_file)
+
+        all_annotations = [a for c in result["chunks"] for a in c["annotations"]]
+        assert all_annotations
+        for ann in all_annotations:
+            # an unmeasured score stays null instead of degrading to 0.0
+            assert ann["confidence"] is None
+
+    def test_confidence_source_propagates(self, source_file: Path, extraction_data: dict):
+        data = json.loads(json.dumps(extraction_data))
+        data["risks"][0]["confidence_source"] = "rrf"
+        data["risks"][1]["confidence_source"] = "cross_encoder"
+        result = prepare_annotation_data(data, source_file)
+
+        all_annotations = [a for c in result["chunks"] for a in c["annotations"]]
+        by_risk = {a["risk_id"]: a for a in all_annotations}
+        assert by_risk["risk-transparency"]["confidence_source"] == "rrf"
+        assert by_risk["risk-privacy"]["confidence_source"] == "cross_encoder"
+
+    def test_missing_confidence_source_defaults_to_none(self, source_file: Path, extraction_data: dict):
+        result = prepare_annotation_data(extraction_data, source_file)
+
+        all_annotations = [a for c in result["chunks"] for a in c["annotations"]]
+        assert all_annotations
+        # pre-0.4 runs lack the field; the report treats them as unsourced
+        for ann in all_annotations:
+            assert ann["confidence_source"] == "none"
 
     def test_causal_chain_populated(self, source_file: Path, extraction_data: dict):
         result = prepare_annotation_data(extraction_data, source_file)

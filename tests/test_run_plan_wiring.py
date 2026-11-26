@@ -629,9 +629,9 @@ def test_hybrid_search_explicit_rerank_overrides_floor(monkeypatch, tmp_path):
     candidates = [ScoredCandidate(risk_id="R-001", risk_name="n", risk_description="d", rrf_score=0.03)]
 
     def fake_rerank(text, rrf_candidates, top_k=50):
-        return [c.model_copy(update={"cross_encoder_score": 0.5}) for c in rrf_candidates]
+        return [c.model_copy(update={"cross_encoder_score": 0.5}) for c in rrf_candidates], {"R-001": 0.5}
 
-    monkeypatch.setattr(index, "rerank", fake_rerank)
+    monkeypatch.setattr(index, "_rerank_with_scores", fake_rerank)
     monkeypatch.setattr("asago_policy_mapper.extract.index.RiskIndex.search_bm25", lambda self, text, top_k=100: [])
     monkeypatch.setattr(
         "asago_policy_mapper.extract.index.RiskIndex.search_semantic", lambda self, text, top_k=100: candidates
@@ -1159,9 +1159,12 @@ def test_judge_stage_follows_the_plan_not_the_raw_flags(mock_config, monkeypatch
     pipeline._run_judge(chunk_results, chunks, MagicMock(), mock_config, retrieval, [], plan, chunk_contexts=["g0"])
 
     assert calls["judge_one"] == 0
-    # The borderline candidates were promoted, not judged.
-    assert chunk_results[0].borderline_judged == borderline
-    assert chunk_results[0].accepted == borderline
+    # The borderline candidates were promoted, not judged — stamped with
+    # the promotion label, which is what their drop records and matches
+    # will read.
+    assert [c.accepted_by for c in chunk_results[0].borderline_judged] == ["auto_promoted"]
+    assert [c.accepted_by for c in chunk_results[0].accepted] == ["auto_promoted"]
+    assert [c.risk_id for c in chunk_results[0].borderline_judged] == ["R-001"]
 
 
 # --- the warnings ---

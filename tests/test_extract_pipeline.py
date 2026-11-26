@@ -25,6 +25,7 @@ from asago_policy_mapper.extract.models import (
     _RiskEvidenceList,
 )
 from asago_policy_mapper.extract.pipeline import (
+    PipelineInvariantError,
     _build_result_metadata,
     _build_retrieval_stats,
     _cap_accepted_candidates,
@@ -79,7 +80,7 @@ def test_run_extraction_returns_extraction_result(mock_config, tmp_path):
     )
 
     assert isinstance(result, ExtractionResult)
-    assert result.version == "0.3"
+    assert result.version == "0.4"
     assert result.source_documents == [str(doc)]
     assert result.retrieval_stats.total_chunks >= 1
     assert "service_tier" not in result.metadata
@@ -661,51 +662,35 @@ def _candidate(risk_id="R-001"):
         risk_description="desc",
         cross_encoder_score=0.8,
         rrf_score=0.5,
+        rerank_source="cross_encoder",
     )
 
 
-def test_determine_accepted_by_llm_judge():
+def test_judge_promotion_stamps_llm_judge_label():
+    """The LLM judge stamps its promotions at promotion time."""
     c = _candidate()
-    result = determine_accepted_by(
-        c,
-        borderline_judged=[c],
-        use_cross_encoder=True,
-        no_judge=False,
-    )
-    assert result == "llm_judge"
+    stamped = c.model_copy(update={"accepted_by": "llm_judge"})
+    assert determine_accepted_by(stamped) == "llm_judge"
 
 
-def test_determine_accepted_by_auto_promoted():
+def test_judge_promotion_stamps_auto_promoted_label():
+    """Auto-promotion under --no-judge stamps its own label."""
     c = _candidate()
-    result = determine_accepted_by(
-        c,
-        borderline_judged=[c],
-        use_cross_encoder=True,
-        no_judge=True,
-    )
-    assert result == "auto_promoted"
+    stamped = c.model_copy(update={"accepted_by": "auto_promoted"})
+    assert determine_accepted_by(stamped) == "auto_promoted"
 
 
-def test_determine_accepted_by_threshold():
+def test_determine_accepted_by_unstamped_candidate_raises():
+    """An unstamped candidate is an invariant failure, not a fallback.
+
+    Retrieval, query generation and the judge stamp every accepted
+    candidate with its selection label; a candidate without one never
+    occurs in production.
+    """
     c = _candidate()
-    result = determine_accepted_by(
-        c,
-        borderline_judged=[],
-        use_cross_encoder=True,
-        no_judge=False,
-    )
-    assert result == "threshold"
-
-
-def test_determine_accepted_by_rrf():
-    c = _candidate()
-    result = determine_accepted_by(
-        c,
-        borderline_judged=[],
-        use_cross_encoder=False,
-        no_judge=False,
-    )
-    assert result == "rrf"
+    c = c.model_copy(update={"accepted_by": None})
+    with pytest.raises(PipelineInvariantError):
+        determine_accepted_by(c)
 
 
 @pytest.mark.slow
@@ -768,7 +753,14 @@ def test_build_risk_match_rrf_mode():
     assert m.confidence == c.rrf_score
 
 
-def test_build_risk_match_confidence_override():
+def test_build_risk_match_stamped_candidate_keeps_measured_confidence():
+    """A reranker-stamped candidate keeps its measured score as confidence.
+
+    The accepted_by label does not change the confidence derivation: only
+    the candidate's stamps decide. An expansion stub that was never
+    measured (rerank_source None) is the null case, covered in
+    test_extract_score_semantics.
+    """
     c = _candidate()
     m = build_risk_match(
         c,
@@ -776,9 +768,9 @@ def test_build_risk_match_confidence_override():
         accepted_by="expansion",
         grounding_confidence="high",
         evidence=[],
-        confidence_override=0.0,
     )
-    assert m.confidence == 0.0
+    assert m.confidence == c.cross_encoder_score
+    assert m.confidence_source == "cross_encoder"
 
 
 def test_build_risk_match_scores_override():
@@ -795,7 +787,6 @@ def test_build_risk_match_scores_override():
         accepted_by="expansion",
         grounding_confidence="high",
         evidence=[],
-        confidence_override=0.0,
         scores_override=zero_scores,
     )
     assert m.scores.bm25_rank == 0
@@ -925,6 +916,7 @@ def test_run_causal_synthesis_populates_fields():
             risk_name="AI Bias",
             risk_description="Systematic bias.",
             confidence=0.85,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[
@@ -977,6 +969,7 @@ def test_run_causal_synthesis_skips_empty_results():
             risk_name="AI Bias",
             risk_description="Bias.",
             confidence=0.85,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="expansion",
             evidence=[
@@ -1009,6 +1002,7 @@ def _causal_risk_and_chunks(risk_ids):
             risk_name=f"Name {risk_id}",
             risk_description="Description.",
             confidence=0.85,
+            confidence_source="cross_encoder",
             grounding_confidence="high",
             accepted_by="threshold",
             evidence=[EvidenceSpan(text="q", document="doc.pdf", chunk_index=0)],

@@ -38,6 +38,7 @@ def _make_risk(risk_id):
         risk_name=f"Risk {risk_id}",
         risk_description=f"Desc {risk_id}",
         confidence=0.85,
+        confidence_source="cross_encoder",
         grounding_confidence="high",
         accepted_by="threshold",
         evidence=[],
