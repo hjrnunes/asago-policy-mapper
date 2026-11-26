@@ -227,10 +227,16 @@ class HttpProbabilityAssessor:
         try:
             response = client.post(self._PATH, headers=self._headers(secret), json=request_body)
         except httpx.TimeoutException:
-            return self._exchange(request_body, None, secret), self._mark_all(cases, "timeout"), []
+            return (
+                self._exchange(request_body, self._error_record("timeout"), secret),
+                self._mark_all(cases, "timeout"),
+                [],
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except (httpx.HTTPError, OSError) as error:
             return (
-                self._exchange(request_body, None, secret),
+                self._exchange(request_body, self._error_record("error"), secret),
                 self._mark_all(cases, "error", detail=_redact_text(str(error), secret)),
                 [],
             )
@@ -240,15 +246,31 @@ class HttpProbabilityAssessor:
             payload = response.json()
         except httpx.HTTPStatusError as error:
             detail = f"HTTP {error.response.status_code}"
-            return self._exchange(request_body, None, secret), self._mark_all(cases, "error", detail=detail), []
-        except ValueError as error:
             return (
-                self._exchange(request_body, None, secret),
+                self._exchange(request_body, self._error_record("error", status=error.response.status_code), secret),
+                self._mark_all(cases, "error", detail=detail),
+                [],
+            )
+        except ValueError as error:
+            # A 2xx whose body is not JSON: the status was fine, the
+            # payload was not.
+            return (
+                self._exchange(request_body, self._error_record("error", status=response.status_code), secret),
                 self._mark_all(cases, "error", detail=_redact_text(f"JSON: {error}", secret)),
                 [],
             )
         answers, unmatched = self._answers_from_payload(payload, cases, secret)
         return self._exchange(request_body, payload, secret), answers, unmatched
+
+    @staticmethod
+    def _error_record(reason: str, status: int | None = None) -> dict:
+        """The explicit record for a failed batch: never a null response.
+
+        Persisted call records carry what was received; a batch that never
+        got a payload records the reason it failed and the HTTP status
+        when there was one.
+        """
+        return {"error": reason, "status": status}
 
     def _answers_from_payload(
         self, payload: object, cases: Sequence[DecisionCase], secret: str

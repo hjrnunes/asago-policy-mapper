@@ -570,6 +570,152 @@ def test_prefilter_request_and_responses_tolerate_a_missing_exchange_attribute(m
     assert "responses" not in dumped
 
 
+def _run_extraction_with_http_assessor(endpoint, handler, mock_config, tmp_path, monkeypatch, threshold=0.10):
+    """Run one extraction with a real HTTP probability assessor over a mock transport."""
+    import httpx
+
+    from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
+    from asago_policy_mapper.extract.gates import ThresholdDrop
+
+    assessor = HttpProbabilityAssessor(endpoint, transport=httpx.MockTransport(handler))
+    return _run_extraction_with_assessor(
+        assessor, mock_config, tmp_path, monkeypatch, rule=ThresholdDrop(assessor, threshold)
+    )
+
+
+def test_prefilter_generic_serialization_success(mock_config, tmp_path, monkeypatch):
+    """A generic HTTP provider run records both request and response bodies.
+
+    The pilot readouts need the response payload persisted; a successful
+    run's call record carries the exact request body and the decoded
+    response, with no credential in the serialized result.
+    """
+    import json
+
+    import httpx
+
+    from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+    endpoint = ProbabilityEndpoint(
+        base_url="http://localhost:9100/v1", model="prob-model", api_key_env="PREFILTER_TEST_KEY"
+    )
+    monkeypatch.setenv("PREFILTER_TEST_KEY", "secret-value-123")
+
+    def echo_handler(request):
+        body = json.loads(request.content)
+        return httpx.Response(200, json={"scores": [{"id": i["id"], "p": 0.5} for i in body["items"]]})
+
+    result = _run_extraction_with_http_assessor(
+        endpoint, echo_handler, mock_config, tmp_path, monkeypatch, threshold=0.10
+    )
+
+    assert len(result.decision_calls) >= 1
+    call = result.decision_calls[0]
+    request = call.request
+    assert isinstance(request, list) and len(request) >= 1
+    assert request[0]["items"][0]["id"] == "R-001"
+    responses = call.responses
+    assert isinstance(responses, list) and len(responses) == len(request)
+    assert responses[0]["scores"][0]["id"] == "R-001"
+    assert responses[0]["scores"][0]["p"] == 0.5
+    # The serialized result carries the responses and no credential.
+    dumped = json.dumps(result.model_dump())
+    assert "secret-value-123" not in dumped
+    assert '"responses"' in dumped
+
+
+def test_prefilter_generic_serialization_failure(mock_config, tmp_path, monkeypatch):
+    """A failed generic batch records an explicit error object, not null."""
+    import httpx
+
+    from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+    endpoint = ProbabilityEndpoint(
+        base_url="http://localhost:9100/v1", model="prob-model", api_key_env="PREFILTER_TEST_KEY"
+    )
+    result = _run_extraction_with_http_assessor(
+        endpoint,
+        lambda request: httpx.Response(500, json={"e": 1}),
+        mock_config,
+        tmp_path,
+        monkeypatch,
+        threshold=0.10,
+    )
+
+    assert len(result.decision_calls) >= 1
+    call = result.decision_calls[0]
+    responses = call.responses
+    assert all(r == {"error": "error", "status": 500} for r in responses)
+    # The serialized record carries the error object; nothing is null.
+    dumped = json.dumps(call.model_dump())
+    assert '"responses"' in dumped
+    assert "null" not in dumped.split('"responses"')[1][:80]
+
+
+@pytest.mark.xfail(strict=True, reason="the generic adapter's unmatched-id redaction lands with the #4 fixes")
+def test_prefilter_generic_echoed_key_absent_from_serialized_result(mock_config, tmp_path, monkeypatch):
+    """An endpoint echoing the credential as an id must not reach the output.
+
+    The unmatched-ids path reads ids from the response payload; until the
+    generic adapter redacts unmatched ids the same way it redacts the
+    response, a hostile echo keyed by the secret lands in the serialized
+    result. This test pins the fixed behavior; it goes green when the
+    adapter fix lands.
+    """
+    import httpx
+
+    from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint
+
+    endpoint = ProbabilityEndpoint(
+        base_url="http://localhost:9100/v1", model="prob-model", api_key_env="PREFILTER_TEST_KEY"
+    )
+    monkeypatch.setenv("PREFILTER_TEST_KEY", "secret-value-123")
+
+    def echo_handler(request):
+        return httpx.Response(
+            200,
+            json={"scores": [{"id": "secret-value-123", "p": 0.5}]},
+        )
+
+    result = _run_extraction_with_http_assessor(
+        endpoint, echo_handler, mock_config, tmp_path, monkeypatch, threshold=0.10
+    )
+
+    dumped = json.dumps(result.model_dump())
+    assert "secret-value-123" not in dumped
+
+
+@pytest.mark.xfail(strict=True, reason="the Jev adapter's unmatched-id redaction lands with the #7 fixes")
+def test_prefilter_jev_echoed_key_absent_from_serialized_result(mock_config, tmp_path, monkeypatch):
+    """A Jev response echoing the credential as a question id must not reach the output.
+
+    Same contract as the generic arm: ids the pipeline did not ask for
+    (unmatched) must not carry the credential into the serialized result.
+    This test pins the fixed behavior; it goes green when the Jev
+    adapter's unmatched-id redaction lands.
+    """
+    import httpx
+
+    from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
+    from asago_policy_mapper.extract.gates import ThresholdDrop
+
+    monkeypatch.setenv("PREFILTER_JEV_TEST_KEY", "secret-value-123")
+    endpoint = JevProbabilityEndpoint(base_url="http://localhost:9100/v1", api_key_env="PREFILTER_JEV_TEST_KEY")
+
+    def echo_handler(request):
+        return httpx.Response(
+            200, json={"model": "jev", "answers": {"secret-value-123": {"type": "noul", "noul": 0.5}}}
+        )
+
+    assessor = JevProbabilityAssessor(endpoint, transport=httpx.MockTransport(echo_handler))
+    result = _run_extraction_with_assessor(
+        assessor, mock_config, tmp_path, monkeypatch, rule=ThresholdDrop(assessor, 0.10)
+    )
+
+    dumped = json.dumps(result.model_dump())
+    assert "secret-value-123" not in dumped
+
+
 def test_prefilter_drops_at_0_10_keeps_above(mock_config, tmp_path, monkeypatch):
     """p <= 0.10 drops before grounding; p > 0.10 is grounded."""
     from asago_policy_mapper.extract import pipeline

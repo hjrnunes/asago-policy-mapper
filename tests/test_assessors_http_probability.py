@@ -477,7 +477,11 @@ def test_no_authorization_header_when_env_unset(monkeypatch):
 
 
 def test_wire_keeps_request_on_timeout_and_error(monkeypatch):
-    """Timeout and error batches still record the request body in the wire."""
+    """Timeout and error batches record the request and an explicit error object.
+
+    A persisted ``null`` response says nothing; the error object carries
+    the reason and, for HTTP statuses, the status code.
+    """
     from tests.test_assessors_http_probability import _hang_handler
 
     endpoint = ProbabilityEndpoint(
@@ -486,7 +490,7 @@ def test_wire_keeps_request_on_timeout_and_error(monkeypatch):
     assessor = HttpProbabilityAssessor(endpoint, transport=httpx.MockTransport(_hang_handler))
     batch = assessor.assess(QUESTION, "context", _cases("R-001"))
     assert batch.exchange["requests"][0]["items"] == [{"id": "R-001", "text": "Risk R-001: Description for R-001."}]
-    assert batch.exchange["responses"] == [None]
+    assert batch.exchange["responses"] == [{"error": "timeout", "status": None}]
 
     def error_handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
@@ -494,14 +498,28 @@ def test_wire_keeps_request_on_timeout_and_error(monkeypatch):
     assessor = HttpProbabilityAssessor(endpoint, transport=httpx.MockTransport(error_handler))
     batch = assessor.assess(QUESTION, "context", _cases("R-001"))
     assert batch.exchange["requests"][0]["context"] == "context"
-    assert batch.exchange["responses"] == [None]
+    assert batch.exchange["responses"] == [{"error": "error", "status": None}]
 
-    # A non-2xx status is the other "error" path; it also keeps the request.
+    # A non-2xx status is the other "error" path; the error object carries
+    # the status so a run can tell a 401 from a 503, and the batch's
+    # outcomes read the error reason.
     assessor = HttpProbabilityAssessor(
         endpoint, transport=httpx.MockTransport(lambda request: httpx.Response(503, json={"e": 1}))
     )
     batch = assessor.assess(QUESTION, "context", _cases("R-001"))
     assert batch.exchange["requests"][0]["context"] == "context"
+    assert batch.exchange["responses"] == [{"error": "error", "status": 503}]
+    assert batch.answers["R-001"][0].reason == "error"
+
+    # A 200 whose body is not JSON is the ValueError path; it records the
+    # request and the same error object.
+    assessor = HttpProbabilityAssessor(
+        endpoint, transport=httpx.MockTransport(lambda request: httpx.Response(200, text="<html>not json</html>"))
+    )
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+    assert batch.exchange["requests"][0]["context"] == "context"
+    assert batch.exchange["responses"] == [{"error": "error", "status": 200}]
+    assert batch.answers["R-001"][0].reason == "error"
 
 
 def test_wire_keeps_request_and_response_on_non_object_payload():

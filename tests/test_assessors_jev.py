@@ -409,7 +409,7 @@ def test_timeout_is_unavailable_timeout():
     batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
 
     assert batch.answers["R-001"][0].reason == "timeout"
-    assert batch.exchange["responses"] == [None]
+    assert batch.exchange["responses"] == [{"error": "timeout", "status": None}]
 
 
 def test_transport_error_is_unavailable_error():
@@ -423,7 +423,7 @@ def test_transport_error_is_unavailable_error():
     batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
 
     assert batch.answers["R-001"][0].reason == "error"
-    assert batch.exchange["responses"] == [None]
+    assert batch.exchange["responses"] == [{"error": "error", "status": None}]
 
 
 def test_http_error_status_is_unavailable_error():
@@ -434,7 +434,7 @@ def test_http_error_status_is_unavailable_error():
         batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
 
         assert batch.answers["R-001"][0].reason == "error", status
-        assert batch.exchange["responses"] == [None], status
+        assert batch.exchange["responses"] == [{"error": "error", "status": status}], status
 
 
 def test_wire_excludes_api_key(monkeypatch):
@@ -679,7 +679,7 @@ def test_metadata_fields_sent_uses_the_assessor_declaration():
 
 
 def test_wire_keeps_request_on_timeout_and_error():
-    """Timeout and error batches still record the exact Jev request body in the wire."""
+    """Timeout and error batches record the Jev request and an explicit error object."""
     endpoint = _endpoint(timeout_s=0.05)
 
     def hang_handler(request: httpx.Request) -> httpx.Response:
@@ -688,7 +688,7 @@ def test_wire_keeps_request_on_timeout_and_error():
     assessor = JevProbabilityAssessor(endpoint, transport=httpx.MockTransport(hang_handler))
     batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
     assert batch.exchange["requests"][0]["questions"]["R-001"]["type"] == "noul"
-    assert batch.exchange["responses"] == [None]
+    assert batch.exchange["responses"] == [{"error": "timeout", "status": None}]
 
     def error_handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
@@ -696,7 +696,7 @@ def test_wire_keeps_request_on_timeout_and_error():
     assessor = JevProbabilityAssessor(endpoint, transport=httpx.MockTransport(error_handler))
     batch = assessor.assess(QUESTION_V1, "context", _cases("R-001"))
     assert batch.exchange["requests"][0]["questions"]["R-001"]["type"] == "noul"
-    assert batch.exchange["responses"] == [None]
+    assert batch.exchange["responses"] == [{"error": "error", "status": None}]
 
 
 def test_batches_respect_max_batch():
