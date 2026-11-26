@@ -296,40 +296,40 @@ def test_retrieve_chunk_no_cross_encoder():
     assert len(cr.borderline_judged) == 0
     assert cr.stats["auto_accepted"] == 2
     assert cr.stats["borderline"] == 0
-    assert cr.stats["rerank_unavailable"] == 0
+    assert cr.stats["rerank_unscored"] == 0
     mock_index.hybrid_search.assert_called_once()
     call_kwargs = mock_index.hybrid_search.call_args
     assert call_kwargs[1]["rrf_min_score"] == 0.01
 
 
-def test_retrieve_chunk_records_rerank_unavailable():
-    """retrieve_chunk reports the chunk's own unscored count as rerank_unavailable.
+def test_retrieve_chunk_records_rerank_unscored():
+    """retrieve_chunk reports the chunk's own unscored count as rerank_unscored.
 
     The index counter is cumulative across searches, so the chunk stat is the
     delta across this chunk's hybrid_search call.
     """
 
     class _CountingIndex:
-        rerank_unavailable = 0
+        rerank_unscored = 0
 
         def hybrid_search(self, *args, **kwargs):
             # Two candidates went unscored during this chunk's search.
-            self.rerank_unavailable += 2
+            self.rerank_unscored += 2
             return [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9)]
 
     chunks = [Chunk(text="Test chunk about AI risks.", source="a.pdf", index=0)]
 
     cr = retrieve_chunk(chunks, 0, _CountingIndex())
 
-    assert cr.stats["rerank_unavailable"] == 2
+    assert cr.stats["rerank_unscored"] == 2
 
 
-def test_retrieve_chunk_rerank_unavailable_is_per_search_delta():
+def test_retrieve_chunk_rerank_unscored_is_per_search_delta():
     """A chunk searched after earlier searches reports only its own unscored count."""
 
     class _CountingIndex:
         def __init__(self):
-            self.rerank_unavailable = 5  # unscored in earlier searches
+            self.rerank_unscored = 5  # unscored in earlier searches
 
         def hybrid_search(self, *args, **kwargs):
             return [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.9)]
@@ -338,11 +338,11 @@ def test_retrieve_chunk_rerank_unavailable_is_per_search_delta():
 
     cr = retrieve_chunk(chunks, 0, _CountingIndex())
 
-    assert cr.stats["rerank_unavailable"] == 0
+    assert cr.stats["rerank_unscored"] == 0
 
 
-def test_retrieve_chunk_rerank_unavailable_defaults_to_zero():
-    """Indexes without a rerank_unavailable attribute report zero."""
+def test_retrieve_chunk_rerank_unscored_defaults_to_zero():
+    """Indexes without a rerank_unscored attribute report zero."""
     from types import SimpleNamespace as _NS
 
     index = _NS(hybrid_search=lambda *a, **k: [ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a")])
@@ -350,37 +350,37 @@ def test_retrieve_chunk_rerank_unavailable_defaults_to_zero():
 
     cr = retrieve_chunk(chunks, 0, index)
 
-    assert cr.stats["rerank_unavailable"] == 0
+    assert cr.stats["rerank_unscored"] == 0
 
 
-def test_count_unavailable_reads_int_counter():
+def test_count_unscored_reads_int_counter():
     """The helper returns the index counter verbatim when it is an int."""
-    from asago_policy_mapper.extract.retrieve import _count_unavailable
+    from asago_policy_mapper.extract.retrieve import _count_unscored
 
     class _Idx:
-        rerank_unavailable = 4
+        rerank_unscored = 4
 
-    assert _count_unavailable(_Idx()) == 4
+    assert _count_unscored(_Idx()) == 4
 
 
-def test_count_unavailable_missing_attribute_is_zero():
+def test_count_unscored_missing_attribute_is_zero():
     """No counter attribute reads as zero, whatever the getattr default mutates to."""
-    from asago_policy_mapper.extract.retrieve import _count_unavailable
+    from asago_policy_mapper.extract.retrieve import _count_unscored
 
     class _Idx:
         pass
 
-    assert _count_unavailable(_Idx()) == 0
+    assert _count_unscored(_Idx()) == 0
 
 
-def test_count_unavailable_non_int_is_zero():
+def test_count_unscored_non_int_is_zero():
     """Mock-style counters (auto-attributes) read as zero, not as a count."""
-    from asago_policy_mapper.extract.retrieve import _count_unavailable
+    from asago_policy_mapper.extract.retrieve import _count_unscored
 
     class _Idx:
-        rerank_unavailable = "not-an-int"
+        rerank_unscored = "not-an-int"
 
-    assert _count_unavailable(_Idx()) == 0
+    assert _count_unscored(_Idx()) == 0
 
 
 # --- classify_by_rank / classify_by_threshold direct tests ---
@@ -518,10 +518,10 @@ class _UnscoringIndex:
     """hybrid_search returns a ranked list with unscored (NaN) candidates last."""
 
     def __init__(self):
-        self.rerank_unavailable = 0
+        self.rerank_unscored = 0
 
     def hybrid_search(self, *args, **kwargs):
-        self.rerank_unavailable += 1
+        self.rerank_unscored += 1
         return [
             ScoredCandidate(risk_id="R-001", risk_name="A", risk_description="a", cross_encoder_score=0.95),
             ScoredCandidate(
@@ -543,7 +543,7 @@ def test_retrieve_chunk_routes_unscored_to_borderline():
 
     assert [c.risk_id for c in cr.accepted] == ["R-001"]
     assert [c.risk_id for c in cr.borderline] == ["R-002", "R-NAN"]
-    assert cr.stats["rerank_unavailable"] == 1
+    assert cr.stats["rerank_unscored"] == 1
     assert cr.stats["bm25_rescued"] == 0
 
 

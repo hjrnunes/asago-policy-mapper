@@ -1181,7 +1181,7 @@ def _build_chunk_summaries(chunk_results, chunks) -> list[ChunkSummary]:
             borderline=cr.stats.get("borderline", 0),
             discarded=cr.stats.get("discarded", 0),
             bm25_rescued=cr.stats.get("bm25_rescued", 0),
-            rerank_unavailable=cr.stats.get("rerank_unavailable", 0),
+            rerank_unscored=cr.stats.get("rerank_unscored", 0),
         )
         for cr in chunk_results
     ]

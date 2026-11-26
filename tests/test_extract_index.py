@@ -187,7 +187,7 @@ def test_rerank_counts_unscored(monkeypatch, caplog):
         reranked = index.rerank("query", candidates, top_k=4)
 
     assert [c.risk_id for c in reranked] == ["R-B", "R-D", "R-A", "R-C"]
-    assert index.rerank_unavailable == 2
+    assert index.rerank_unscored == 2
     skip_warnings = [r.getMessage() for r in caplog.records if "unscored" in r.getMessage()]
     assert skip_warnings == ["Candidate R-A unscored by reranker", "Candidate R-C unscored by reranker"]
 
@@ -211,7 +211,7 @@ def test_rerank_majority_unscored_raises(monkeypatch, caplog):
 
     # The count and warnings land before the raise, so the failure is
     # observable in the run's diagnostics.
-    assert index.rerank_unavailable == 3
+    assert index.rerank_unscored == 3
     skip_warnings = [r for r in caplog.records if "unscored by reranker" in r.message]
     assert len(skip_warnings) == 3
 
@@ -229,15 +229,15 @@ def test_rerank_half_unscored_does_not_raise(monkeypatch):
     reranked = index.rerank("query", candidates, top_k=4)
 
     assert [c.risk_id for c in reranked] == ["R-B", "R-D", "R-A", "R-C"]
-    assert index.rerank_unavailable == 2
+    assert index.rerank_unscored == 2
 
 
-def test_rerank_unavailable_counter_starts_at_zero():
+def test_rerank_unscored_counter_starts_at_zero():
     index = RiskIndex([])
-    assert index.rerank_unavailable == 0
+    assert index.rerank_unscored == 0
 
 
-def test_rerank_unavailable_accumulates_across_calls(monkeypatch):
+def test_rerank_unscored_accumulates_across_calls(monkeypatch):
     """The counter accumulates across rerank calls, not resets per call."""
     index = _index_with_predict(monkeypatch, [float("nan"), 0.9])
     candidates = [
@@ -248,7 +248,7 @@ def test_rerank_unavailable_accumulates_across_calls(monkeypatch):
     index.rerank("query one", candidates, top_k=2)
     index.rerank("query two", candidates, top_k=2)
 
-    assert index.rerank_unavailable == 2
+    assert index.rerank_unscored == 2
 
 
 @pytest.mark.slow
