@@ -7,8 +7,8 @@ from ``answers[qid].noul``. This module maps the seam's ``{context,
 cases}`` input onto one in-process ``agent.predict(state, questions)``
 call per batch and reads each answer's ``noul`` back as the probability.
 
-This is NOT an ``HttpProbabilityAssessor`` subclass: there is no exchange, no
-transport and no client lifecycle. The seam semantics are mirrored
+This is NOT an ``HttpProbabilityAssessor`` subclass: there is no exchange,
+no transport and no client lifecycle. The seam semantics are mirrored
 directly — ``NoAnswer("error")`` for laya exceptions (fail-open),
 ``NoAnswer("invalid")`` for unreadable answers, ``NoAnswer("missing")``
 for questions the result omitted, unmatched ids for extras — and the
@@ -29,11 +29,11 @@ forward pass's question count (and so per-pass latency), not to buy state
 room.
 
 **Dependency.** laya-mlx is installed ad hoc into the venv
-(``VIRTUAL_ENV=<venv> uv pip install laya-mlx``) and never enters
-``pyproject.toml`` or ``uv.lock`` — the mutmut precedent. It is imported
-lazily inside the constructor (like httpx in the HTTP adapters), so
-imports of this module never require the install; ``uv sync`` removes it,
-so reinstall after syncing.
+(``VIRTUAL_ENV=<venv> UV_NO_CONFIG=1 uv pip install laya-mlx``) and never
+enters ``pyproject.toml`` or ``uv.lock`` — the mutmut precedent. It is
+imported lazily inside the constructor (like httpx in the HTTP adapters),
+so imports of this module never require the install; ``uv sync`` removes
+it, so reinstall after syncing.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from asago_policy_mapper.assessors.http_probability import ProbabilityEndpoint, _as_float
+from asago_policy_mapper.assessors.replay import context_sha256
 from asago_policy_mapper.extract.screening import (
     Answer,
     AnswerBatch,
@@ -75,7 +76,7 @@ not shrink with fewer questions per pass."""
 
 _LAYA_INSTALL_HINT = (
     "laya-mlx is an ad-hoc, out-of-band install (never in pyproject/uv.lock); "
-    "reinstall with: VIRTUAL_ENV=<venv> uv pip install laya-mlx"
+    "reinstall with: VIRTUAL_ENV=<venv> UV_NO_CONFIG=1 uv pip install laya-mlx"
 )
 
 
@@ -106,6 +107,11 @@ class LayaProbabilityAssessor(Assessor):
     """
 
     answer_types = frozenset({ProbabilityAnswer})
+    fields_sent = ("chunk_context", "question", "criterion", "risk_name", "risk_description")
+    """What a predict call actually carries: the state (the chunk context)
+    plus each question's instructions (the question's criterion and the
+    risk's name and description). Declared so metadata.prefilter reports
+    the real exchange, not the generic default."""
 
     def __init__(self, endpoint: LayaProbabilityEndpoint, agent=None):
         try:
@@ -127,7 +133,9 @@ class LayaProbabilityAssessor(Assessor):
 
     def assess(self, question: Question, context: str, cases: Sequence[DecisionCase]) -> AnswerBatch:
         if not cases:
-            return AnswerBatch(answers={}, unmatched_ids=(), latency_ms=0.0, exchange=_EMPTY_EXCHANGE.copy())
+            # Built inline, never shared: a caller mutating one result's
+            # lists must not change what a later assessment records.
+            return AnswerBatch(answers={}, unmatched_ids=(), latency_ms=0.0, exchange={"requests": [], "responses": []})
         answers: dict[str, tuple[Answer, ...]] = {}
         unmatched: list[str] = []
         exchanges: list[dict] = []
@@ -145,6 +153,12 @@ class LayaProbabilityAssessor(Assessor):
             answers=answers,
             unmatched_ids=tuple(unmatched),
             latency_ms=latency_ms,
+            # A real forward pass produced each batch's latency, the same
+            # measured thing the HTTP arm reports; the flag lets latency
+            # consumers treat both arms alike. The empty-cases path above
+            # keeps the default False: no pass ran, so there is nothing
+            # measured to report.
+            latency_recorded=True,
             exchange={"requests": [w["request"] for w in exchanges], "responses": [w["response"] for w in exchanges]},
         )
 
@@ -176,17 +190,27 @@ class LayaProbabilityAssessor(Assessor):
         self, question: Question, context: str, cases: Sequence[DecisionCase]
     ) -> tuple[dict, dict[str, Answer], list[str]]:
         questions = {c.risk_id: self._question(question, c) for c in cases}
+        # The state is not recorded verbatim (it is the whole chunk context);
+        # its digest and length let a run match the recorded request against
+        # the grounding context it filtered, the same key replay uses.
         request_body = {
             "model": self.endpoint.model,
+            "state_sha256": context_sha256(context),
             "state_chars": len(context),
+            "summary": True,
             "questions": questions,
         }
         try:
             result = self._agent.predict(context, questions)
         except (KeyboardInterrupt, SystemExit):
             raise
-        except Exception:
-            return {"request": request_body, "response": None}, self._mark_all(cases, "error"), []
+        except Exception as e:
+            error_record = {"error": "error", "status": None, "detail": str(e)}
+            return (
+                {"request": request_body, "response": error_record},
+                self._mark_all(cases, "error", detail=str(e)),
+                [],
+            )
         answers, unmatched = self._answers_from_result(result, cases)
         return {"request": request_body, "response": _plain_scalars(result)}, answers, unmatched
 
@@ -232,8 +256,8 @@ class LayaProbabilityAssessor(Assessor):
         matched.update(missing)
         return matched, unmatched
 
-    def _mark_all(self, cases: Sequence[DecisionCase], reason) -> dict[str, Answer]:
-        return {c.risk_id: NoAnswer(reason) for c in cases}
+    def _mark_all(self, cases: Sequence[DecisionCase], reason, detail: str = "") -> dict[str, Answer]:
+        return {c.risk_id: NoAnswer(reason, detail) for c in cases}
 
 
 def _noul_probability(answer: object) -> float | None:
@@ -280,7 +304,3 @@ def _plain_scalars(value: object) -> object:
     if isinstance(value, list):
         return [_plain_scalars(item) for item in value]
     return _plain_scalar(value)
-
-
-_EMPTY_EXCHANGE: dict = {"requests": [], "responses": []}
-"""Wire for an assessment with no cases: nothing was asked or answered."""
