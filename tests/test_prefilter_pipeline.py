@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from asago_policy_mapper.extract.models import DecisionCallRecord, RetrievalConfig, ScoredCandidate
-from asago_policy_mapper.extract.pipeline import Prefilter, run_extraction
+from asago_policy_mapper.extract.pipeline import GroundingPrefilter, run_extraction
 from asago_policy_mapper.extract.screening import (
     Answer,
     AnswerBatch,
@@ -116,8 +116,8 @@ class ThresholdRule:
         return decisions
 
 
-def _prefilter(script: dict[str, Answer], threshold: float = 0.10) -> Prefilter:
-    return Prefilter(assessor=ScriptedAssessor(script), rule=ThresholdRule(threshold))
+def _prefilter(script: dict[str, Answer], threshold: float = 0.10) -> GroundingPrefilter:
+    return GroundingPrefilter(assessor=ScriptedAssessor(script), rule=ThresholdRule(threshold))
 
 
 @pytest.fixture
@@ -303,7 +303,7 @@ def test_prefilter_records_wire_requests_when_assessor_batches(mock_config, tmp_
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=BatchingAssessor({}), rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=BatchingAssessor({}), rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -591,7 +591,7 @@ def test_prefilter_drops_variant_group_together(mock_config, tmp_path, monkeypat
         config=mock_config,
         risks=VARIANT_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -779,7 +779,7 @@ def test_prefilter_skips_chunks_without_accepted_candidates(mock_config, tmp_pat
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -830,7 +830,7 @@ def test_metadata_records_offsite_and_fields(mock_config, tmp_path, monkeypatch)
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule(0.10)),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=ThresholdRule(0.10)),
         ocr=False,
     )
 
@@ -888,7 +888,7 @@ def test_prefilter_metadata_defaults_for_local_assessors(mock_config, tmp_path, 
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=ScriptedAssessor({}), rule=rule),
+        prefilter=GroundingPrefilter(assessor=ScriptedAssessor({}), rule=rule),
         ocr=False,
     )
 
@@ -936,7 +936,7 @@ def test_prefilter_cases_carry_name_and_description(mock_config, tmp_path, monke
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -975,7 +975,7 @@ def test_prefilter_assessor_sees_the_probability_task(mock_config, tmp_path, mon
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -1036,7 +1036,7 @@ def test_prefilter_sends_the_chunk_context_the_grounder_sees(mock_config, tmp_pa
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -1105,7 +1105,7 @@ def test_prefilter_assesses_every_chunk_until_the_end(mock_config, tmp_path, mon
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -1278,7 +1278,7 @@ def test_prefilter_request_synthesizes_through_assessor_builder(mock_config, tmp
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=BuilderAssessor({}), rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=BuilderAssessor({}), rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -1609,7 +1609,7 @@ def test_prefilter_unmatched_ids_and_latency_recorded(mock_config, tmp_path, mon
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=UnmatchedAssessor({}), rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=UnmatchedAssessor({}), rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -1663,7 +1663,7 @@ def test_prefilter_drop_with_no_outcomes_records_empty_payload(mock_config, tmp_
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=EmptyAssessor({}), rule=DropEverythingRule()),
+        prefilter=GroundingPrefilter(assessor=EmptyAssessor({}), rule=DropEverythingRule()),
         ocr=False,
     )
 
@@ -1720,7 +1720,7 @@ def test_prefilter_dropped_score_takes_max_probability(mock_config, tmp_path, mo
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=MultiAnswerAssessor({}), rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=MultiAnswerAssessor({}), rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -1759,7 +1759,7 @@ def test_prefilter_offsite_without_endpoint_is_none_host(mock_config, tmp_path, 
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -1800,7 +1800,7 @@ def test_prefilter_endpoint_host_ignores_non_string_base_url(mock_config, tmp_pa
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=assessor, rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=assessor, rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -1847,7 +1847,7 @@ def test_prefilter_rule_without_rule_id_records_empty(mock_config, tmp_path, mon
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=ScriptedAssessor({}), rule=NoIdRule()),
+        prefilter=GroundingPrefilter(assessor=ScriptedAssessor({}), rule=NoIdRule()),
         ocr=False,
     )
 
@@ -1887,7 +1887,7 @@ def test_prefilter_assessor_without_optional_attributes_records_defaults(mock_co
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=bare, rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=bare, rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -1991,7 +1991,7 @@ def test_prefilter_one_chunk_copy_keeps_page_and_section():
 
     import asago_policy_mapper.extract.pipeline as pl
 
-    prefilter = Prefilter(assessor=ScriptedAssessor({"R-001": ProbabilityAnswer(0.01)}), rule=ThresholdRule())
+    prefilter = GroundingPrefilter(assessor=ScriptedAssessor({"R-001": ProbabilityAnswer(0.01)}), rule=ThresholdRule())
     copy, drops, call = pl._prefilter_one_chunk(
         cr, "ctx", prefilter, _Index(), _NS(no_judge=True, use_cross_encoder=True)
     )
@@ -2300,7 +2300,7 @@ def test_prefilter_assessor_exception_keeps_everything(mock_config, tmp_path, mo
             config=mock_config,
             risks=MOCK_RISKS,
             retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-            prefilter=Prefilter(assessor=ExplodingAssessor({}), rule=ThresholdRule()),
+            prefilter=GroundingPrefilter(assessor=ExplodingAssessor({}), rule=ThresholdRule()),
             ocr=False,
         )
 
@@ -2372,7 +2372,7 @@ def test_prefilter_assessor_exception_survives_serialization(mock_config, tmp_pa
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=ExplodingAssessor({}), rule=ThresholdRule()),
+        prefilter=GroundingPrefilter(assessor=ExplodingAssessor({}), rule=ThresholdRule()),
         ocr=False,
     )
 
@@ -2442,7 +2442,7 @@ def test_prefilter_rule_returning_no_decisions_keeps_everything(mock_config, tmp
         config=mock_config,
         risks=MOCK_RISKS,
         retrieval=RetrievalConfig(query_gen=False, no_judge=True),
-        prefilter=Prefilter(assessor=ScriptedAssessor({"R-001": ProbabilityAnswer(0.01)}), rule=EmptyRule()),
+        prefilter=GroundingPrefilter(assessor=ScriptedAssessor({"R-001": ProbabilityAnswer(0.01)}), rule=EmptyRule()),
         ocr=False,
     )
 
@@ -2500,7 +2500,7 @@ def test_prefilter_real_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
     )
     assessor = HttpProbabilityAssessor(endpoint, transport=transport)
     rule = DropThreshold(assessor, 0.10)
-    prefilter = Prefilter(assessor=assessor, rule=rule)
+    prefilter = GroundingPrefilter(assessor=assessor, rule=rule)
 
     grounded_ids: list[str] = []
 

@@ -81,7 +81,7 @@ _PREFILTER_FIELDS_SENT = ["chunk_context", "risk_name", "risk_description"]
 
 
 @dataclass(frozen=True)
-class Prefilter:
+class GroundingPrefilter:
     """The opt-in pre-grounding filter: an assessor plus a keep/drop rule.
 
     ``assessor`` is any ``Assessor`` that emits ``ProbabilityAnswer``
@@ -1158,7 +1158,7 @@ def _prefilter_one_chunk(
         # contract assigns that defense to the boundary, not here.
         detail = str(e) or type(e).__name__
         logger.warning(
-            "Prefilter assessor %s failed on chunk %s; keeping all candidates: %s: %s",
+            "GroundingPrefilter assessor %s failed on chunk %s; keeping all candidates: %s: %s",
             getattr(prefilter.assessor, "assessor_id", "<unknown>"),
             cr.chunk_index,
             type(e).__name__,
@@ -1222,7 +1222,7 @@ def _prefilter_one_chunk(
 def _run_prefilter_stage(
     chunk_results: list[ChunkResult],
     chunk_contexts: list[str],
-    prefilter: Prefilter,
+    prefilter: GroundingPrefilter,
     index,
     retrieval,
     chunks=(),
@@ -1267,7 +1267,7 @@ def _assessor_endpoint_host(assessor) -> str | None:
     return None
 
 
-def _prefilter_metadata(prefilter: Prefilter) -> dict:
+def _prefilter_metadata(prefilter: GroundingPrefilter) -> dict:
     """The metadata.prefilter block recorded when the filter is on."""
     assessor = prefilter.assessor
     rule = prefilter.rule
@@ -1479,7 +1479,7 @@ def run_extraction(
     retrieval: RetrievalConfig | None = None,
     *,
     ocr: bool = False,
-    prefilter: Prefilter | None = None,
+    prefilter: GroundingPrefilter | None = None,
 ) -> ExtractionResult:
     retrieval = retrieval or RetrievalConfig()
     if prefilter is not None and retrieval.no_grounding:

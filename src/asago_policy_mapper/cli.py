@@ -305,7 +305,7 @@ def _require_endpoint_api_key(api_key_env: str, base_url: str, label: str) -> No
 
 
 def _build_prefilter(profile_path):
-    """Load a prefilter profile YAML into the pipeline's ``Prefilter``.
+    """Load a prefilter profile YAML into the pipeline's ``GroundingPrefilter``.
 
     The profile carries the ``ProbabilityEndpoint`` fields plus
     ``threshold``; the API key itself comes from the environment variable
@@ -327,7 +327,7 @@ def _build_prefilter(profile_path):
 
     try:
         from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor, ProbabilityEndpoint
-        from asago_policy_mapper.extract.pipeline import Prefilter
+        from asago_policy_mapper.extract.pipeline import GroundingPrefilter
         from asago_policy_mapper.extract.screening import DropThreshold
     except ImportError as e:
         _fail_validation(f"--prefilter-profile could not import its stack: {e}")
@@ -344,7 +344,7 @@ def _build_prefilter(profile_path):
             f"--prefilter-profile needs the decision extra (httpx); install with: uv sync --extra decision ({e})"
         )
     rule = DropThreshold(assessor, threshold)
-    return Prefilter(assessor=assessor, rule=rule)
+    return GroundingPrefilter(assessor=assessor, rule=rule)
 
 
 def _build_retrieval_config(
