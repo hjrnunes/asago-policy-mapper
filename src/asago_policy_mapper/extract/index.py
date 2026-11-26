@@ -390,19 +390,6 @@ def _rerank_pairs(is_nli: bool, text: str, candidates: list[ScoredCandidate]) ->
     return [(f"{c.risk_name}: {c.risk_description}", text) for c in candidates]
 
 
-def _scored_candidates(candidates: list[ScoredCandidate], scores: np.ndarray, top_k: int) -> list[ScoredCandidate]:
-    """Attach scores to the top-k candidates, skipping non-finite ones."""
-    scored = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
-    results = []
-    for c, score in scored[:top_k]:
-        s = float(score)
-        if np.isnan(s) or np.isinf(s):
-            logger.warning("Skipping candidate %s with invalid score", c.risk_id)
-            continue
-        results.append(c.model_copy(update={"cross_encoder_score": s}))
-    return results
-
-
 def _measured_scores(candidates: list[ScoredCandidate], scores: np.ndarray) -> dict[str, float]:
     """Map every candidate id the reranker scored to its measured score.
 
@@ -596,6 +583,57 @@ def _load_encoders(
         is_nli=self._is_nli,
         apply_sigmoid=self._apply_sigmoid,
     )
+
+
+def _partition_scored(
+    candidates: list[ScoredCandidate], scores: np.ndarray
+) -> tuple[list[tuple[ScoredCandidate, float]], list[ScoredCandidate]]:
+    """Split candidates into (scored, unscored) by finite score.
+
+    Nonfinite scores (NaN = reranker gave no answer) must not consume a
+    top_k slot: partition them out before sorting, or the NaN would
+    displace a valid low-ranked candidate from the selection. Unscored
+    candidates stay in the returned list, after every scored one, so the
+    selection path can route them to the judge instead of dropping them.
+    """
+    finite_scored = []
+    unscored = []
+    for c, score in zip(candidates, scores):
+        if np.isfinite(score):
+            finite_scored.append((c, score))
+        else:
+            logger.warning("Candidate %s unscored by reranker", c.risk_id)
+            unscored.append(c)
+    return finite_scored, unscored
+
+
+def _reject_majority_unscored(unscored: list[ScoredCandidate], total: int) -> None:
+    """Refuse to rank when the reranker left most candidates unscored."""
+    if len(unscored) > total // 2:
+        # A majority-unscored call means the reranker is broken, not
+        # chatty: refuse to rank on the few scores that remain.
+        raise RuntimeError(
+            f"Reranker left {len(unscored)} of {total} candidates unscored; check the reranker endpoint and model"
+        )
+
+
+def _select_scored(finite_scored: list[tuple[ScoredCandidate, float]], top_k: int) -> list[ScoredCandidate]:
+    """Take the top-k finite-scored candidates, stamping their source."""
+    scored = sorted(finite_scored, key=lambda x: x[1], reverse=True)
+    return [
+        c.model_copy(update={"cross_encoder_score": float(score), "rerank_source": "cross_encoder"})
+        for c, score in scored[:top_k]
+    ]
+
+
+def _mark_unscored(unscored: list[ScoredCandidate]) -> list[ScoredCandidate]:
+    """Carry unscored candidates with the NaN marker and no source stamp.
+
+    The marker keeps them recognizable to the selection path (judge-bound,
+    capped by the borderline rules); the missing ``rerank_source`` reads as
+    "not calculated" at the RiskMatch confidence boundary.
+    """
+    return [c.model_copy(update={"cross_encoder_score": float("nan")}) for c in unscored]
 
 
 class RiskIndex:
@@ -829,39 +867,10 @@ class RiskIndex:
             raw_scores = self._cross_encoder.predict(pairs)
         raw_scores = np.array(raw_scores)
         scores = self._score_normalizer(raw_scores)
-        # Nonfinite scores (NaN = reranker gave no answer) must not consume a
-        # top_k slot: partition them out before sorting, or the NaN would
-        # displace a valid low-ranked candidate from the selection. Unscored
-        # candidates stay in the returned list, after every scored one, so the
-        # selection path can route them to the judge instead of dropping them.
-        finite_scored = []
-        unscored = []
-        for c, score in zip(candidates, scores):
-            if np.isfinite(score):
-                finite_scored.append((c, score))
-            else:
-                self.unscored_count += 1
-                logger.warning("Candidate %s unscored by reranker", c.risk_id)
-                unscored.append(c)
-        if len(unscored) > len(candidates) // 2:
-            # A majority-unscored call means the reranker is broken, not
-            # chatty: refuse to rank on the few scores that remain.
-            raise RuntimeError(
-                f"Reranker left {len(unscored)} of {len(candidates)} candidates unscored; "
-                "check the reranker endpoint and model"
-            )
-        scored = sorted(finite_scored, key=lambda x: x[1], reverse=True)
-        results = []
-        for c, score in scored[:top_k]:
-            results.append(c.model_copy(update={"cross_encoder_score": float(score), "rerank_source": "cross_encoder"}))
-        # Unscored candidates ride along after the scored ones, outside the
-        # top_k cap: the cap bounds the scored selection, while unscored
-        # candidates are judge-bound and capped by the borderline rules.
-        # Their score becomes the NaN marker (no rerank_source: "not
-        # calculated" for the null-confidence boundary) so the selection
-        # path can recognize them.
-        results.extend(c.model_copy(update={"cross_encoder_score": float("nan")}) for c in unscored)
-        return results, _measured_scores(candidates, scores)
+        finite_scored, unscored = _partition_scored(candidates, scores)
+        self.unscored_count += len(unscored)
+        _reject_majority_unscored(unscored, len(candidates))
+        return _select_scored(finite_scored, top_k) + _mark_unscored(unscored), _measured_scores(candidates, scores)
 
     def hybrid_search(
         self,
