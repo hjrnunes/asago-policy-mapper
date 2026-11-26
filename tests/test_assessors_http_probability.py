@@ -969,9 +969,9 @@ def test_escaping_exception_without_secret_keeps_its_identity(monkeypatch):
     original: list[Exception] = []
 
     class _RecordingAssessor(HttpProbabilityAssessor):
-        def _assess_batch(self, context, cases, client, secret):
+        def _assess_batch(self, question, context, cases, client, secret):
             try:
-                return super()._assess_batch(context, cases, client, secret)
+                return super()._assess_batch(question, context, cases, client, secret)
             except ValueError as error:
                 original.append(error)
                 raise
