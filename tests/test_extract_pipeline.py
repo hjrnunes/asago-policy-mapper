@@ -1545,8 +1545,8 @@ def test_consumers_skip_unattributed_spans():
     from asago_policy_mapper.extract.pipeline import _build_chunk_risk_map, _build_found_risk_chunks
 
     m = _match_with_unattributed_evidence()
-
     plan = _judge_plan()  # grounding on: attribute risks through evidence chunks
+
     chunk_risk_ids = _build_chunk_risk_map([], [m], plan)
     assert chunk_risk_ids == {2: ["R-001"]}
 
