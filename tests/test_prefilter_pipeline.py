@@ -2451,3 +2451,124 @@ def test_prefilter_rule_returning_no_decisions_keeps_everything(mock_config, tmp
         assert risk.id in grounded_ids
     assert result.retrieval_stats.prefilter_dropped == 0
     assert [fc for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"] == []
+
+
+# --- the real assessor against the real rule, over a mock transport ---
+
+
+def test_prefilter_real_assessor_end_to_end(mock_config, tmp_path, monkeypatch):
+    """The real DropThreshold over the real HttpProbabilityAssessor filters.
+
+    The assessor runs against an ``httpx.MockTransport`` so the exchange
+    never leaves the machine, but every other piece is production code:
+    the endpoint, the assessor's request building, batching and exchange
+    recording, and the rule's drop decision. Pins three behaviours: the
+    request appears in ``decision_calls`` without the API key (the key
+    travels in the Authorization header — the handler asserts it really
+    was sent — and never reaches the serialized result), the 0.10
+    boundary drops at-and-below and keeps above, and the serialized
+    result carries no credential.
+    """
+    import httpx
+
+    from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor, ProbabilityEndpoint
+    from asago_policy_mapper.extract.screening import DropThreshold
+
+    monkeypatch.setenv("PROB_API_KEY", "sentinel-secret-key")
+    sent_bodies = []
+    sent_headers = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_bodies.append(json.loads(request.content.decode("utf-8")))
+        sent_headers.append(dict(request.headers))
+        # Two items at 0.10 (dropped: at the threshold) and one at 0.9
+        # (kept: above it), in the endpoint's scores wire format.
+        scores = [
+            {"id": "R-001", "p": 0.10},
+            {"id": "R-002", "p": 0.10},
+            {"id": "R-003", "p": 0.90},
+        ]
+        return httpx.Response(200, json={"scores": scores})
+
+    transport = httpx.MockTransport(handler)
+    endpoint = ProbabilityEndpoint(
+        base_url="http://localhost:8080",
+        model="prob-model",
+        api_key_env="PROB_API_KEY",
+        timeout_s=5.0,
+        max_batch=16,
+    )
+    assessor = HttpProbabilityAssessor(endpoint, transport=transport)
+    rule = DropThreshold(assessor, 0.10)
+    prefilter = Prefilter(assessor=assessor, rule=rule)
+
+    grounded_ids: list[str] = []
+
+    class _StubIndex:
+        variant_map = {}
+        risks = []
+
+        def hybrid_search(self, query, top_k=50, bm25_rescue_rank=0, rrf_min_score=0.0):
+            return [
+                ScoredCandidate(risk_id=r.id, risk_name=r.name, risk_description=r.description, cross_encoder_score=0.9)
+                for r in MOCK_RISKS
+            ]
+
+        def get_taxonomy(self, rid):
+            return "test-taxonomy"
+
+    def fake_ground(
+        chunk_text,
+        candidates,
+        client,
+        model,
+        document,
+        chunk_index,
+        page=None,
+        section=None,
+        records=None,
+        max_batch_size=0,
+    ):
+        grounded_ids.extend(c.risk_id for c in candidates)
+        return {c.risk_id: ([], "medium") for c in candidates}
+
+    from asago_policy_mapper.extract import pipeline
+
+    monkeypatch.setattr(pipeline, "_build_risk_index", lambda risks, retrieval: _StubIndex())
+    monkeypatch.setattr(pipeline, "ground_and_extract_evidence", fake_ground)
+
+    doc = tmp_path / "p.md"
+    doc.write_text(DOC)
+    result = run_extraction(
+        documents=[doc],
+        client=MagicMock(),
+        config=mock_config,
+        risks=MOCK_RISKS,
+        retrieval=RetrievalConfig(query_gen=False, no_judge=True),
+        prefilter=prefilter,
+        ocr=False,
+    )
+
+    # Exactly one real exchange happened, through the transport.
+    assert len(sent_bodies) == 1
+    # The exchange was authenticated: the key really traveled in the
+    # Authorization header, so its absence from the result is a real
+    # property of the recording, not an unset variable.
+    assert sent_headers[0].get("authorization") == "Bearer sentinel-secret-key"
+    assert "sentinel-secret-key" not in json.dumps(sent_bodies)
+    # The 0.10 boundary: at-threshold drops, above keeps.
+    assert "R-003" in grounded_ids
+    assert "R-001" not in grounded_ids
+    assert "R-002" not in grounded_ids
+    dropped = {fc.risk_id for fc in result.grounding_filtered_candidates if fc.dropped_by == "prefilter"}
+    assert dropped == {"R-001", "R-002"}
+    assert result.retrieval_stats.prefilter_dropped == 2
+    # The exchange appears in decision_calls, and no serialized form
+    # carries the credential.
+    assert result.decision_calls
+    serialized = json.dumps(result.model_dump())
+    assert "sentinel-secret-key" not in serialized
+    # The record holds the request the assessor actually sent.
+    record = result.decision_calls[0]
+    assert isinstance(record.request, list)
+    assert record.request[0]["items"][0]["id"] == "R-001"
