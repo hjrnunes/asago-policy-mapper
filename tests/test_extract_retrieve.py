@@ -1,11 +1,13 @@
 import math
 from unittest.mock import MagicMock
 
+import numpy as np
 from conftest import stage_mock_client
 
 from asago_policy_mapper.extract.models import LLMCallRecord, ScoredCandidate, _JudgeVerdict, _JudgeVerdicts
 from asago_policy_mapper.extract.parse import Chunk
 from asago_policy_mapper.extract.retrieve import (
+    _serialize_score,
     build_chunk_context_indices,
     build_chunk_contexts,
     build_padded_text,
@@ -582,6 +584,59 @@ def test_unscored_never_serialized_as_nan():
     dumped = unscored[0].model_dump()
     assert dumped["cross_encoder_score"] == 0.0
     assert not math.isnan(dumped["cross_encoder_score"])
+
+
+def test_prestamped_candidate_returning_unscored_serializes_null(monkeypatch):
+    """A previously stamped candidate the reranker cannot score reads as not calculated.
+
+    The unscored state is a two-field contract: the NaN marker and the
+    absent rerank_source. A candidate stamped in an earlier pass must not
+    carry that stamp through a later unscored outcome, or it would
+    serialize as a measured 0.0 — the fabricated score this branch
+    exists to eliminate. rerank clears the stamp; the chunk boundary
+    converts the marker to the 0.0 default with no source, which reads
+    as null confidence downstream.
+    """
+    from types import SimpleNamespace as _NS
+
+    from asago_policy_mapper.extract.index import RiskIndex
+
+    index = RiskIndex([])
+    # The generative reranker's clip normalizer preserves NaN; this
+    # window gives the previously stamped candidate no answer.
+    remote = _NS(predict=lambda pairs: np.array([float("nan"), 0.9], dtype=np.float64))
+    monkeypatch.setattr(index, "_remote_cross_encoder", remote)
+    candidates = [
+        # Stamped by a previous rerank pass (a measured 0.0 with its
+        # source); this window's reranker gives it no answer.
+        ScoredCandidate(
+            risk_id="R-NAN",
+            risk_name="N",
+            risk_description="n",
+            cross_encoder_score=0.0,
+            rerank_source="cross_encoder",
+        ),
+        ScoredCandidate(risk_id="R-B", risk_name="B", risk_description="b"),
+    ]
+
+    reranked = index.rerank("query", candidates, top_k=1)
+
+    assert [c.risk_id for c in reranked] == ["R-B", "R-NAN"]
+    unscored = reranked[1]
+    # The stamp did not survive the unscored outcome: NaN marker, no source.
+    assert math.isnan(unscored.cross_encoder_score)
+    assert unscored.rerank_source is None
+    # At the chunk boundary the marker becomes the 0.0 default with no
+    # source — the "not calculated" state — which the pipeline's
+    # confidence boundary maps to null.
+    serialized = _serialize_score(unscored)
+    assert serialized.cross_encoder_score == 0.0
+    assert serialized.rerank_source is None
+    from asago_policy_mapper.extract.pipeline import _confidence_from_candidate
+
+    confidence, source = _confidence_from_candidate(serialized, use_cross_encoder=True)
+    assert confidence is None
+    assert source == "none"
 
 
 def test_classify_by_rank_accepts_top_n():

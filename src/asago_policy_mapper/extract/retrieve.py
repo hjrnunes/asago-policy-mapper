@@ -506,8 +506,9 @@ def _count_unscored(index) -> int:
 def _serialize_score(c: ScoredCandidate) -> ScoredCandidate:
     """Copy a candidate with its cross-encoder score ready for the output.
 
-    The unscored marker (NaN) reads as 0.0, matching query-gen candidates
-    the cross-encoder never scored.
+    The unscored marker (NaN) becomes the 0.0 default with
+    ``rerank_source`` unset, the "not calculated" state that reads as
+    null confidence at the RiskMatch boundary, so NaN never serializes.
     """
     if math.isnan(c.cross_encoder_score):
         return c.model_copy(update={"cross_encoder_score": 0.0})
@@ -579,8 +580,8 @@ def retrieve_chunk(
     accepted_by = "threshold" if threshold_high is not None else "rank"
     # Unscored candidates reach the judge as borderline carrying the internal
     # NaN marker. At the chunk boundary the marker becomes the 0.0 default
-    # with rerank_source unset — the "not calculated" state 150b reads as
-    # null confidence — so NaN never serializes.
+    # with rerank_source unset — the "not calculated" state the RiskMatch
+    # boundary reads as null confidence — so NaN never serializes.
     accepted = [_serialize_score(c) for c in accepted]
     borderline = [_serialize_score(c) for c in borderline]
     return ChunkResult(

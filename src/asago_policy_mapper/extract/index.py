@@ -631,9 +631,12 @@ def _mark_unscored(unscored: list[ScoredCandidate]) -> list[ScoredCandidate]:
 
     The marker keeps them recognizable to the selection path (judge-bound,
     capped by the borderline rules); the missing ``rerank_source`` reads as
-    "not calculated" at the RiskMatch confidence boundary.
+    "not calculated" at the RiskMatch confidence boundary. The stamp is
+    cleared explicitly, not left to construction order: a candidate that
+    entered the window already stamped (re-reranked) must not serialize as
+    a measured 0.0 — an unscored candidate has no measurement to report.
     """
-    return [c.model_copy(update={"cross_encoder_score": float("nan")}) for c in unscored]
+    return [c.model_copy(update={"cross_encoder_score": float("nan"), "rerank_source": None}) for c in unscored]
 
 
 class RiskIndex:
@@ -665,6 +668,9 @@ class RiskIndex:
         self._score_normalizer = _make_score_normalizer(is_nli=False, apply_sigmoid=False)
         # Candidates the reranker could not score (no answer). Reset per run
         # by constructing a fresh index; reported as rerank_unscored.
+        # Single-threaded by construction: retrieval calls rerank
+        # sequentially (_run_retrieval loops chunks in order), so the +=
+        # in rerank needs no lock.
         self._unscored_count: int = 0
 
         if not risks:
@@ -844,10 +850,13 @@ class RiskIndex:
         return results
 
     def rerank(self, text: str, candidates: list[ScoredCandidate], top_k: int = 50) -> list[ScoredCandidate]:
-        """Rerank candidates, keeping the top-k by measured score.
+        """Rerank candidates by measured score, keeping unscored ones as riders.
 
-        Every candidate in the window is measured; only the top-k slice is
-        returned. Callers that re-admit sliced-out candidates (BM25 rescue)
+        Finite scores are ranked and the top-k slice is returned; a candidate
+        whose measurement is invalid (NaN or infinity) is unscored and rides
+        along after the scored ones, outside the top_k cap, carrying the NaN
+        marker with no rerank_source so the selection path can route it to
+        the judge. Callers that re-admit sliced-out candidates (BM25 rescue)
         read the full measurement from ``_rerank_with_scores``.
         """
         reranked, _ = self._rerank_with_scores(text, candidates, top_k)
