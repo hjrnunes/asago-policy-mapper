@@ -443,7 +443,8 @@ def _variant_context_span(evidence: list[EvidenceSpan]) -> EvidenceSpan | None:
 
     Variant grounding needs a chunk; spans the group stage could not
     attribute (chunk_index None) cannot provide one, so they are excluded
-    before the 150a tie-break key runs.
+    before the tie-break key (cross-encoder score, then chunk index, then
+    text) runs.
     """
     attributed = [e for e in evidence if e.chunk_index is not None]
     if not attributed:

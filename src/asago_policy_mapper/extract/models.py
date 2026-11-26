@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, computed_field, field_validator, model_serializer, model_validator
 
 
 def _reject_nan(value: float | None) -> float | None:
@@ -85,6 +85,17 @@ class EvidenceSpan(BaseModel):
     cross_encoder_score: float = 0.0
     verification: Literal["verified", "normalized", "not_found"] | None = None
     found_chunk_index: int | None = None
+
+    # Length of the quote in characters, recorded so consumers can weigh
+    # short verified quotes (a one-word quote verifies trivially) without
+    # re-deriving it from the serialized text. A computed field (not a
+    # stored one) so it can never desync from ``text`` — model_copy
+    # updates recompute it, and a stale value in deserialized input is
+    # ignored rather than trusted.
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def text_length(self) -> int:
+        return len(self.text)
 
     _reject_nan_score = field_validator("cross_encoder_score")(_reject_nan)
 
