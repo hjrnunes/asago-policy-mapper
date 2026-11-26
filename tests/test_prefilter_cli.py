@@ -1,7 +1,7 @@
 """CLI tests for the prefilter profile.
 
 ``--prefilter-profile PATH`` loads a YAML file with the
-``ProbabilityEndpoint`` fields plus ``threshold`` and turns it into the
+``ProbabilityAnswerEndpoint`` fields plus ``threshold`` and turns it into the
 pipeline's ``GroundingPrefilter``. The API key comes from the environment
 variable the profile names, never from the profile itself. The option's
 own environment variable is ``POLICY_MAPPER_PREFILTER_PROFILE``.
@@ -215,7 +215,7 @@ def test_build_prefilter_threshold_defaults(tmp_path):
 
 
 def test_build_prefilter_rejects_missing_endpoint_fields(tmp_path):
-    """A profile missing required ProbabilityEndpoint fields fails clearly."""
+    """A profile missing required ProbabilityAnswerEndpoint fields fails clearly."""
     from asago_policy_mapper.cli import _build_prefilter
 
     path = tmp_path / "bad.yaml"
@@ -946,8 +946,6 @@ def test_no_prefilter_help_lists_the_flag():
 
 
 # --- a bad profile must not create the output directory ---
-
-
 def test_bad_profile_creates_no_output_dir(tmp_path, profile_path, monkeypatch):
     """A profile that fails validation leaves no empty output directory behind.
 
@@ -984,18 +982,6 @@ def test_bad_profile_creates_no_output_dir(tmp_path, profile_path, monkeypatch):
 
 
 def test_build_prefilter_defaults_to_http_provider(tmp_path, profile_path):
-    """A profile without a provider key builds the generic HTTP assessor."""
-    from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
-    from asago_policy_mapper.cli import _build_prefilter
-
-    prefilter = _build_prefilter(profile_path)
-
-    assert prefilter is not None
-    assert isinstance(prefilter.assessor, HttpProbabilityAssessor)
-
-
-# --- API key presence ---
-def test_build_prefilter_defaults_to_generic_provider(tmp_path, profile_path):
     """A profile without a provider key builds the generic HTTP assessor."""
     from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
     from asago_policy_mapper.cli import _build_prefilter
@@ -1072,6 +1058,85 @@ def test_build_prefilter_jev_defaults_without_endpoint_fields(tmp_path, monkeypa
     assert isinstance(prefilter.assessor, JevProbabilityAssessor)
     assert prefilter.assessor.endpoint.model == "jev-latest"
     assert prefilter.assessor.endpoint.api_key_env == "POLICY_MAPPER_JEV_API_KEY"
+
+
+def test_build_prefilter_jev_offsite_without_key_fails_at_load(tmp_path, capsys, monkeypatch):
+    """A minimal jev profile with no key set fails at load, not as silent 401s.
+
+    Sending policy text offsite unauthenticated cannot work: every batch
+    would fail and the filter would silently keep everything.
+    """
+    from asago_policy_mapper.cli import _build_prefilter
+
+    monkeypatch.delenv("POLICY_MAPPER_JEV_API_KEY", raising=False)
+    path = tmp_path / "jev-nokey.yaml"
+    path.write_text(yaml.safe_dump({"provider": "jev", "threshold": 0.02}))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    err = capsys.readouterr().err
+    assert "POLICY_MAPPER_JEV_API_KEY is unset" in err
+    assert "offsite" in err
+
+
+def test_build_prefilter_jev_local_base_url_needs_no_key(tmp_path, monkeypatch):
+    """A jev profile pointed at a local endpoint skips the key requirement."""
+    from asago_policy_mapper.assessors.jev import JevProbabilityAssessor
+    from asago_policy_mapper.cli import _build_prefilter
+
+    monkeypatch.delenv("POLICY_MAPPER_JEV_API_KEY", raising=False)
+    profile = {
+        "provider": "jev",
+        "threshold": 0.02,
+        "base_url": "http://localhost:9999/v1",
+        "api_key_env": "POLICY_MAPPER_JEV_LOCAL_KEY",
+    }
+    path = tmp_path / "jev-local.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    prefilter = _build_prefilter(path)
+
+    assert isinstance(prefilter.assessor, JevProbabilityAssessor)
+
+
+def test_build_prefilter_jev_malformed_base_url_fails_the_key_rule_cleanly(tmp_path, capsys, monkeypatch):
+    """A malformed base_url yields a validation error, not a traceback.
+
+    ``urlsplit`` raises ValueError on some malformed URLs (an IPv6
+    bracket, for example); the profile must fail at load naming the bad
+    URL — whether or not the key variable is set (the assessor's own
+    unguarded parse would otherwise crash with a raw traceback).
+    """
+    from asago_policy_mapper.cli import _build_prefilter
+
+    profile = {"provider": "jev", "threshold": 0.02, "base_url": "http://[", "api_key_env": "JEV_KEY"}
+    path = tmp_path / "badurl.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    err = capsys.readouterr().err
+    assert "not a valid URL" in err
+    assert "http://[" in err
+    assert str(path) in err
+
+
+def test_build_prefilter_jev_zero_timeout_fails_at_load(tmp_path, capsys, monkeypatch):
+    """A jev profile with timeout_s: 0 fails at load, like the generic path.
+
+    A zero timeout makes every batch a transport error while fail-open
+    keeps every candidate — indistinguishable from a working filter-off
+    run on the paid pilot. The provider branch validates the field with
+    the same exclusive floor the generic path applies.
+    """
+    from asago_policy_mapper.cli import _build_prefilter
+
+    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "test-key-value")
+    profile = {"provider": "jev", "threshold": 0.02, "timeout_s": 0}
+    path = tmp_path / "zerotimeout.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    err = capsys.readouterr().err
+    assert "timeout_s must be greater than 0.0" in err
+    assert str(path) in err
 
 
 def test_build_prefilter_jev_requires_decision_extra(tmp_path, capsys, monkeypatch):
@@ -1180,6 +1245,86 @@ def test_build_prefilter_laya_checkpoint_load_failure_fails_validation(tmp_path,
     assert "aac6fef/typo-model" in err
 
 
+@pytest.mark.parametrize(
+    "exception",
+    [
+        OSError("repo not found"),
+        ValueError("bad checkpoint config"),
+        RuntimeError("weights unreadable"),
+    ],
+)
+def test_build_prefilter_laya_checkpoint_load_failures_all_fail_validation(tmp_path, capsys, monkeypatch, exception):
+    """OSError, ValueError and RuntimeError from loading all fail at profile load.
+
+    A corrupt checkpoint config raises ValueError or RuntimeError rather
+    than a huggingface_hub error; the validation message must name the
+    checkpoint either way.
+    """
+    import sys
+    import types
+
+    import asago_policy_mapper.cli as cli
+
+    module = types.ModuleType("laya_mlx")
+    module.load = lambda model, *a, **k: (_ for _ in ()).throw(exception)
+    monkeypatch.setitem(sys.modules, "laya_mlx", module)
+
+    path = tmp_path / "bad-load.yaml"
+    path.write_text(yaml.safe_dump({"provider": "laya", "model": "aac6fef/broken"}))
+    with pytest.raises(typer.Exit):
+        cli._build_prefilter(path)
+    err = capsys.readouterr().err
+    assert "could not load checkpoint" in err
+    assert "aac6fef/broken" in err
+
+
+@pytest.mark.parametrize("field", ["base_url", "api_key_env", "timeout_s"])
+def test_build_prefilter_laya_rejects_fields_it_ignores(tmp_path, capsys, field):
+    """The laya profile accepts only fields the in-process arm uses.
+
+    ``base_url``, ``api_key_env`` and ``timeout_s`` would be silently
+    ignored by an in-process assessor; a profile that sets one must fail
+    at load rather than pretend it took effect.
+    """
+    from asago_policy_mapper.cli import _build_prefilter
+
+    profile = {"provider": "laya", "threshold": 0.02, field: "http://example.invalid" if field == "base_url" else "X"}
+    path = tmp_path / "ignored.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    err = capsys.readouterr().err
+    assert "runs in process" in err
+    # The message names the full unsupported set and the offending field.
+    assert "base_url, api_key_env, timeout_s" in err
+    assert f"remove {field}" in err
+    assert str(path) in err
+
+
+def test_build_prefilter_laya_rejection_names_every_offending_field(tmp_path, capsys):
+    """Several unsupported fields are listed together in the rejection."""
+    from asago_policy_mapper.cli import _build_prefilter
+
+    path = tmp_path / "multi.yaml"
+    path.write_text(yaml.safe_dump({"provider": "laya", "threshold": 0.02, "base_url": "x", "timeout_s": 5.0}))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    err = capsys.readouterr().err
+    assert "remove base_url, timeout_s" in err
+
+
+def test_build_prefilter_jev_missing_key_error_names_the_profile_path(tmp_path, capsys, monkeypatch):
+    """The offsite-without-key error names the profile path, not just the variable."""
+    from asago_policy_mapper.cli import _build_prefilter
+
+    monkeypatch.delenv("POLICY_MAPPER_JEV_API_KEY", raising=False)
+    path = tmp_path / "nokey.yaml"
+    path.write_text(yaml.safe_dump({"provider": "jev", "threshold": 0.02}))
+    with pytest.raises(typer.Exit):
+        _build_prefilter(path)
+    assert str(path) in capsys.readouterr().err
+
+
 def test_build_prefilter_provider_null_behaves_like_http(tmp_path, profile_path):
     """provider: null is the explicit default, same as the key being absent."""
     from asago_policy_mapper.assessors.http_probability import HttpProbabilityAssessor
@@ -1209,7 +1354,7 @@ def test_build_prefilter_explicit_http_provider_builds_http(tmp_path):
 
 
 def test_build_prefilter_provider_null_with_minimal_http_profile(tmp_path):
-    """provider: null does not relax the http profile's required fields."""
+    """provider: null does not relax the HTTP profile's required fields."""
     from asago_policy_mapper.cli import _build_prefilter
 
     path = tmp_path / "null-min.yaml"
@@ -1282,24 +1427,3 @@ def test_jev_profile_rejects_unknown_fields(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "invalid fields" in err
     assert "bogus" in err
-
-
-def test_build_prefilter_jev_zero_timeout_fails_at_load(tmp_path, capsys, monkeypatch):
-    """A jev profile with timeout_s: 0 fails at load, like the generic path.
-
-    A zero timeout makes every batch a transport error while fail-open
-    keeps every candidate — indistinguishable from a working filter-off
-    run on the paid pilot. The provider branch validates the field with
-    the same exclusive floor the generic path applies.
-    """
-    from asago_policy_mapper.cli import _build_prefilter
-
-    monkeypatch.setenv("POLICY_MAPPER_JEV_API_KEY", "test-key-value")
-    profile = {"provider": "jev", "threshold": 0.02, "timeout_s": 0}
-    path = tmp_path / "zerotimeout.yaml"
-    path.write_text(yaml.safe_dump(profile))
-    with pytest.raises(typer.Exit):
-        _build_prefilter(path)
-    err = capsys.readouterr().err
-    assert "timeout_s must be greater than 0.0" in err
-    assert str(path) in err
