@@ -477,7 +477,11 @@ def test_no_authorization_header_when_env_unset(monkeypatch):
 
 
 def test_wire_keeps_request_on_timeout_and_error(monkeypatch):
-    """Timeout and error batches still record the request body in the wire."""
+    """Timeout and error batches record the request and an explicit error object.
+
+    A persisted ``null`` response says nothing; the error object carries
+    the reason and, for HTTP statuses, the status code.
+    """
     from tests.test_assessors_http_probability import _hang_handler
 
     endpoint = ProbabilityEndpoint(
@@ -486,7 +490,7 @@ def test_wire_keeps_request_on_timeout_and_error(monkeypatch):
     assessor = HttpProbabilityAssessor(endpoint, transport=httpx.MockTransport(_hang_handler))
     batch = assessor.assess(QUESTION, "context", _cases("R-001"))
     assert batch.exchange["requests"][0]["items"] == [{"id": "R-001", "text": "Risk R-001: Description for R-001."}]
-    assert batch.exchange["responses"] == [None]
+    assert batch.exchange["responses"] == [{"error": "timeout", "status": None}]
 
     def error_handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
@@ -494,14 +498,28 @@ def test_wire_keeps_request_on_timeout_and_error(monkeypatch):
     assessor = HttpProbabilityAssessor(endpoint, transport=httpx.MockTransport(error_handler))
     batch = assessor.assess(QUESTION, "context", _cases("R-001"))
     assert batch.exchange["requests"][0]["context"] == "context"
-    assert batch.exchange["responses"] == [None]
+    assert batch.exchange["responses"] == [{"error": "error", "status": None}]
 
-    # A non-2xx status is the other "error" path; it also keeps the request.
+    # A non-2xx status is the other "error" path; the error object carries
+    # the status so a run can tell a 401 from a 503, and the batch's
+    # outcomes read the error reason.
     assessor = HttpProbabilityAssessor(
         endpoint, transport=httpx.MockTransport(lambda request: httpx.Response(503, json={"e": 1}))
     )
     batch = assessor.assess(QUESTION, "context", _cases("R-001"))
     assert batch.exchange["requests"][0]["context"] == "context"
+    assert batch.exchange["responses"] == [{"error": "error", "status": 503}]
+    assert batch.answers["R-001"][0].reason == "error"
+
+    # A 200 whose body is not JSON is the ValueError path; it records the
+    # request and the same error object.
+    assessor = HttpProbabilityAssessor(
+        endpoint, transport=httpx.MockTransport(lambda request: httpx.Response(200, text="<html>not json</html>"))
+    )
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+    assert batch.exchange["requests"][0]["context"] == "context"
+    assert batch.exchange["responses"] == [{"error": "error", "status": 200}]
+    assert batch.answers["R-001"][0].reason == "error"
 
 
 def test_wire_keeps_request_and_response_on_non_object_payload():
@@ -662,7 +680,7 @@ def test_empty_cases_return_empty_batch():
     assert batch.exchange == {"requests": [], "responses": []}
 
 
-def test_empty_batch_wire_is_not_shared_between_results():
+def test_empty_batch_exchange_is_not_shared_between_results():
     """Appending to one empty batch's exchange leaves the next empty batch clean."""
     assessor = _assessor(lambda request: httpx.Response(200, json=_scores_body()))
 
@@ -769,6 +787,85 @@ def test_response_echoing_the_api_key_is_redacted(monkeypatch):
     assert "secret-value-123" not in json.dumps(batch.exchange)
     assert "[redacted]" in json.dumps(batch.exchange)
     assert _p_value(batch.answers["R-001"][0]) == 0.5
+
+
+def test_response_echoing_the_key_in_a_dict_key_is_redacted(monkeypatch):
+    """An endpoint that echoes the credential as an object KEY gets it redacted.
+
+    The wire's responses persist into ``decision_calls`` in the run
+    output, so no position in a recorded response — value or key — may
+    carry the credential.
+    """
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"echo": {"secret-value-123": "x"}, "scores": [{"id": "R-001", "p": 0.5}]},
+        )
+
+    assessor = _assessor(handler)
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+
+    assert "secret-value-123" not in json.dumps(batch.exchange)
+    assert batch.exchange["responses"][0]["echo"] == {"[redacted]": "x"}
+    assert _p_value(batch.answers["R-001"][0]) == 0.5
+
+
+def test_response_redaction_keeps_both_values_on_key_collision(monkeypatch):
+    """A redacted key colliding with an existing key keeps both entries.
+
+    An endpoint that echoes the credential as one key and also carries
+    literal ``[redacted]`` keys makes several keys redact to the same
+    marker; a plain dict comprehension would silently drop all but the
+    last entry's value. The numbered markers keep every value so no data
+    is lost while no credential survives.
+    """
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "echo": {
+                    "secret-value-123": "first",
+                    "[redacted]": "second",
+                    "[redacted](2)": "third",
+                },
+                "scores": [{"id": "R-001", "p": 0.5}],
+            },
+        )
+
+    assessor = _assessor(handler)
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+
+    echo = batch.exchange["responses"][0]["echo"]
+    assert sorted(echo.values()) == ["first", "second", "third"]
+    assert len(echo) == 3
+    assert "secret-value-123" not in json.dumps(batch.exchange)
+
+
+def test_response_redaction_collision_numbering_is_stable(monkeypatch):
+    """The collision markers number deterministically from the first use.
+
+    Three colliding keys land on distinct markers in insertion order, so
+    repeated runs of the same response record identically; a marker's own
+    collision numbers within that marker (the second use of
+    ``[redacted](2)`` becomes ``[redacted](2)(2)``).
+    """
+    monkeypatch.setenv("PROB_API_KEY", "secret-value-123")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"echo": {"secret-value-123": "a", "[redacted]": "b", "[redacted](2)": "c"}},
+        )
+
+    assessor = _assessor(handler)
+    batch = assessor.assess(QUESTION, "context", _cases("R-001"))
+
+    echo = batch.exchange["responses"][0]["echo"]
+    assert echo == {"[redacted]": "a", "[redacted](2)": "b", "[redacted](2)(2)": "c"}
 
 
 def test_response_redaction_absent_when_no_key(monkeypatch):

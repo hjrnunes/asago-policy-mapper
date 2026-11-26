@@ -336,21 +336,46 @@ def _require_endpoint_api_key(api_key_env: str, base_url: str, label: str) -> No
         )
 
 
+def _validate_prefilter_provider(profile: dict, path: Path) -> str | None:
+    """Check the optional provider key: None/http, jev or laya.
+
+    An unknown or non-string provider must fail at profile load: a typo
+    would otherwise silently build the generic HTTP assessor against a
+    provider profile. The valid set is the implemented mappings.
+    """
+    if "provider" not in profile:
+        return None
+    provider = profile.get("provider")
+    if provider is None:
+        return None
+    if not isinstance(provider, str) or provider not in ("http", "jev", "laya"):
+        _fail_validation(f"--prefilter-profile {path}: provider must be one of 'http', 'jev', 'laya', got {provider!r}")
+    return provider
+
+
 def _build_prefilter(profile_path):
     """Load a prefilter profile YAML into the pipeline's ``GroundingPrefilter``.
 
     The profile carries the ``ProbabilityEndpoint`` fields plus
-    ``threshold``; the API key itself comes from the environment variable
-    the profile names, never from the profile. ``None`` (no path) means
-    no filter. Malformed or missing profiles exit with a validation
-    error, as do installs without the ``decision`` extra the HTTP
-    assessor needs.
+    ``threshold`` and an optional ``provider`` key selecting the mapping:
+    absent/``http`` builds the generic HTTP assessor, ``jev`` the Jev
+    mapping (TypeSafe System One), ``laya`` the local in-process arm. The
+    API key itself comes from the environment variable the profile names,
+    never from the profile. ``None`` (no path) means no filter. Malformed
+    or missing profiles exit with a validation error, as do installs
+    without the extra the chosen provider needs.
     """
     if profile_path is None:
         return None
 
     path = Path(profile_path)
     profile = _load_prefilter_profile(path)
+    provider = _validate_prefilter_provider(profile, path)
+    profile.pop("provider", None)
+
+    if provider in ("jev", "laya"):
+        return _build_provider_prefilter(provider, profile, path)
+
     _validate_prefilter_strings(profile, ("base_url", "model", "api_key_env"), path)
     _validate_endpoint_base_url(profile["base_url"], f"--prefilter-profile {path}")
     _validate_prefilter_numeric(profile, "timeout_s", path, minimum=0.0, exclusive_minimum=True)
@@ -377,6 +402,89 @@ def _build_prefilter(profile_path):
         )
     rule = DropThreshold(assessor, threshold)
     return GroundingPrefilter(assessor=assessor, rule=rule)
+
+
+def _build_provider_prefilter(provider: str, profile: dict, path: Path):
+    """Build a provider-mapped prefilter (jev or laya) from a profile.
+
+    Provider endpoints default every field, so the profile may carry only
+    the overrides and the threshold. The remaining keys validate with the
+    same rules as the generic profile (minus the required base_url/model/
+    api_key_env, which defaults fill), and unknown keys still fail loudly.
+    The laya arm accepts only the fields it uses: it runs in process, so
+    URL, credential and timeout fields would be silently ignored.
+    """
+    from asago_policy_mapper.extract.pipeline import GroundingPrefilter
+    from asago_policy_mapper.extract.screening import DropThreshold
+
+    _LAYA_UNSUPPORTED_FIELDS = ("base_url", "api_key_env", "timeout_s")
+    if provider == "laya":
+        ignored = [key for key in _LAYA_UNSUPPORTED_FIELDS if key in profile]
+        if ignored:
+            _fail_validation(
+                f"--prefilter-profile {path}: provider 'laya' runs in process and accepts none of "
+                f"{', '.join(_LAYA_UNSUPPORTED_FIELDS)}; remove {', '.join(sorted(ignored))}"
+            )
+    else:
+        _validate_prefilter_numeric(profile, "timeout_s", path, minimum=0.0, exclusive_minimum=True)
+    _validate_prefilter_numeric(profile, "max_batch", path, minimum=1.0)
+    threshold = _validate_prefilter_threshold(profile.pop("threshold", None), path)
+    if provider != "laya":
+        for key in ("base_url", "model", "api_key_env"):
+            if key in profile:
+                _validate_prefilter_strings(profile, (key,), path)
+    elif "model" in profile:
+        # The laya arm uses the model field (the checkpoint id) but none
+        # of the other endpoint fields.
+        _validate_prefilter_strings(profile, ("model",), path)
+
+    if provider == "jev":
+        from asago_policy_mapper.assessors.jev import JevProbabilityAssessor, JevProbabilityEndpoint
+
+        try:
+            endpoint = JevProbabilityEndpoint(**profile)
+        except TypeError as e:
+            _fail_validation(f"--prefilter-profile {path} has invalid fields: {e}")
+        _require_prefilter_api_key(endpoint, path)
+        try:
+            assessor: object = JevProbabilityAssessor(endpoint)
+        except ImportError as e:
+            _fail_validation(
+                f"--prefilter-profile needs the decision extra (httpx); install with: uv sync --extra decision ({e})"
+            )
+    else:
+        from asago_policy_mapper.assessors.laya import LayaModelConfig, LayaProbabilityAssessor
+
+        laya_config: LayaModelConfig
+        try:
+            laya_config = LayaModelConfig(**profile)
+        except TypeError as e:
+            _fail_validation(f"--prefilter-profile {path} has invalid fields: {e}")
+        try:
+            assessor = LayaProbabilityAssessor(laya_config)
+        except ImportError as e:
+            _fail_validation(f"--prefilter-profile provider 'laya' needs laya-mlx installed: {e}")
+        except (OSError, ValueError, RuntimeError) as e:
+            # Checkpoint-load failures raise huggingface_hub errors that
+            # subclass OSError (typo'd model, offline with no cache) or
+            # ValueError/RuntimeError from a corrupt checkpoint config.
+            _fail_validation(
+                f"--prefilter-profile provider 'laya' could not load checkpoint {laya_config.model!r}: {e}"
+            )
+    rule = DropThreshold(assessor, threshold)
+    return GroundingPrefilter(assessor=assessor, rule=rule)
+
+
+def _require_prefilter_api_key(endpoint, path: Path):
+    """Fail at load when an offsite endpoint names an unset credential.
+
+    Sending policy text offsite without authentication cannot work: every
+    batch would fail and the filter would silently keep everything. The
+    key itself is read from the named environment variable at runtime,
+    never from the profile.
+    """
+    _validate_endpoint_base_url(endpoint.base_url, f"--prefilter-profile {path}")
+    _require_endpoint_api_key(endpoint.api_key_env, endpoint.base_url, f"--prefilter-profile {path}")
 
 
 def _build_retrieval_config(
