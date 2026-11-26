@@ -48,6 +48,7 @@ from asago_policy_mapper.extract.querygen import generate_queries, group_chunks
 from asago_policy_mapper.extract.retrieve import (
     ChunkResult,
     _counts_judge,
+    build_chunk_context_indices,
     build_chunk_contexts,
     judge_borderline,
     retrieve_chunk,
@@ -178,6 +179,26 @@ def _judge_one(
     return i, judged
 
 
+def _context_source_windows(
+    context_text: str,
+    context_source_windows: list[tuple[int, str]] | None,
+    chunk_index: int,
+    chunk,
+) -> list[tuple[int, str]] | None:
+    """Pick the source windows a grounding call verifies its quotes against.
+
+    Explicit windows win. Without them, a context built from neighbours
+    carries no window list (None: output predates verification), while a
+    bare-chunk context — no neighbours joined — verifies against that chunk
+    alone.
+    """
+    if context_source_windows is not None:
+        return context_source_windows
+    if not context_text:
+        return [(chunk_index, chunk.text)]
+    return None
+
+
 def _ground_one(
     cr,
     chunks,
@@ -187,9 +208,11 @@ def _ground_one(
     passes=1,
     max_batch_size=0,
     context_text="",
+    context_source_windows=None,
 ):
     chunk = chunks[cr.chunk_index]
     text = _stage_context_value(context_text, chunk)
+    source_windows = _context_source_windows(context_text, context_source_windows, cr.chunk_index, chunk)
     merged: dict[str, tuple[list, str]] = {}
     for pass_num in range(1, passes + 1):
         grounded = ground_and_extract_evidence(
@@ -203,6 +226,7 @@ def _ground_one(
             section=chunk.section,
             records=records,
             max_batch_size=max_batch_size,
+            source_windows=source_windows,
         )
         logger.info(
             "Grounding chunk %d/%d pass %d/%d: %d risks grounded",
@@ -311,12 +335,19 @@ def _run_grounding(
     grounding_passes=1,
     grounding_batch_size=0,
     chunk_contexts=None,
+    chunk_context_indices=None,
 ):
     all_matches = []
     all_filtered = []
     total_candidates = 0
     total_grounded = 0
     max_workers = config.max_concurrent
+
+    def _source_windows(chunk_index: int):
+        """Build the (index, text) windows a chunk's context was built from."""
+        if chunk_context_indices is None:
+            return None
+        return [(i, chunks[i].text) for i in chunk_context_indices[chunk_index] if i < len(chunks)]
 
     ground_tasks = [cr for cr in chunk_results if cr.accepted]
     for cr in ground_tasks:
@@ -348,6 +379,7 @@ def _run_grounding(
                     grounding_passes,
                     grounding_batch_size,
                     _stage_context(chunk_contexts, cr.chunk_index, chunks),
+                    _source_windows(cr.chunk_index),
                 ): cr
                 for pos, cr in enumerate(ground_tasks)
             }
@@ -406,6 +438,20 @@ def _variant_evidence_key(e: EvidenceSpan) -> tuple:
     return (-e.cross_encoder_score, e.chunk_index, e.text, _tiebreak_key(e))
 
 
+def _variant_context_span(evidence: list[EvidenceSpan]) -> EvidenceSpan | None:
+    """Pick the best evidence span that names a chunk to ground against.
+
+    Variant grounding needs a chunk; spans the group stage could not
+    attribute (chunk_index None) cannot provide one, so they are excluded
+    before the tie-break key (cross-encoder score, then chunk index, then
+    text) runs.
+    """
+    attributed = [e for e in evidence if e.chunk_index is not None]
+    if not attributed:
+        return None
+    return min(attributed, key=_variant_evidence_key)
+
+
 def _ground_variants_one(
     parent_match,
     chunks,
@@ -414,6 +460,7 @@ def _ground_variants_one(
     model,
     records,
     chunk_contexts=None,
+    chunk_context_indices=None,
 ):
     """Run variant-selective grounding for a single parent-level match."""
     parent_id = parent_match.risk_id
@@ -425,10 +472,17 @@ def _ground_variants_one(
     if not evidence:
         return parent_match, {}
 
-    best_ev = min(evidence, key=_variant_evidence_key)
+    best_ev = _variant_context_span(evidence)
+    if best_ev is None or best_ev.chunk_index is None:
+        return parent_match, {}
+
     ci = best_ev.chunk_index
     text = chunk_contexts[ci] if chunk_contexts and ci < len(chunk_contexts) else chunks[ci].text
     chunk = chunks[ci]
+
+    source_windows = None
+    if chunk_context_indices is not None and ci < len(chunk_context_indices):
+        source_windows = [(i, chunks[i].text) for i in chunk_context_indices[ci] if i < len(chunks)]
 
     grounded = ground_variants(
         chunk_text=text,
@@ -443,6 +497,7 @@ def _ground_variants_one(
         page=chunk.page if hasattr(chunk, "page") else None,
         section=chunk.section if hasattr(chunk, "section") else None,
         records=records,
+        source_windows=source_windows,
     )
     return parent_match, grounded
 
@@ -483,6 +538,7 @@ def _run_variant_grounding(
     config,
     call_collector,
     chunk_contexts=None,
+    chunk_context_indices=None,
     max_workers=4,
 ):
     parent_matches = []
@@ -517,6 +573,7 @@ def _run_variant_grounding(
                 config.model,
                 task_records[pos],
                 chunk_contexts,
+                chunk_context_indices,
             ): pm
             for pos, pm in enumerate(parent_matches)
         }
@@ -641,6 +698,8 @@ def _build_chunk_risk_map(chunk_results, all_matches, plan):
     else:
         for m in all_matches:
             for ev in m.evidence:
+                if ev.chunk_index is None:
+                    continue
                 chunk_risk_ids.setdefault(ev.chunk_index, []).append(m.risk_id)
     return chunk_risk_ids
 
@@ -658,6 +717,8 @@ def _build_found_risk_chunks(merged, chunk_results) -> dict[str, set[int]]:
             found_risk_chunks.setdefault(cid, set()).add(cr.chunk_index)
     for m in merged:
         for ev in m.evidence:
+            if ev.chunk_index is None:
+                continue
             found_risk_chunks.setdefault(m.risk_id, set()).add(ev.chunk_index)
     return found_risk_chunks
 
@@ -841,6 +902,7 @@ def _run_expansion(
     variant_map: dict | None = None,
     chunk_contexts=None,
     prefilter_drops: list[FilteredCandidate] | None = None,
+    chunk_context_indices=None,
 ) -> tuple[list[RiskMatch], dict]:
     stats = {"expanded_candidates": 0, "expanded_grounded": 0, "expansion_groups": 0}
     dropped_ids, parent_members = (
@@ -885,6 +947,7 @@ def _run_expansion(
             config,
             call_collector,
             chunk_contexts=chunk_contexts,
+            chunk_context_indices=chunk_context_indices,
             max_workers=max_workers,
         )
 
@@ -1390,7 +1453,17 @@ def _prefilter_fields_sent(assessor) -> list[str]:
 
 
 def _run_matches_stage(
-    chunk_results, chunks, client, config, retrieval, plan, index, call_collector, chunk_contexts, timing
+    chunk_results,
+    chunks,
+    client,
+    config,
+    retrieval,
+    plan,
+    index,
+    call_collector,
+    chunk_contexts,
+    chunk_context_indices,
+    timing,
 ) -> tuple[list[RiskMatch], list[FilteredCandidate], int]:
     """Ground accepted candidates, or collect them ungrounded when grounding is disabled."""
     if not plan.grounding or client is None:
@@ -1411,6 +1484,7 @@ def _run_matches_stage(
                 grounding_passes=retrieval.grounding_passes,
                 grounding_batch_size=retrieval.grounding_batch_size,
                 chunk_contexts=chunk_contexts,
+                chunk_context_indices=chunk_context_indices,
             )
     return all_matches, all_filtered, grounding_filtered
 
@@ -1511,7 +1585,17 @@ _EMPTY_EXPANSION_STATS = {"expanded_candidates": 0, "expanded_grounded": 0, "exp
 
 
 def _run_variant_grounding_stage(
-    all_matches, chunks, index, client, config, plan, call_collector, chunk_contexts, max_workers, timing
+    all_matches,
+    chunks,
+    index,
+    client,
+    config,
+    plan,
+    call_collector,
+    chunk_contexts,
+    chunk_context_indices,
+    max_workers,
+    timing,
 ):
     """Variant-ground grounded matches when variants and a client are present."""
     if index.variant_map and plan.grounding and client is not None:
@@ -1524,6 +1608,7 @@ def _run_variant_grounding_stage(
                 config,
                 call_collector,
                 chunk_contexts=chunk_contexts,
+                chunk_context_indices=chunk_context_indices,
                 max_workers=max_workers,
             )
     return all_matches
@@ -1542,6 +1627,7 @@ def _run_expansion_stage(
     plan,
     call_collector,
     chunk_contexts,
+    chunk_context_indices,
     max_workers,
     timing,
     prefilter_drops=None,
@@ -1570,6 +1656,7 @@ def _run_expansion_stage(
                 variant_map=index.variant_map if index.variant_map else None,
                 chunk_contexts=chunk_contexts,
                 prefilter_drops=prefilter_drops,
+                chunk_context_indices=chunk_context_indices,
             )
             return merged, expansion_stats
     return merged, _EMPTY_EXPANSION_STATS.copy()
@@ -1602,7 +1689,7 @@ def _expand_chunk_variants(chunk_results, index):
 
 
 def _parse_and_chunk(documents, ocr, retrieval, timing) -> tuple | None:
-    """Parse documents and chunk them; returns (parsed, chunks, contexts) or None.
+    """Parse documents and chunk them; returns (parsed, chunks, contexts, context indices) or None.
 
     None means the run short-circuits: every document parsed empty or the
     documents produced no chunks. The parse and chunk stages are timed.
@@ -1619,8 +1706,9 @@ def _parse_and_chunk(documents, ocr, retrieval, timing) -> tuple | None:
         if not chunks:
             return None
         chunk_contexts = build_chunk_contexts(chunks)
+        chunk_context_indices = build_chunk_context_indices(chunks)
     logger.info("Chunked %d document(s) into %d chunks", len(parsed), len(chunks))
-    return parsed, chunks, chunk_contexts
+    return parsed, chunks, chunk_contexts, chunk_context_indices
 
 
 def run_extraction(
@@ -1657,7 +1745,7 @@ def run_extraction(
     prepared = _parse_and_chunk(documents, ocr, retrieval, timing)
     if prepared is None:
         return _empty_result(documents, _empty_result_metadata(retrieval, prefilter, plan))
-    parsed, chunks, chunk_contexts = prepared
+    parsed, chunks, chunk_contexts, chunk_context_indices = prepared
 
     risks = _filter_agentic_risks(risks, parsed)
 
@@ -1711,12 +1799,32 @@ def run_extraction(
         grounding_inputs = chunk_results
 
     all_matches, all_filtered, grounding_filtered = _run_matches_stage(
-        grounding_inputs, chunks, client, config, retrieval, plan, index, call_collector, chunk_contexts, timing
+        grounding_inputs,
+        chunks,
+        client,
+        config,
+        retrieval,
+        plan,
+        index,
+        call_collector,
+        chunk_contexts,
+        chunk_context_indices,
+        timing,
     )
     all_filtered = prefilter_drops + all_filtered
 
     all_matches = _run_variant_grounding_stage(
-        all_matches, chunks, index, client, config, plan, call_collector, chunk_contexts, max_workers, timing
+        all_matches,
+        chunks,
+        index,
+        client,
+        config,
+        plan,
+        call_collector,
+        chunk_contexts,
+        chunk_context_indices,
+        max_workers,
+        timing,
     )
 
     chunk_risk_ids = _build_chunk_risk_map(chunk_results, all_matches, plan)
@@ -1739,6 +1847,7 @@ def run_extraction(
         plan,
         call_collector,
         chunk_contexts,
+        chunk_context_indices,
         max_workers,
         timing,
         prefilter_drops=prefilter_drops or None,

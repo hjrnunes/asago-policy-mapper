@@ -373,7 +373,8 @@
                               <span x-show="ev.section">&middot;</span>
                               <span x-show="ev.section" x-text="ev.section"></span>
                               <span>&middot;</span>
-                              <span class="font-mono" x-text="'chunk ' + ev.chunk_index"></span>
+                              <span x-show="ev.chunk_index != null" class="font-mono" x-text="'chunk ' + ev.chunk_index"></span>
+                              <span x-show="ev.chunk_index == null" class="font-mono" x-text="'unattributed'"></span>
                             </div>
                           </div>
                         </template>

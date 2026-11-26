@@ -97,28 +97,30 @@ def _map_normalized_offsets(original: str, normalized: str, norm_start: int, nor
 
 def _locate_evidence(
     evidence_text: str,
-    chunk_index: int,
+    chunk_index: int | None,
     chunks: list[Chunk],
     fuzzy_threshold: float = 0.8,
 ) -> tuple[int, int, int, bool]:
     """Find evidence_text in chunks, return (chunk_index, start, end, is_fuzzy).
 
-    Strategy: try the hinted chunk_index first, then scan all chunks.
-    Returns (chunk_index, 0, 0, False) if not found anywhere.
+    Strategy: try the hinted chunk_index first (when there is one), then
+    scan all chunks. Returns (0, 0, 0, False) if not found anywhere; a
+    None hint (unattributed span) scans from the first chunk.
     """
-    if 0 <= chunk_index < len(chunks):
-        start, end, is_fuzzy = _find_span_in_chunk(evidence_text, chunks[chunk_index].text, fuzzy_threshold)
+    hint = chunk_index if chunk_index is not None else -1
+    if 0 <= hint < len(chunks):
+        start, end, is_fuzzy = _find_span_in_chunk(evidence_text, chunks[hint].text, fuzzy_threshold)
         if end > start:
-            return chunk_index, start, end, is_fuzzy
+            return hint, start, end, is_fuzzy
 
     for i, chunk in enumerate(chunks):
-        if i == chunk_index:
+        if i == hint:
             continue
         start, end, is_fuzzy = _find_span_in_chunk(evidence_text, chunk.text, fuzzy_threshold)
         if end > start:
             return i, start, end, is_fuzzy
 
-    return chunk_index if 0 <= chunk_index < len(chunks) else 0, 0, 0, False
+    return hint if 0 <= hint < len(chunks) else 0, 0, 0, False
 
 
 def _overlaps_existing(
@@ -188,7 +190,16 @@ def _locate_risk_evidence(
         for ev in risk.get("evidence", []):
             total_evidence += 1
             ev_text = ev.get("text", "")
-            hint_ci = ev.get("chunk_index", 0)
+            # The verification stage already located the quote; hint with
+            # where it really is (found_chunk_index) before the context
+            # chunk. A serialized not_found span carries found_chunk_index:
+            # null, which must fall back to chunk_index — dict.get's
+            # default only covers an absent key, not a null value, so the
+            # null case is checked explicitly. Output predating
+            # verification (neither key) scans from the first chunk.
+            hint_ci = ev.get("found_chunk_index")
+            if hint_ci is None:
+                hint_ci = ev.get("chunk_index", 0)
 
             ci, start, end, is_fuzzy = _locate_evidence(ev_text, hint_ci, chunks)
 

@@ -250,7 +250,9 @@ def _run_grounding_with_reverse_completion(monkeypatch, task_count):
     pipeline = _pipeline()
     gate = _ReverseGate(task_count)
 
-    def fake_ground_one(cr, chunks, client, model, records, passes, max_batch_size, context_text):
+    def fake_ground_one(
+        cr, chunks, client, model, records, passes, max_batch_size, context_text, context_source_windows=None
+    ):
         index = cr.chunk_index
         gate.enter(index)
         _record_grounding_call(
@@ -302,7 +304,9 @@ def test_run_grounding_without_collector_records_nothing(monkeypatch):
     task_count = 2
     pipeline = _pipeline()
 
-    def fake_ground_one(cr, chunks, client, model, records, passes, max_batch_size, context_text):
+    def fake_ground_one(
+        cr, chunks, client, model, records, passes, max_batch_size, context_text, context_source_windows=None
+    ):
         _record_grounding_call(
             records,
             chunk_index=cr.chunk_index,
@@ -400,7 +404,9 @@ def test_run_variant_grounding_numbers_records_in_task_order(monkeypatch):
     task_count = 8
     gate = _ReverseGate(task_count)
 
-    def fake_ground_variants_one(pm, chunks, variant_map, client, model, records, chunk_contexts):
+    def fake_ground_variants_one(
+        pm, chunks, variant_map, client, model, records, chunk_contexts, chunk_context_indices=None
+    ):
         index = int(pm.risk_id.split("-")[1])
         gate.enter(index)
         records.append(_record("ground-variant-001", stage="variant_grounding", chunk_index=index))

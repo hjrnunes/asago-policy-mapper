@@ -1365,3 +1365,71 @@ covered by unit tests instead.
 
 **Conclusion:** The review fixes change serialized state only in the
 intended places; the call sequence is unchanged.
+
+---
+
+## 2026-11-16: Evidence Quote Verification — Labels and Chunk Attribution on gemma4
+
+**Description:** Measured the effect of issue #152 part 1 on the full
+27-policy `risk-selected` battery. The change
+verifies every grounding quote against the real source chunks behind the
+context sent to the model (exact match first, then Unicode NFKC +
+punctuation straightening + whitespace collapse + lowercase; same document
+only), labels each evidence span `verified` / `normalized` / `not_found`,
+records `found_chunk_index` where the quote really is, and stops pinning
+unmatched group quotes to the first chunk of the group (`chunk_index: null`
+instead). Prompts are byte-for-byte unchanged; kept-risk logic is unchanged
+(not_found quotes still count as evidence).
+
+**MLflow:** disabled (`--no-mlflow`; no server configured for this run).
+
+**Runs:** this change `extract-runs/risk-selected_20261116_002133` (gemma-4-26b-a4b-it
+on the PR's endpoint, temperature 0); base comparison
+`risk-selected_20261115_143058` from the 2026-11-15 entry (code 2774ae0).
+
+**Verification shares (5,195 quotes):**
+
+| Path | Quotes | verified | normalized | not_found |
+|---|---:|---:|---:|---:|
+| chunk | 3,643 | 96.0% | 0.6% | 3.4% |
+| group | 694 | 97.3% | 0.1% | 2.6% |
+| variant | 858 | 96.6% | 0.0% | 3.4% |
+| **all** | **5,195** | **96.3%** | **0.5%** | **3.3%** |
+
+`not_found` quotes are genuine paraphrases, not window-scope misses: 0 of
+52 on dhs-gov appear anywhere in that document under the same
+normalization. An independent recheck (casefold-only substring plus
+`difflib.SequenceMatcher`, sharing no code with the pipeline's
+normalization) confirmed 0 of 52 appear whole — and found that all 52
+carry a contiguous sub-run of 40% or more of the quote: they are
+stitched summaries of the form "risk name — document sentence", whose
+document-sentence part is present verbatim. The `not_found` label is
+correct for whole-quote semantics; the stitching pattern is the dominant
+failure mode. The recheck originally ran ad hoc against the (since
+deleted) run directory; `scripts/verify_not_found.py` now implements the
+same comparison, parameterized over any run directory, so future checks
+are reproducible. `normalized` quotes are punctuation/whitespace variants
+(e.g. curly quotes in DOCX sources). Of the 5,025 found spans, 2,986
+(59.4%) sit in a different chunk than the context chunk — the neighbour
+windows catch most exact matches, and `found_chunk_index` now records that
+location. The 18 unattributed spans (group path, `chunk_index: null`) are
+exactly the 18 group `not_found` quotes.
+
+**Kept risks and F1:** 2,904 kept risk ids vs 2,923 in the base run;
+macro F1 0.673 vs 0.661 (mean abs per-policy Δ 0.035, max 0.093) — inside
+the same-code noise band measured on 2026-11-15 (mean 0.030–0.040, max
+0.130–0.132). Quote-tuple churn vs base 70.2%/70.4%, also inside the
+69.3–74.1% same-code band. The change touches no prompt, ranking or
+kept-risk logic, so the movement reads as endpoint noise, consistent with
+the snapshot-harness result that kept risks and calls are byte-identical
+on deterministic inputs.
+
+**Conclusion:** The verification labels are trustworthy enough to build
+on: 96.3% of quotes verify exactly, another 0.5% after normalization, and
+the 3.3% not_found share is concentrated in genuine paraphrase (risk-name
+or summary-style evidence, e.g. quoting "color" for a colour-based
+classification risk) rather than window misses. Chunk attribution shows
+real drift between context and quote location (59.4% neighbour-chunk
+matches), which the old output could not express. Whether to reject or
+downweight unverified quotes remains open (issue #145); this run provides
+the baseline shares for that decision.
