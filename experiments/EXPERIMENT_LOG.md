@@ -1370,8 +1370,8 @@ intended places; the call sequence is unchanged.
 
 ## 2026-11-16: Evidence Quote Verification — Labels and Chunk Attribution on gemma4
 
-**Description:** Measured the effect of issue #152 part 1 (bead
-asago-uzfb1.13) on the full 27-policy `risk-selected` battery. The change
+**Description:** Measured the effect of issue #152 part 1 on the full
+27-policy `risk-selected` battery. The change
 verifies every grounding quote against the real source chunks behind the
 context sent to the model (exact match first, then Unicode NFKC +
 punctuation straightening + whitespace collapse + lowercase; same document
@@ -1383,8 +1383,8 @@ instead). Prompts are byte-for-byte unchanged; kept-risk logic is unchanged
 
 **MLflow:** disabled (`--no-mlflow`; no server configured for this run).
 
-**Runs:** lane `extract-runs/risk-selected_20261116_002133` (gemma-4-26b-a4b-it
-on the gemma4-oc-65k endpoint, temperature 0); base comparison
+**Runs:** this change `extract-runs/risk-selected_20261116_002133` (gemma-4-26b-a4b-it
+on the PR's endpoint, temperature 0); base comparison
 `risk-selected_20261115_143058` from the 2026-11-15 entry (code 2774ae0).
 
 **Verification shares (5,195 quotes):**

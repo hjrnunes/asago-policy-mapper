@@ -1568,7 +1568,7 @@ def test_ground_variants_one_skips_unattributed_evidence():
         {"child-risk": ["encryption at rest is mandatory."]}
     )
 
-    # The unattributed span sorts first on the 150a tie-break key (higher
+    # The unattributed span sorts first on the tie-break key (higher
     # cross-encoder score wins), so the guard has to exclude it before
     # choosing the grounding context.
     parent = RiskMatch(
